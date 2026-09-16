@@ -11,9 +11,10 @@ else.
 composer require aisenseapi/aamio
 ```
 
-It is one client in several languages: what this one seals, `aamio-js` and
-`aamio-python` open, and the other way round. The test vectors are shared,
-and `tests/interop.py` proves it against the Python client.
+It is one client in several languages: what this one seals, `aamio-js`,
+`aamio-python`, `aamio-go`, `aamio-rust` and `aamio-java` open, and the other
+way round. The test vectors are shared, and `tests/interop.py` proves it
+against the Python client.
 
 ## A thread, start to finish
 
