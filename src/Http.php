@@ -14,9 +14,19 @@ final class Http
 {
     public const USER_AGENT = 'aamio-php/0.1.0';
 
+    /**
+     * A stand-in for the network, for tests: a callable taking (method, url,
+     * body, headers) and returning [status, body, headers]. Null in production.
+     * @var callable|null
+     */
+    public static $override = null;
+
     /** @return array{0:int,1:mixed,2:array<string,string>} */
     public static function call(string $method, string $url, ?string $body = null, array $headers = [], int $timeout = 40): array
     {
+        if (self::$override !== null) {
+            return (self::$override)($method, $url, $body, $headers);
+        }
         $handle = curl_init($url);
         $lines = [];
         foreach ($headers as $name => $value) {

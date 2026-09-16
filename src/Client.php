@@ -95,7 +95,7 @@ final class Client
 
         $plan = Gate::plan($this->gate($w));
         if ($plan['stop'] !== null) {
-            return ['status' => 0, 'body' => ['error' => $plan['stop'], 'fix' => 'Open an address whose conditions this client can meet, or update the client.'], 'sent' => null, 'work' => null, 'notes' => $plan['notes']];
+            return ['status' => 0, 'stopped' => true, 'body' => ['error' => $plan['stop'], 'fix' => 'Open an address whose conditions this client can meet, or update the client.'], 'sent' => null, 'work' => null, 'notes' => $plan['notes']];
         }
 
         $attempt = function (?int $bits) use ($w, $bytes, $contentType, $signing, $key): array {

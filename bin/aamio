@@ -1,0 +1,197 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * aamio on the command line, from PHP. The same commands as aamio-python's
+ * CLI, over the same home directory layout.
+ *
+ *   aamio [--home DIR] [--host URL] [--tags a,b] [--no-archive] <command> ...
+ *
+ *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
+ *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] | read [--wait N]
+ *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
+ *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO]
+ *   board find [--kind K] [--tags a,b] [--lang L] [--after N] [--wait N] [--min-work-bits N]
+ *   board tags | board answer POST TEXT | board replies [--post ID] [--wait N] | board withdraw POST
+ *   board channel KEY [--ttl N] [--reply-to W] [--note TEXT]
+ *   outbox pending | outbox retry [--id ID] | outbox forget ID | serve
+ */
+
+foreach ([__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php', __DIR__ . '/../tests/bootstrap.php'] as $autoload) {
+    if (is_file($autoload)) {
+        require $autoload;
+        break;
+    }
+}
+
+use Aamio\GateStop;
+use Aamio\McpServer;
+use Aamio\Runtime;
+use Aamio\SendFailed;
+
+function out(mixed $value): void
+{
+    fwrite(STDOUT, json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+}
+
+function fail(string $message, int $code = 1): never
+{
+    fwrite(STDERR, $message . "\n");
+    exit($code);
+}
+
+/** Splits argv into positionals and --options; an option followed by a value takes it, a bare flag is true. */
+function parse(array $argv, array $flags = []): array
+{
+    $positional = [];
+    $options = [];
+    for ($i = 0; $i < count($argv); $i++) {
+        $arg = $argv[$i];
+        if (str_starts_with($arg, '--')) {
+            $name = substr($arg, 2);
+            if (str_contains($name, '=')) {
+                [$name, $value] = explode('=', $name, 2);
+                $options[$name] = $value;
+            } elseif (in_array($name, $flags, true) || !isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--')) {
+                $options[$name] = true;
+            } else {
+                $options[$name] = $argv[++$i];
+            }
+        } else {
+            $positional[] = $arg;
+        }
+    }
+
+    return [$positional, $options];
+}
+
+function csv(?string $text): ?array
+{
+    if ($text === null || $text === '') {
+        return null;
+    }
+
+    return array_values(array_filter(array_map('trim', explode(',', $text)), static fn (string $t): bool => $t !== ''));
+}
+
+[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor']);
+$command = $args[0] ?? null;
+if ($command === null || in_array($command, ['help', '-h'], true)) {
+    fail(trim(preg_replace('/^ \* ?/m', '', (string) preg_replace('!^.*?/\*\*(.*?)\*/.*$!s', '$1', (string) file_get_contents(__FILE__)))), 0);
+}
+
+$runtime = new Runtime($opts['home'] ?? null, $opts['host'] ?? null, csv($opts['tags'] ?? null), !isset($opts['no-archive']), static fn (string $line) => fwrite(STDERR, $line . "\n"));
+
+try {
+    switch ($command) {
+        case 'init':
+            $runtime->ensureInbox();
+            $runtime->saveState();
+            out($runtime->whoami());
+            break;
+        case 'whoami':
+            out($runtime->whoami());
+            break;
+        case 'partner':
+            $action = $args[1] ?? '';
+            if ($action === 'add') {
+                $runtime->partnerAdd((string) ($args[2] ?? fail('partner add NAME KEY')), (string) ($args[3] ?? fail('partner add NAME KEY')));
+                out($runtime->partnerList());
+            } elseif ($action === 'list') {
+                out($runtime->partnerList());
+            } elseif ($action === 'remove') {
+                $runtime->partnerRemove((string) ($args[2] ?? fail('partner remove NAME')));
+                out($runtime->partnerList());
+            } else {
+                fail('partner add|list|remove');
+            }
+            break;
+        case 'lookup':
+            out($runtime->lookup(array_slice($args, 1) ?: null, (int) ($opts['wait'] ?? 0)));
+            break;
+        case 'send':
+            $data = isset($opts['data']) ? json_decode((string) $opts['data'], true, 512, JSON_THROW_ON_ERROR) : null;
+            out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), is_array($data) ? $data : null));
+            break;
+        case 'read':
+            out($runtime->read((int) ($opts['wait'] ?? 0)));
+            break;
+        case 'receipt':
+            out($runtime->receipt((string) ($opts['channel'] ?? 'inbox'), isset($opts['anchor'])));
+            break;
+        case 'channel':
+            $action = $args[1] ?? '';
+            if ($action === 'open') {
+                out($runtime->openChannel((string) ($args[2] ?? fail('channel open LABEL')), (int) ($opts['ttl'] ?? 600), csv($opts['allow'] ?? null)));
+            } elseif ($action === 'list') {
+                out($runtime->channelList());
+            } elseif ($action === 'close') {
+                out($runtime->closeChannel((string) ($args[2] ?? fail('channel close LABEL'))));
+            } else {
+                fail('channel open|list|close');
+            }
+            break;
+        case 'board':
+            $action = $args[1] ?? '';
+            switch ($action) {
+                case 'post':
+                    out($runtime->boardPost((string) ($args[2] ?? fail('board post KIND TITLE TEXT')), (string) ($args[3] ?? fail('board post KIND TITLE TEXT')), (string) ($args[4] ?? fail('board post KIND TITLE TEXT')), csv($opts['tags'] ?? null) ?? [], (int) ($opts['ttl'] ?? Runtime::BOARD_TTL), $opts['lang'] ?? null, $opts['deadline'] ?? null));
+                    break;
+                case 'find':
+                    out($runtime->boardFind($opts['kind'] ?? null, csv($opts['tags'] ?? null), $opts['lang'] ?? null, null, (int) ($opts['after'] ?? 0), (int) ($opts['wait'] ?? 0), (int) ($opts['min-work-bits'] ?? 0)));
+                    break;
+                case 'tags':
+                    out($runtime->boardTags());
+                    break;
+                case 'answer':
+                    out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT'))));
+                    break;
+                case 'replies':
+                    $wait = (int) ($opts['wait'] ?? 0);
+                    if ($wait > 0) {
+                        $runtime->read($wait);
+                    }
+                    out($runtime->boardReplies($opts['post'] ?? null));
+                    break;
+                case 'withdraw':
+                    out($runtime->boardWithdraw((string) ($args[2] ?? fail('board withdraw POST'))));
+                    break;
+                case 'channel':
+                    out($runtime->openChannelWith((string) ($args[2] ?? fail('board channel KEY')), (int) ($opts['ttl'] ?? 900), null, $opts['reply-to'] ?? null, $opts['note'] ?? null));
+                    break;
+                default:
+                    fail('board post|find|tags|answer|replies|withdraw|channel');
+            }
+            break;
+        case 'outbox':
+            $action = $args[1] ?? '';
+            if ($action === 'pending') {
+                out(['pending' => $runtime->outboxPending()]);
+            } elseif ($action === 'retry') {
+                out(['retried' => $runtime->outboxRetry($opts['id'] ?? null)]);
+            } elseif ($action === 'forget') {
+                out($runtime->outboxForget((string) ($args[2] ?? fail('outbox forget ID'))));
+            } else {
+                fail('outbox pending|retry|forget');
+            }
+            break;
+        case 'serve':
+            (new McpServer($runtime))->serve();
+            break;
+        default:
+            fail('unknown command: ' . $command . '. Run aamio help.');
+    }
+} catch (SendFailed $error) {
+    [$retryable, $fix] = Runtime::sendAdvice($error->outcome, $error->status);
+    out(['error' => $error->getMessage(), 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => $fix]);
+    exit(2);
+} catch (GateStop $error) {
+    out(['error' => $error->getMessage(), 'fix' => $error->fix]);
+    exit(2);
+} catch (\Throwable $error) {
+    fail($error->getMessage());
+} finally {
+    $runtime->close();
+}

@@ -22,8 +22,9 @@
   "autoload": {
     "psr-4": {"Aamio\\": "src/"}
   },
+  "bin": ["bin/aamio"],
   "scripts": {
-    "test": "php tests/run.php",
+    "test": ["php tests/run.php", "php tests/runtime.php"],
     "live": "php tests/live.php"
   },
   "minimum-stability": "stable"
