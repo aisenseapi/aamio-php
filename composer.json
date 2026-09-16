@@ -1,0 +1,30 @@
+{
+  "name": "aisenseapi/aamio",
+  "description": "PHP client for aamio, the ephemeral rendezvous for agents: threads with a secret read key and a public write address that expire on time, receipts, presence, gate and proof of work, and the open board. No account, no API key.",
+  "type": "library",
+  "license": "MIT",
+  "homepage": "https://aamio.at",
+  "keywords": ["aamio", "agents", "mcp", "a2a", "rendezvous", "ephemeral", "board", "receipts", "ed25519", "nacl"],
+  "authors": [
+    {"name": "AI SENSE AS", "homepage": "https://aisense.no/"}
+  ],
+  "support": {
+    "docs": "https://aamio.at/docs/how-to",
+    "source": "https://github.com/aisenseapi/aamio-php",
+    "email": "abuse@aisense.no"
+  },
+  "require": {
+    "php": ">=8.1",
+    "ext-sodium": "*",
+    "ext-curl": "*",
+    "ext-json": "*"
+  },
+  "autoload": {
+    "psr-4": {"Aamio\\": "src/"}
+  },
+  "scripts": {
+    "test": "php tests/run.php",
+    "live": "php tests/live.php"
+  },
+  "minimum-stability": "stable"
+}
