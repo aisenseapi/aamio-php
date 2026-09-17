@@ -32,6 +32,16 @@ final class Runtime
     /** Only the spellings seen in the wild, and only for an answer to a post. */
     private const ANSWER_ALIASES = ['post' => ['post_id', 'postId'], 'reply_to' => ['replyTo', 'w', 'reply_address'], 'text' => ['reply', 'message']];
 
+    /**
+     * Files a runtime writes back, and the JSON each holds. One that is there
+     * and cannot be read stops the runtime before anything is saved over it: a
+     * save is how a broken file becomes a lost one, with the channels,
+     * partners or scope keys in it.
+     */
+    private const KEPT_FILES = ['partners.json' => 'list', 'scopes.json' => 'list', 'state.json' => 'object', 'outbox.json' => 'object', 'effects.json' => 'object'];
+
+    private const SCOPE_NAME = '/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/D';
+
     public readonly string $home;
     public readonly string $host;
     public readonly Keys $keys;
@@ -43,6 +53,10 @@ final class Runtime
     public array $tags;
     /** @var array<int, array{name:string,key:string}> */
     public array $partners;
+    /** @var array<int, array{name:string,key:?string,address:string}> scopes by name; the keys stay in scopes.json */
+    public array $scopes;
+    /** @var array<int, mixed> entries of scopes.json this runtime cannot use, written back as they were */
+    private array $scopesAside = [];
     /** @var array<string,string> write address => partner key */
     public array $peers;
     /** @var array<string, Channel> */
@@ -71,11 +85,22 @@ final class Runtime
             mkdir($this->home . '/archive', 0700, true);
         }
         $this->takeLock();
+        try {
+            $this->load($tags);
+        } catch (\Throwable $error) {
+            $this->close();
+            throw $error;
+        }
+    }
+
+    private function load(?array $tags): void
+    {
         $this->keys = $this->loadOrCreateKeys();
         $this->client = new Client($this->host, $this->keys);
         $this->board = new Board($this->client, getenv('AAMIO_BOARD') ?: Hosts::DEFAULT_BOARD);
         $this->verifyum = rtrim(getenv('AAMIO_VERIFYUM') ?: Hosts::VERIFYUM_MCP, '/');
         $this->partners = array_values(array_filter((array) $this->loadJson('partners.json', []), static fn ($p) => is_array($p) && isset($p['name'], $p['key'])));
+        [$this->scopes, $this->scopesAside] = $this->usableScopes((array) $this->loadJson('scopes.json', [], false));
         $state = (array) $this->loadJson('state.json', []);
         $envTags = array_values(array_filter(explode(',', (string) (getenv('AAMIO_TAGS') ?: ''))));
         $this->tags = $tags ?? ((array) ($state['tags'] ?? []) ?: $envTags);
@@ -122,24 +147,63 @@ final class Runtime
         return $this->home . DIRECTORY_SEPARATOR . $name;
     }
 
-    private function loadJson(string $name, mixed $default): mixed
+    /**
+     * What a file holds, or $default when it is not there or empty. A file in
+     * KEPT_FILES that is there and cannot be read, or holds something other
+     * than the list or object it should, throws instead. $assoc false keeps
+     * objects as objects, so they are written back exactly as they were.
+     */
+    private function loadJson(string $name, mixed $default, bool $assoc = true): mixed
     {
-        $text = @file_get_contents($this->path($name));
-        if ($text === false || $text === '') {
+        $path = $this->path($name);
+        $shape = self::KEPT_FILES[$name] ?? null;
+        if (!file_exists($path)) {
             return $default;
         }
-        $decoded = json_decode($text, true);
+        $text = @file_get_contents($path);
+        if ($text === false || trim($text) === '') {
+            if ($text === false && $shape !== null) {
+                throw new \RuntimeException($this->unreadable($name, 'it would not open'));
+            }
 
-        return json_last_error() === JSON_ERROR_NONE ? $decoded : $default;
+            return $default;
+        }
+        $raw = json_decode($text);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            if ($shape === null) {
+                return $default;
+            }
+            throw new \RuntimeException($this->unreadable($name, 'not UTF-8 JSON'));
+        }
+        if ($shape !== null && ($shape === 'list' ? !is_array($raw) : !$raw instanceof \stdClass)) {
+            throw new \RuntimeException($this->unreadable($name, 'not a JSON ' . $shape));
+        }
+
+        return $assoc ? json_decode($text, true) : $raw;
+    }
+
+    private function unreadable(string $name, string $why): string
+    {
+        return sprintf('%s could not be read (%s), so this runtime stops here rather than save over it. Repair the file, or move it away to start without what was in it.', $this->path($name), $why);
     }
 
     private function saveJson(string $name, mixed $value): void
     {
         $path = $this->path($name);
         $tmp = $path . '.tmp';
-        file_put_contents($tmp, json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n");
+        // Private from the first byte, not made so once it has been written.
+        $mask = umask(0077);
+        try {
+            $written = @file_put_contents($tmp, json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n");
+        } finally {
+            umask($mask);
+        }
         @chmod($tmp, 0600);
-        rename($tmp, $path);
+        // A write that failed says so. Quietly carrying on, a scope was reported
+        // kept that was never on disk.
+        if ($written === false || !@rename($tmp, $path)) {
+            throw new \RuntimeException('could not write ' . $path);
+        }
     }
 
     private function takeLock(): void
@@ -150,7 +214,12 @@ final class Runtime
         }
         $held = $this->loadJson('lock', null);
         if (is_array($held) && is_int($held['pid'] ?? null) && $held['pid'] !== getmypid() && self::pidAlive($held['pid'])) {
-            throw new \RuntimeException(sprintf('another aamio (pid %d) is using %s. Stop it, or use a different AAMIO_HOME.', $held['pid'], $this->home));
+            // The lock is written after its owner started. A process that
+            // started later got the pid after the owner was gone.
+            $started = is_int($held['at'] ?? null) || is_float($held['at'] ?? null) ? self::startedAt($held['pid']) : null;
+            if ($started === null || $started <= $held['at'] + 2) {
+                throw new \RuntimeException(sprintf('another aamio (pid %d) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, the one that took the lock stopped without letting go of it: delete %s and start again.', $held['pid'], $this->home, $this->path('lock')));
+            }
         }
         $this->saveJson('lock', ['pid' => getmypid(), 'at' => time(), 'host' => $this->host]);
         self::$lockedHomes[$real] = true;
@@ -159,7 +228,8 @@ final class Runtime
     private static function pidAlive(int $pid): bool
     {
         if (function_exists('posix_kill')) {
-            return @posix_kill($pid, 0);
+            // Refused is not gone: EPERM is a process that belongs to someone else.
+            return @posix_kill($pid, 0) || posix_get_last_error() === 1;
         }
         if (is_dir('/proc')) {
             return is_dir('/proc/' . $pid);
@@ -173,16 +243,53 @@ final class Runtime
         return true;
     }
 
+    /** When the process with this pid started, in Unix seconds, where /proc says so, and null elsewhere. */
+    private static function startedAt(int $pid): ?float
+    {
+        $stat = @file_get_contents('/proc/' . $pid . '/stat');
+        $boot = @file_get_contents('/proc/stat');
+        $close = is_string($stat) ? strrpos($stat, ')') : false;
+        if ($close === false || !is_string($boot) || preg_match('/^btime (\d+)$/m', $boot, $found) !== 1) {
+            return null;
+        }
+        $fields = preg_split('/\s+/', trim(substr($stat, $close + 1)));
+        if (!isset($fields[19]) || !ctype_digit($fields[19])) {
+            return null;
+        }
+        $ticks = function_exists('posix_sysconf') && defined('POSIX_SC_CLK_TCK') ? (int) posix_sysconf(POSIX_SC_CLK_TCK) : 100;
+
+        return (int) $found[1] + (int) $fields[19] / max(1, $ticks);
+    }
+
     private function loadOrCreateKeys(): Keys
     {
         $path = $this->path('key');
-        $text = @file_get_contents($path);
-        if (is_string($text) && preg_match('/^[0-9a-f]{64}$/', trim($text))) {
-            return Keys::fromSeedHex(trim($text));
+        if (file_exists($path)) {
+            $text = @file_get_contents($path);
+            if ($text === false) {
+                throw new \RuntimeException($this->unreadable('key', 'it would not open'));
+            }
+            if (trim($text) !== '') {
+                // A new key over it would be a new identity, and the old one
+                // gone for good. Partners know this runtime by that key.
+                if (preg_match('/^[0-9a-f]{64}$/D', trim($text)) !== 1) {
+                    throw new \RuntimeException($this->unreadable('key', 'not a 64 character hex seed'));
+                }
+
+                return Keys::fromSeedHex(trim($text));
+            }
         }
         $keys = Keys::generate();
-        file_put_contents($path, bin2hex($keys->seed()) . "\n");
+        $mask = umask(0077);
+        try {
+            $written = @file_put_contents($path, bin2hex($keys->seed()) . "\n");
+        } finally {
+            umask($mask);
+        }
         @chmod($path, 0600);
+        if ($written === false) {
+            throw new \RuntimeException('could not write ' . $path);
+        }
 
         return $keys;
     }
@@ -290,6 +397,264 @@ final class Runtime
     public function nameForKey(?string $key): ?string
     {
         return $this->partnerByKey($key)['name'] ?? null;
+    }
+
+    // ------------------------------------------------------------- scopes --
+    //
+    // A scope keeps board posts unlisted for a group. Here each one has a name,
+    // and the name is all a caller passes or sees. The key is the read
+    // capability: it stays in scopes.json, and scopeShare hands it to a partner
+    // sealed, so no model has to hold it. The address is the write capability
+    // and is no secret. Unlisted is not private.
+
+    /**
+     * The entries of scopes.json this runtime can use, and the rest. The rest
+     * are never dropped. They go back into the file on every save as they
+     * were, so a hand edit with a typo is there to be corrected rather than
+     * gone with the key in it.
+     *
+     * @param array<int, mixed> $entries as decoded with objects kept as objects
+     */
+    private function usableScopes(array $entries): array
+    {
+        $usable = [];
+        $aside = [];
+        $names = [];
+        foreach ($entries as $entry) {
+            $scope = $entry instanceof \stdClass ? json_decode((string) json_encode($entry), true) : null;
+            $key = is_array($scope) ? ($scope['key'] ?? null) : null;
+            if (is_array($scope)
+                && is_string($scope['name'] ?? null) && preg_match(self::SCOPE_NAME, $scope['name']) === 1
+                && !isset($names[strtolower($scope['name'])])
+                && is_string($scope['address'] ?? null) && Address::isW($scope['address'])
+                && ($key === null || (is_string($key) && Address::isScopeKey($key) && Address::scope($key) === $scope['address']))) {
+                $usable[] = $scope;
+                $names[strtolower($scope['name'])] = true;
+            } else {
+                $aside[] = $entry;
+            }
+        }
+        if ($aside !== []) {
+            ($this->log)(sprintf('scopes.json: %d entries are not scopes this runtime can use, and stay in the file as they are', count($aside)));
+        }
+
+        return [$usable, $aside];
+    }
+
+    /** Writes the scopes, and only then holds them: a save that fails changes nothing. */
+    private function saveScopes(array $scopes): void
+    {
+        $this->saveJson('scopes.json', [...$scopes, ...$this->scopesAside]);
+        $this->scopes = $scopes;
+    }
+
+    private function scopeIndex(string $name): ?int
+    {
+        foreach ($this->scopes as $i => $scope) {
+            if (strtolower($scope['name']) === strtolower($name)) {
+                return $i;
+            }
+        }
+
+        return null;
+    }
+
+    private function scopeNamed(string $name): array
+    {
+        $i = $this->scopeIndex($name);
+        if ($i === null) {
+            throw new \RuntimeException('no scope called ' . $name . ' here. The scope list shows the ones this runtime holds');
+        }
+
+        return $this->scopes[$i];
+    }
+
+    private static function scopeView(array $scope): array
+    {
+        return ['name' => $scope['name'], 'address' => $scope['address'], 'can_read' => !empty($scope['key'])];
+    }
+
+    private static function scopeNameOk(mixed $name): string
+    {
+        if (!is_string($name) || preg_match(self::SCOPE_NAME, $name) !== 1) {
+            throw new \InvalidArgumentException('a scope name is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit');
+        }
+
+        return $name;
+    }
+
+    /** A new scope, its key from the CSPRNG. The key stays here. */
+    public function scopeNew(mixed $name): array
+    {
+        $name = self::scopeNameOk($name);
+        if ($this->scopeIndex($name) !== null) {
+            throw new \InvalidArgumentException('there is a scope called ' . $name . ' already');
+        }
+        $key = Address::newScopeKey();
+        $scope = ['name' => $name, 'key' => $key, 'address' => Address::scope($key)];
+        $this->saveScopes([...$this->scopes, $scope]);
+
+        return self::scopeView($scope);
+    }
+
+    /** A scope made elsewhere: the key, to read and post, or the address, to post only. */
+    public function scopeAdd(mixed $name, mixed $key = null, mixed $address = null): array
+    {
+        $name = self::scopeNameOk($name);
+        if ($key === null && $address === null) {
+            throw new \InvalidArgumentException('give the key, to read and post, or the address, to post only');
+        }
+        if ($key !== null && (!is_string($key) || !Address::isScopeKey($key))) {
+            throw new \InvalidArgumentException('a scope key is 26 to 64 characters of a-z and 0-9. The 20 character address goes in address');
+        }
+        if ($address !== null && (!is_string($address) || !Address::isW($address))) {
+            throw new \InvalidArgumentException('a scope address is the 20 characters of a-z and 2-7 that go on a post');
+        }
+        $derived = $key !== null ? Address::scope($key) : $address;
+        if ($address !== null && $derived !== $address) {
+            throw new \InvalidArgumentException('that key does not give that address, so one of the two is wrong');
+        }
+        $index = $this->scopeIndex($name);
+        if ($index !== null && $this->scopes[$index]['address'] !== $derived) {
+            throw new \InvalidArgumentException('there is a scope called ' . $name . ' already, with another address. Remove it or choose another name');
+        }
+        foreach ($index === null ? $this->scopes : [] as $i => $scope) {
+            if ($scope['address'] === $derived) {
+                $index = $i;
+                break;
+            }
+        }
+        if ($index === null) {
+            $held = ['name' => $name, 'key' => $key, 'address' => $derived];
+            $this->saveScopes([...$this->scopes, $held]);
+        } else {
+            $held = $this->scopes[$index];
+            if ($key !== null && empty($held['key'])) {
+                // Held to post only until now. The key adds reading.
+                $held['key'] = $key;
+                $scopes = $this->scopes;
+                $scopes[$index] = $held;
+                $this->saveScopes($scopes);
+            }
+        }
+
+        return self::scopeView($held);
+    }
+
+    public function scopeList(): array
+    {
+        return array_map(static fn (array $scope): array => self::scopeView($scope), $this->scopes);
+    }
+
+    public function scopeRemove(string $name): array
+    {
+        $scope = $this->scopeNamed($name);
+        $scopes = $this->scopes;
+        unset($scopes[$this->scopeIndex($name)]);
+        $this->saveScopes(array_values($scopes));
+
+        return ['removed' => $scope['name']];
+    }
+
+    /** The key itself, for a person to pass on by hand. The MCP server never calls this. */
+    public function scopeKey(string $name): array
+    {
+        $scope = $this->scopeNamed($name);
+        if (empty($scope['key'])) {
+            throw new \InvalidArgumentException('scope ' . $scope['name'] . ' is held to post only, so there is no key here');
+        }
+
+        return ['name' => $scope['name'], 'key' => $scope['key'], 'address' => $scope['address']];
+    }
+
+    /**
+     * Hand a scope to a partner in a sealed message. read gives the key, write
+     * only the address. Only to a partner in the address book, by name or key.
+     * An address is learned from the board and from messages, so it can be
+     * anyone's, and the key would be sealed to whoever it was learned from: a
+     * post asking for a scope would get it.
+     */
+    public function scopeShare(string $name, string $to, mixed $access): array
+    {
+        $scope = $this->scopeNamed($name);
+        if ($access !== 'read' && $access !== 'write') {
+            throw new \InvalidArgumentException('access is read, which gives the key to read and post, or write, which gives the address to post only');
+        }
+        if ($access === 'read' && empty($scope['key'])) {
+            throw new \InvalidArgumentException('scope ' . $scope['name'] . ' is held to post only, so it can only be shared with access write');
+        }
+        $partner = Codec::isKey($to) ? $this->partnerByKey($to) : $this->partnerByName($to);
+        if ($partner === null) {
+            throw new \InvalidArgumentException('a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone\'s');
+        }
+        $share = $access === 'read' ? ['name' => $scope['name'], 'key' => $scope['key']] : ['name' => $scope['name'], 'address' => $scope['address']];
+        [$w, $key] = $this->addressFor($partner['name']);
+        // The archive keeps what was shared and with whom, never the key.
+        $sent = $this->sendSealed($w, $key, $partner['name'], sprintf('Scope %s, shared to %s.', $scope['name'], $access === 'read' ? 'read and post' : 'post only'), ['aamio_scope' => $share], null, ['aamio_scope' => ['name' => $scope['name'], 'access' => $access]]);
+
+        return $sent + ['scope' => $scope['name'], 'access' => $access];
+    }
+
+    /**
+     * The name a scope from a partner is kept under: the partner's name, a dot
+     * and the scope's. A partner names its own scopes, and a name is where
+     * posts go. Kept under the bare name, a partner could take review before
+     * review was made here, and the posts meant for it would go where that
+     * partner reads.
+     */
+    private function sharedScopeName(array $partner, mixed $name): string
+    {
+        $name = self::scopeNameOk($name);
+        $prefix = substr(trim((string) preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) $partner['name']), '._-'), 0, 24);
+        if ($prefix === '') {
+            $prefix = Keys::hashPrefixOf((string) $partner['key']);
+        }
+
+        return substr($prefix . '.' . $name, 0, 64);
+    }
+
+    /**
+     * A scope in an incoming message. Kept only when it came sealed and
+     * verified from a partner in the address book, and not seen before. The
+     * key is taken out of the message either way, and aamio_scope is replaced
+     * whatever it holds and wherever it sits, so whoever reads the message
+     * never sees a key in it.
+     */
+    private function takeScopeShare(array &$entry): void
+    {
+        if (!is_array($entry['body'] ?? null)) {
+            return;
+        }
+        if (array_key_exists('aamio_scope', $entry['body'])) {
+            $entry['body']['aamio_scope'] = ['kept' => false, 'note' => 'not kept: a scope is shared in data.aamio_scope'];
+        }
+        if (!is_array($entry['body']['data'] ?? null) || !array_key_exists('aamio_scope', $entry['body']['data'])) {
+            return;
+        }
+        $share = $entry['body']['data']['aamio_scope'];
+        if (!is_array($share) || ($share !== [] && array_is_list($share))) {
+            $entry['body']['data']['aamio_scope'] = ['kept' => false, 'note' => 'not kept: data.aamio_scope is an object with name, and key or address'];
+
+            return;
+        }
+        $key = $share['key'] ?? null;
+        $view = ['shared_as' => is_string($share['name'] ?? null) ? $share['name'] : null, 'can_read' => $key !== null, 'kept' => false];
+        $partner = is_string($entry['from_key'] ?? null) && $entry['from_key'] !== '' ? $this->partnerByKey($entry['from_key']) : null;
+        if (!(($entry['verified'] ?? false) && ($entry['encrypted'] ?? false) && ($entry['known_contact'] ?? false) && $partner !== null)) {
+            $view['note'] = 'not kept: a scope is only taken when it comes sealed from a partner in your address book';
+        } elseif ($entry['replay'] ?? false) {
+            $view['note'] = 'not kept again: this message arrived before, and a scope removed since stays removed';
+        } else {
+            try {
+                $local = $this->sharedScopeName($partner, $share['name'] ?? null);
+                $view = array_merge($view, $this->scopeAdd($local, $key, $key === null ? ($share['address'] ?? null) : null), ['kept' => true]);
+            } catch (\Throwable $error) {
+                // This share alone, and nothing held that was not saved. The
+                // rest of the messages are delivered either way.
+                $view['note'] = 'not kept: ' . $error->getMessage();
+            }
+        }
+        $entry['body']['data']['aamio_scope'] = $view;
     }
 
     // -------------------------------------------------------------- inbox --
@@ -408,8 +773,11 @@ final class Runtime
         return $channel;
     }
 
-    public function boardPost(string $kind, string $title, string $text, ?array $tags = null, int $ttl = self::BOARD_TTL, ?string $lang = null, ?string $deadline = null): array
+    /** With $scope, the name of a scope held here, the post is unlisted: only a find with that scope's key returns it. */
+    public function boardPost(string $kind, string $title, string $text, ?array $tags = null, int $ttl = self::BOARD_TTL, ?string $lang = null, ?string $deadline = null, ?string $scope = null): array
     {
+        // Before the inbox is opened, so a name that is not here costs nothing.
+        $held = $scope !== null ? $this->scopeNamed($scope) : null;
         $inbox = $this->ensureBoardInbox($ttl + 60);
         $post = ['kind' => $kind, 'title' => $title, 'text' => $text, 'tags' => array_values($tags ?? []), 'w' => $inbox->w, 'ttl' => $ttl];
         if ($lang !== null) {
@@ -417,6 +785,10 @@ final class Runtime
         }
         if ($deadline !== null) {
             $post['deadline'] = $deadline;
+        }
+        if ($held !== null) {
+            // Inside the signed body, so nobody can post the same bytes without it.
+            $post['scope'] = $held['address'];
         }
         $bytes = Codec::json($post);
         $headers = ['Content-Type' => 'application/json', 'X-Key' => $this->keys->public, 'X-Sig' => $this->keys->sign(Keys::boardSigningInput($this->keys->public, $bytes))];
@@ -430,12 +802,28 @@ final class Runtime
             throw new \RuntimeException('post failed: ' . $status . ' ' . json_encode($answer));
         }
 
-        return ['id' => $answer['id'], 'kind' => $kind, 'title' => $title, 'expire_at' => $answer['expire_at'] ?? null, 'work_bits' => $answer['work_bits'] ?? $bits, 'reply_inbox' => $inbox->w, 'inbox_expires_at' => $inbox->expireAt, 'replies_arrive_on' => 'board'];
+        $posted = ['id' => $answer['id'], 'kind' => $kind, 'title' => $title, 'expire_at' => $answer['expire_at'] ?? null, 'work_bits' => $answer['work_bits'] ?? $bits, 'reply_inbox' => $inbox->w, 'inbox_expires_at' => $inbox->expireAt, 'replies_arrive_on' => 'board'];
+        if ($held !== null) {
+            $posted['scope'] = $held['name'];
+        }
+
+        return $posted;
     }
 
-    public function boardFind(?string $kind = null, ?array $tags = null, ?string $lang = null, ?string $key = null, int $after = 0, int $wait = 0, int $minWorkBits = 0): array
+    /** With $scope, the name of a scope held here with its key, the find reads that scope instead of the public board. */
+    public function boardFind(?string $kind = null, ?array $tags = null, ?string $lang = null, ?string $key = null, int $after = 0, int $wait = 0, int $minWorkBits = 0, ?string $scope = null): array
     {
-        $found = $this->board->find($kind, $tags ?? [], $lang, $key, $after, $wait, $minWorkBits);
+        $held = $scope !== null ? $this->scopeNamed($scope) : null;
+        if ($held !== null && empty($held['key'])) {
+            throw new \InvalidArgumentException('scope ' . $held['name'] . ' is held to post only. Reading it takes the key, which a partner can share with access read');
+        }
+        try {
+            // In the body and nowhere else. A board older than scopes answers
+            // 400 to the field, so it never reads the public board instead.
+            $found = $this->board->find($kind, $tags ?? [], $lang, $key, $after, $wait, $minWorkBits, $held['key'] ?? null);
+        } catch (\UnexpectedValueException) {
+            throw new \RuntimeException('the board did not say it read scope ' . $held['name'] . ', so these posts are not shown');
+        }
         if ($found['status'] !== 200) {
             throw new \RuntimeException('board find failed: ' . $found['status'] . ' ' . json_encode($found['body']));
         }
@@ -444,8 +832,12 @@ final class Runtime
                 $this->peers[$post['w']] = $post['key'];
             }
         }
+        $body = $found['body'];
+        if ($held !== null) {
+            $body['scope_name'] = $held['name'];
+        }
 
-        return $found['body'];
+        return $body;
     }
 
     public function boardGet(string $postId): ?array
@@ -473,13 +865,33 @@ final class Runtime
         return ['post' => $postId, 'status' => $done['status'], 'withdrawn' => $done['status'] === 200];
     }
 
-    /** Answer a post, sealed to the poster's key and signed by ours, carrying the post id and our reply address. */
-    public function boardAnswer(array|string $post, ?string $text = null, ?array $data = null): array
+    /**
+     * Answer a post, sealed to the poster's key and signed by ours, carrying the post id and our reply address.
+     * A post in a scope is never served by id alone, so with $scope it is looked up in that scope.
+     */
+    public function boardAnswer(array|string $post, ?string $text = null, ?array $data = null, ?string $scope = null): array
     {
         if (is_string($post)) {
-            $fetched = $this->boardGet($post);
+            $postId = $post;
+            $fetched = $scope === null ? $this->boardGet($postId) : null;
+            // A page holds up to 200 posts, and a scope can hold more. The
+            // cursor goes on until the post turns up or the pages run out.
+            $after = 0;
+            for ($page = 0; $scope !== null && $page < 50; $page++) {
+                $found = $this->boardFind(after: $after, scope: $scope);
+                foreach ((array) ($found['posts'] ?? []) as $candidate) {
+                    if (($candidate['id'] ?? null) === $postId) {
+                        $fetched = $candidate;
+                        break 2;
+                    }
+                }
+                if (($found['posts'] ?? []) === [] || (int) ($found['next'] ?? 0) <= $after) {
+                    break;
+                }
+                $after = (int) $found['next'];
+            }
             if ($fetched === null) {
-                throw new \RuntimeException('no live post with that id');
+                throw new \RuntimeException('no live post with that id' . ($scope !== null ? ' in scope ' . $scope : ". A post in a scope is found with the scope's name"));
             }
             $post = $fetched;
         }
@@ -674,14 +1086,26 @@ final class Runtime
             $to = $partner['name'];
         }
         if (Address::isW($to)) {
-            $w = $to;
-            $key = $this->peers[$w] ?? null;
+            $key = $this->peers[$to] ?? null;
             if ($key === null) {
-                throw new \RuntimeException('no key known for address ' . $w . '; look the partner up or reply to a message');
+                throw new \RuntimeException('no key known for address ' . $to . '; look the partner up or reply to a message');
             }
-        } else {
-            [$w, $key] = $this->addressFor($to);
+
+            return $this->sendSealed($to, $key, null, $text, $data, $replyTo);
         }
+        [$w, $key] = $this->addressFor($to);
+
+        return $this->sendSealed($w, $key, $to, $text, $data, $replyTo);
+    }
+
+    /**
+     * One message sealed to $key and written to $w. $partner is the name
+     * presence is asked again with when that address has gone, and null for
+     * an address given as it is. $archivedData stands in for $data in the
+     * archive, for a message carrying what no file should.
+     */
+    private function sendSealed(string $w, string $key, ?string $partner, ?string $text = null, ?array $data = null, ?string $replyTo = null, ?array $archivedData = null): array
+    {
         // What the inbox asks of writers is read before anything is stored.
         $plan = Gate::plan($this->gateFor($w));
         if ($plan['stop'] !== null) {
@@ -699,15 +1123,16 @@ final class Runtime
         $envelope = $this->keys->seal($key, $plaintext);
         $entry = $this->outboxAdd($w, $key, $envelope, $body);
         [$status, $result] = $this->deliver($entry);
-        if (in_array($status, [404, 410], true) && $to !== $w) {
+        if (in_array($status, [404, 410], true) && $partner !== null) {
             // The partner may have renewed its inbox. Ask presence again, once.
-            [$w, $key] = $this->addressFor($to);
+            [$w, $key] = $this->addressFor($partner);
             $envelope = $this->keys->seal($key, $plaintext);
             $entry = $this->outboxAdd($w, $key, $envelope, $body, $entry['id']);
             [$status, $result] = $this->deliver($entry);
         }
         $entry = $this->outbox[$entry['id']];
-        $record = ['kind' => 'sent', 'at' => time(), 'to' => $this->nameForKey($key) ?? $key, 'w' => $entry['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $body];
+        $archived = $archivedData === null ? $body : ['data' => $archivedData] + $body;
+        $record = ['kind' => 'sent', 'at' => time(), 'to' => $this->nameForKey($key) ?? $key, 'w' => $entry['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $archived];
         $this->archive('sent', $record);
         if ($status !== 201) {
             throw new SendFailed($entry['status'], $entry['id'], $status, $result);
@@ -991,6 +1416,9 @@ final class Runtime
             }
             $entry['body'] = $body;
             $entry += $meta;
+            // Before the message is kept, archived or shown: a scope key in it
+            // goes to scopes.json or nowhere, never to the reader.
+            $this->takeScopeShare($entry);
             if (is_array($body) && is_string($body['reply_to'] ?? null) && $from) {
                 $this->peers[$body['reply_to']] = $from;
             }

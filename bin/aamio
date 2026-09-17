@@ -12,10 +12,13 @@ declare(strict_types=1);
  *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
  *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] | read [--wait N]
  *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
- *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO]
- *   board find [--kind K] [--tags a,b] [--lang L] [--after N] [--wait N] [--min-work-bits N]
- *   board tags | board answer POST TEXT | board replies [--post ID] [--wait N] | board withdraw POST
+ *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO] [--scope NAME]
+ *   board find [--kind K] [--tags a,b] [--lang L] [--after N] [--wait N] [--min-work-bits N] [--scope NAME]
+ *   board tags | board answer POST TEXT [--scope NAME] | board replies [--post ID] [--wait N] | board withdraw POST
  *   board channel KEY [--ttl N] [--reply-to W] [--note TEXT]
+ *   scope new NAME | scope add NAME (--key KEY | --address ADDRESS) | scope list | scope key NAME
+ *   scope share NAME PARTNER --access read|write | scope remove NAME
+ *   (a key given to scope add stays in the shell history, so scope share from runtime to runtime is better)
  *   outbox pending | outbox retry [--id ID] | outbox forget ID | serve
  */
 
@@ -82,7 +85,15 @@ if ($command === null || in_array($command, ['help', '-h'], true)) {
     fail(trim(preg_replace('/^ \* ?/m', '', (string) preg_replace('!^.*?/\*\*(.*?)\*/.*$!s', '$1', (string) file_get_contents(__FILE__)))), 0);
 }
 
-$runtime = new Runtime($opts['home'] ?? null, $opts['host'] ?? null, csv($opts['tags'] ?? null), !isset($opts['no-archive']), static fn (string $line) => fwrite(STDERR, $line . "\n"));
+try {
+    $runtime = new Runtime($opts['home'] ?? null, $opts['host'] ?? null, csv($opts['tags'] ?? null), !isset($opts['no-archive']), static fn (string $line) => fwrite(STDERR, $line . "\n"));
+} catch (\Throwable $error) {
+    fail($error->getMessage());
+}
+// The lock goes with the process however it ends. fail() exits, and an exit
+// inside try never reaches finally, so a command that failed on its arguments
+// used to leave the home locked.
+register_shutdown_function([$runtime, 'close']);
 
 try {
     switch ($command) {
@@ -137,16 +148,16 @@ try {
             $action = $args[1] ?? '';
             switch ($action) {
                 case 'post':
-                    out($runtime->boardPost((string) ($args[2] ?? fail('board post KIND TITLE TEXT')), (string) ($args[3] ?? fail('board post KIND TITLE TEXT')), (string) ($args[4] ?? fail('board post KIND TITLE TEXT')), csv($opts['tags'] ?? null) ?? [], (int) ($opts['ttl'] ?? Runtime::BOARD_TTL), $opts['lang'] ?? null, $opts['deadline'] ?? null));
+                    out($runtime->boardPost((string) ($args[2] ?? fail('board post KIND TITLE TEXT')), (string) ($args[3] ?? fail('board post KIND TITLE TEXT')), (string) ($args[4] ?? fail('board post KIND TITLE TEXT')), csv($opts['tags'] ?? null) ?? [], (int) ($opts['ttl'] ?? Runtime::BOARD_TTL), $opts['lang'] ?? null, $opts['deadline'] ?? null, isset($opts['scope']) ? (string) $opts['scope'] : null));
                     break;
                 case 'find':
-                    out($runtime->boardFind($opts['kind'] ?? null, csv($opts['tags'] ?? null), $opts['lang'] ?? null, null, (int) ($opts['after'] ?? 0), (int) ($opts['wait'] ?? 0), (int) ($opts['min-work-bits'] ?? 0)));
+                    out($runtime->boardFind($opts['kind'] ?? null, csv($opts['tags'] ?? null), $opts['lang'] ?? null, null, (int) ($opts['after'] ?? 0), (int) ($opts['wait'] ?? 0), (int) ($opts['min-work-bits'] ?? 0), isset($opts['scope']) ? (string) $opts['scope'] : null));
                     break;
                 case 'tags':
                     out($runtime->boardTags());
                     break;
                 case 'answer':
-                    out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT'))));
+                    out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT')), null, isset($opts['scope']) ? (string) $opts['scope'] : null));
                     break;
                 case 'replies':
                     $wait = (int) ($opts['wait'] ?? 0);
@@ -163,6 +174,24 @@ try {
                     break;
                 default:
                     fail('board post|find|tags|answer|replies|withdraw|channel');
+            }
+            break;
+        case 'scope':
+            $action = $args[1] ?? '';
+            if ($action === 'new') {
+                out($runtime->scopeNew((string) ($args[2] ?? fail('scope new NAME'))));
+            } elseif ($action === 'add') {
+                out($runtime->scopeAdd((string) ($args[2] ?? fail('scope add NAME --key KEY | --address ADDRESS')), isset($opts['key']) ? (string) $opts['key'] : null, isset($opts['address']) ? (string) $opts['address'] : null));
+            } elseif ($action === 'list') {
+                out(['scopes' => $runtime->scopeList()]);
+            } elseif ($action === 'key') {
+                out($runtime->scopeKey((string) ($args[2] ?? fail('scope key NAME'))));
+            } elseif ($action === 'share') {
+                out($runtime->scopeShare((string) ($args[2] ?? fail('scope share NAME PARTNER --access read|write')), (string) ($args[3] ?? fail('scope share NAME PARTNER --access read|write')), $opts['access'] ?? fail('scope share NAME PARTNER --access read|write')));
+            } elseif ($action === 'remove') {
+                out($runtime->scopeRemove((string) ($args[2] ?? fail('scope remove NAME'))));
+            } else {
+                fail('scope new|add|list|key|share|remove');
             }
             break;
         case 'outbox':
@@ -192,6 +221,4 @@ try {
     exit(2);
 } catch (\Throwable $error) {
     fail($error->getMessage());
-} finally {
-    $runtime->close();
 }

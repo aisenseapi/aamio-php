@@ -14,6 +14,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/bootstrap.php';
 
+use Aamio\Address;
 use Aamio\Board;
 use Aamio\Channel;
 use Aamio\Client;
@@ -46,7 +47,12 @@ final class FakeService
     public array $calls = [];
     public bool $silent = false;
     public bool $refuse = false;
+    public bool $oldBoard = false;
+    public bool $forgetScope = false;
+    public bool $explode = false;
+    public int $pageSize = 200;
     public int $now;
+    private int $seq = 0;
 
     public function __construct()
     {
@@ -56,6 +62,9 @@ final class FakeService
     public function __invoke(string $method, string $url, ?string $body, array $headers): array
     {
         $this->calls[] = [$method, $url];
+        if ($this->explode) {
+            throw new \Error('the fake fell over');
+        }
         $path = (string) parse_url($url, PHP_URL_PATH);
         $host = (string) parse_url($url, PHP_URL_HOST);
         $json = is_string($body) ? json_decode($body, true) : null;
@@ -152,14 +161,28 @@ final class FakeService
             return [200, ['work' => ['advise_bits' => 4, 'max_bits' => 20]], []];
         }
         if ($path === '/find') {
-            return [200, ['posts' => array_values($this->posts), 'next' => count($this->posts), 'how_to_answer' => ['method' => 'POST']], []];
+            if ($this->oldBoard && isset($json['scope_key'])) {
+                return [400, ['error' => 'Unknown field scope_key. The form is kind, tags, lang, key, after, wait, min_work_bits', 'fix' => 'Drop that field and try again.'], []];
+            }
+            $scope = isset($json['scope_key']) ? Address::scope((string) $json['scope_key']) : null;
+            $after = (int) ($json['after'] ?? 0);
+            $page = array_slice(array_values(array_filter($this->posts, static fn (array $p): bool => ($p['scope'] ?? null) === $scope && $p['seq'] > $after)), 0, $this->pageSize);
+            $answer = ['posts' => $page, 'next' => $page === [] ? $after : end($page)['seq'], 'how_to_answer' => ['method' => 'POST']];
+            if ($scope !== null && !$this->forgetScope) {
+                $answer['scope'] = $scope;
+            }
+
+            return [200, $answer, []];
         }
         if ($path === '/tags') {
             return [200, ['tags' => []], []];
         }
         if ($path === '/' && $method === 'POST') {
+            if ($this->oldBoard && isset($json['scope'])) {
+                return [400, ['error' => 'Unknown field scope', 'fix' => 'Drop that field'], []];
+            }
             $id = 'post' . str_pad((string) (count($this->posts) + 1), 16, '0', STR_PAD_LEFT);
-            $this->posts[$id] = $json + ['id' => $id, 'key' => $headers['X-Key'], 'expire_at' => $this->now + (int) ($json['ttl'] ?? 1800), 'work_bits' => isset($headers['X-Work']) ? 4 : 0];
+            $this->posts[$id] = $json + ['id' => $id, 'seq' => ++$this->seq, 'key' => $headers['X-Key'], 'expire_at' => $this->now + (int) ($json['ttl'] ?? 1800), 'work_bits' => isset($headers['X-Work']) ? 4 : 0];
 
             return [201, $this->posts[$id], []];
         }
@@ -170,7 +193,7 @@ final class FakeService
                 return [200, ['withdrawn' => true], []];
             }
 
-            return isset($this->posts[$m[1]]) ? [200, $this->posts[$m[1]], []] : [404, ['error' => 'gone', 'fix' => 'none'], []];
+            return isset($this->posts[$m[1]]) && !isset($this->posts[$m[1]]['scope']) ? [200, $this->posts[$m[1]], []] : [404, ['error' => 'gone', 'fix' => 'none'], []];
         }
 
         return [404, ['error' => 'Not found', 'fix' => 'no such board route in the fake'], []];
@@ -336,12 +359,185 @@ $check($a->effect('release:ARC-4471')['state'] === 'new', 'an operation not yet 
 $a->effectDone('release:ARC-4471', ['ok' => true], 'fp1');
 $check($a->effect('release:ARC-4471', 'fp1')['state'] === 'done' && $a->effect('release:ARC-4471', 'fp2')['state'] === 'conflict', 'done with the same fingerprint, conflict with another');
 
+echo "scopes\n";
+$made = $a->scopeNew('chapter-review');
+$stored = json_decode((string) file_get_contents($homeA . '/scopes.json'), true);
+$teamKey = (string) ($stored[0]['key'] ?? '');
+$check($made === ['name' => 'chapter-review', 'address' => Address::scope($teamKey), 'can_read' => true] && Address::isScopeKey($teamKey), 'a new scope keeps its key in scopes.json and shows name, address and can_read');
+$check(!str_contains((string) json_encode($a->scopeList()), $teamKey), 'the scope list never carries the key');
+$threw = false;
+try {
+    $a->scopeNew('no spaces');
+} catch (\InvalidArgumentException) {
+    $threw = true;
+}
+$check($threw, 'a scope name with a space is refused');
+$shared = $a->scopeShare('chapter-review', 'Bea', 'read');
+$check(!str_contains((string) json_encode($shared), $teamKey) && $shared['access'] === 'read' && $shared['scope'] === 'chapter-review', 'sharing sends the key sealed to a partner and never returns it');
+$gotScope = $b->read();
+$view = $gotScope[0]['body']['data']['aamio_scope'] ?? [];
+$check(($view['kept'] ?? null) === true && ($view['can_read'] ?? null) === true && ($view['name'] ?? null) === 'Al.chapter-review' && ($view['shared_as'] ?? null) === 'chapter-review' && !str_contains((string) json_encode($gotScope), $teamKey), 'Bea keeps it under the name she knows the sender by, and the key is out of the message she reads');
+$check(!str_contains((string) file_get_contents($homeB . '/archive/inbox.jsonl'), $teamKey) && $b->scopeKey('Al.chapter-review')['key'] === $teamKey, 'and out of her archive, while her runtime holds it');
+$sentArchive = (string) file_get_contents($homeA . '/archive/sent.jsonl');
+$check(!str_contains($sentArchive, $teamKey) && str_contains($sentArchive, '"aamio_scope":{"name":"chapter-review","access":"read"}'), 'the archive of sent messages says what was shared and with what access, and never holds the key');
+$own = $b->scopeNew('chapter-review');
+$check($own['address'] !== $made['address'] && array_column($b->scopeList(), 'name') === ['Al.chapter-review', 'chapter-review'], 'so a partner cannot take a name before it is made here: Bea still makes her own chapter-review');
+$b->scopeRemove('chapter-review');
+$strangerW = Address::w(Address::newId());
+$a->peers[$strangerW] = Keys::generate()->public;
+$outboxBefore = count($a->outbox);
+$refusals = 0;
+foreach ([$strangerW, $a->peers[$strangerW], 'Mallory'] as $to) {
+    try {
+        $a->scopeShare('chapter-review', $to, 'read');
+    } catch (\InvalidArgumentException $error) {
+        $refusals += str_contains($error->getMessage(), 'only with a partner') ? 1 : 0;
+    }
+}
+$check($refusals === 3 && count($a->outbox) === $outboxBefore, 'a scope is shared only with a partner in the address book: an address from a post, a stranger key and an unknown name are refused, and nothing is sent');
+$scoped = $b->boardPost('need', 'Chapter 3 draft ready', 'At commit 4f2a9c1.', ['chapter-03'], 900, null, null, 'Al.chapter-review');
+$check(($fake->posts[$scoped['id']]['scope'] ?? null) === $made['address'] && $scoped['scope'] === 'Al.chapter-review' && !str_contains((string) json_encode($fake->posts[$scoped['id']]), $teamKey), 'a post in the scope carries the address inside what is signed, and never the key');
+$check(!in_array($scoped['id'], array_column($a->boardFind(null, ['chapter-03'])['posts'], 'id'), true) && $a->boardGet($scoped['id']) === null, 'a find without the scope does not see it, and it is not served by id');
+$inScope = $a->boardFind(null, ['chapter-03'], null, null, 0, 0, 0, 'chapter-review');
+$check(array_column($inScope['posts'], 'id') === [$scoped['id']] && $inScope['scope_name'] === 'chapter-review', 'a find with the scope reads it, and names the scope');
+$answered = $a->boardAnswer($scoped['id'], 'I can read it tonight', null, 'chapter-review');
+$check($answered['post'] === $scoped['id'], 'a post in a scope is answered through the scope');
+$later = $b->boardPost('offer', 'Chapter 4 outline', 'Two pages.', ['chapter-04'], 900, null, null, 'Al.chapter-review');
+$fake->pageSize = 1;
+$answered = $a->boardAnswer($later['id'], 'Found it on the second page', null, 'chapter-review');
+$fake->pageSize = 200;
+$check($answered['post'] === $later['id'], 'and found past the first page of the scope, following the cursor');
+$fake->forgetScope = true;
+$threw = '';
+try {
+    $a->boardFind(null, [], null, null, 0, 0, 0, 'chapter-review');
+} catch (\RuntimeException $error) {
+    $threw = $error->getMessage();
+}
+$fake->forgetScope = false;
+$check(str_contains($threw, 'did not say it read scope chapter-review'), 'an answer that does not name the scope is not believed');
+$fake->oldBoard = true;
+$threw = '';
+try {
+    $a->boardFind(null, [], null, null, 0, 0, 0, 'chapter-review');
+} catch (\RuntimeException $error) {
+    $threw = $error->getMessage();
+}
+$fake->oldBoard = false;
+$check(str_contains($threw, 'Unknown field scope_key'), 'a board older than scopes refuses the key, and the refusal comes through');
+$b->scopeAdd('drop', null, Address::scope(Address::newScopeKey()));
+$threw = false;
+try {
+    $b->boardFind(null, [], null, null, 0, 0, 0, 'drop');
+} catch (\InvalidArgumentException $error) {
+    $threw = str_contains($error->getMessage(), 'post only');
+}
+$check($threw, 'a scope held to post only does not read');
+$a->scopeNew('second');
+$secondKey = $a->scopeKey('second')['key'];
+$b->partnerRemove('Al');
+$a->scopeShare('second', 'Bea', 'read');
+$fromStranger = $b->read();
+$b->partnerAdd('Al', $a->keys->public);
+$check(($fromStranger[0]['body']['data']['aamio_scope']['kept'] ?? null) === false && !str_contains((string) json_encode($fromStranger), $secondKey) && array_column($b->scopeList(), 'name') === ['Al.chapter-review', 'drop'], 'from a key not in the address book a scope is not kept, and the key is taken out all the same');
+$b->scopeRemove('Al.chapter-review');
+$b->channels['inbox']->after = 0;
+$replayed = array_values(array_filter($b->read(), static fn (array $m): bool => isset($m['body']['data']['aamio_scope'])));
+$check(count($replayed) === 2 && array_filter($replayed, static fn (array $m): bool => $m['replay'] !== true || $m['body']['data']['aamio_scope']['kept'] !== false) === [] && !in_array('Al.chapter-review', array_column($b->scopeList(), 'name'), true) && !str_contains((string) json_encode($replayed), $teamKey), 'a share read again is a replay and not kept again, so a removed scope stays removed');
+$take = static function (Runtime $runtime, array $entry): array {
+    (function () use (&$entry): void {
+        $this->takeScopeShare($entry);
+    })->call($runtime);
+
+    return $entry;
+};
+$leaks = 0;
+foreach ([
+    ['text' => 't', 'aamio_scope' => ['name' => 'team', 'key' => $teamKey]],
+    ['text' => 't', 'data' => ['aamio_scope' => $teamKey]],
+    ['text' => 't', 'data' => ['aamio_scope' => [$teamKey]]],
+    ['text' => 't', 'aamio_scope' => $teamKey, 'data' => ['aamio_scope' => 'team ' . $teamKey]],
+] as $shape) {
+    $leaks += str_contains((string) json_encode($take($b, ['verified' => true, 'encrypted' => true, 'known_contact' => true, 'from_key' => $a->keys->public, 'replay' => false, 'body' => $shape])), $teamKey) ? 1 : 0;
+}
+$check($leaks === 0 && array_column($b->scopeList(), 'name') === ['drop'], 'a key in aamio_scope is taken out whatever its shape and wherever it sits');
+$nameFor = static function (Runtime $runtime, array $partner, string $scope): string {
+    return (function () use ($partner, $scope): string {
+        return $this->sharedScopeName($partner, $scope);
+    })->call($runtime);
+};
+$named = [];
+foreach (['Bea Ødegård' => 'Bea-deg-rd', '--x..y__' => 'x..y', '0' => '0', '李明' => Keys::hashPrefixOf($a->keys->public), str_repeat('a', 30) => str_repeat('a', 24)] as $partnerName => $prefix) {
+    $named[] = $nameFor($b, ['name' => (string) $partnerName, 'key' => $a->keys->public], 'team') === $prefix . '.team'
+        && $nameFor($b, ['name' => (string) $partnerName, 'key' => $a->keys->public], str_repeat('t', 64)) === substr($prefix . '.' . str_repeat('t', 64), 0, 64);
+}
+$check(!in_array(false, $named, true), 'the partner part of a name keeps what a name may hold, the same as aamio-python makes it');
+$a->scopeNew('third');
+mkdir($homeB . '/scopes.json.tmp');
+$a->scopeShare('third', 'Bea', 'read');
+$a->send('Bea', 'after the share');
+$batch = $b->read();
+rmdir($homeB . '/scopes.json.tmp');
+$thirdView = [];
+$arrived = false;
+foreach ($batch as $m) {
+    $thirdView = $m['body']['data']['aamio_scope'] ?? $thirdView;
+    $arrived = $arrived || ($m['body']['text'] ?? null) === 'after the share';
+}
+$check(($thirdView['kept'] ?? null) === false && str_contains($thirdView['note'] ?? '', 'could not write') && $arrived && array_column($b->scopeList(), 'name') === ['drop'], 'a share that cannot be saved is not reported kept, and the rest of the batch still arrives');
+
+echo "files that cannot be read\n";
+$homeD = $root . DIRECTORY_SEPARATOR . 'd';
+mkdir($homeD, 0700, true);
+$refused = [];
+foreach (['[{"name": "team", "key": "' . $teamKey . '"' => 'not UTF-8 JSON', '{"team": {"key": "' . $teamKey . '"}}' => 'not a JSON list'] as $broken => $why) {
+    file_put_contents($homeD . '/scopes.json', $broken);
+    $threw = '';
+    try {
+        new Runtime($homeD, 'https://fake.test', null, true, $quiet);
+    } catch (\RuntimeException $error) {
+        $threw = $error->getMessage();
+    }
+    $refused[] = str_contains($threw, 'could not be read (' . $why . ')') && file_get_contents($homeD . '/scopes.json') === $broken && !is_file($homeD . '/lock');
+}
+$check($refused === [true, true], 'a scopes.json that does not parse, or is not a list, stops the runtime, is left as it was, and leaves no lock');
+$entries = [
+    ['name' => 'typo', 'key' => strtoupper($teamKey), 'address' => $made['address']],
+    ['name' => 'newline', 'address' => $made['address'] . "\n"],
+    ['name' => 'team', 'key' => $teamKey, 'address' => $made['address'], 'note' => 'a field from a newer version'],
+    ['name' => 'TEAM', 'address' => $made['address']],
+    ['name' => 'wrong-pair', 'key' => Address::newScopeKey(), 'address' => $made['address']],
+    'not an entry',
+];
+file_put_contents($homeD . '/scopes.json', json_encode($entries));
+$d = new Runtime($homeD, 'https://fake.test', null, true, $quiet);
+$usable = array_column($d->scopeList(), 'name');
+$d->scopeNew('more');
+$d->close();
+$stored = json_decode((string) file_get_contents($homeD . '/scopes.json'), true);
+$check($usable === ['team'] && array_column(array_slice($stored, 0, 2), 'name') === ['team', 'more'] && $stored[0]['note'] === 'a field from a newer version' && array_slice($stored, 2) === [$entries[0], $entries[1], $entries[3], $entries[4], $entries[5]], 'an entry this runtime cannot use is kept in the file as it was, beside the ones it can');
+$homeE = $root . DIRECTORY_SEPARATOR . 'e';
+mkdir($homeE, 0700, true);
+file_put_contents($homeE . '/key', "not a seed\n");
+$threw = '';
+try {
+    new Runtime($homeE, 'https://fake.test', null, true, $quiet);
+} catch (\RuntimeException $error) {
+    $threw = $error->getMessage();
+}
+$check(str_contains($threw, 'not a 64 character hex seed') && file_get_contents($homeE . '/key') === "not a seed\n", 'a key file that is not a key is never replaced by a new identity');
+
 echo "mcp\n";
 $server = new McpServer($a);
 $init = $server->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['protocolVersion' => '2025-06-18']]);
 $check($init['result']['protocolVersion'] === '2025-06-18' && str_contains($init['result']['instructions'], 'signed stranger'), 'initialize answers with the same instructions as aamio-python');
 $list = $server->handle(['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/list']);
-$check(count($list['result']['tools']) === 15 && $list['result']['tools'][0]['name'] === 'aamio_whoami', 'tools/list has the fifteen tools');
+$check(count($list['result']['tools']) === 20 && $list['result']['tools'][0]['name'] === 'aamio_whoami', 'tools/list has the twenty tools');
+$call = $server->handle(['jsonrpc' => '2.0', 'id' => 21, 'method' => 'tools/call', 'params' => ['name' => 'aamio_scopes', 'arguments' => []]]);
+$check($call['result']['isError'] === false && in_array('chapter-review', array_column($call['result']['structuredContent']['scopes'], 'name'), true) && !str_contains((string) json_encode($call), $teamKey), 'aamio_scopes lists names and never a key');
+$call = $server->handle(['jsonrpc' => '2.0', 'id' => 22, 'method' => 'tools/call', 'params' => ['name' => 'aamio_board_find', 'arguments' => ['scope' => 'nobody']]]);
+$check($call['result']['isError'] === true && str_contains($call['result']['structuredContent']['error'], 'no scope called nobody'), 'a scope name that is not here is a tool error');
+$check(str_contains($init['result']['instructions'], 'aamio_scope_share') && $init['result']['serverInfo']['version'] === Http::VERSION, 'and the instructions say how scopes are shared, from a server that names its own version');
 $check(str_contains((string) json_encode($list['result']['tools'][0]), '"properties":{}'), 'a tool without arguments has properties {} on the wire, not []');
 $call = $server->handle(['jsonrpc' => '2.0', 'id' => 3, 'method' => 'tools/call', 'params' => ['name' => 'aamio_whoami', 'arguments' => []]]);
 $check($call['result']['structuredContent']['key'] === $a->keys->public && $call['result']['isError'] === false, 'aamio_whoami over MCP');
@@ -354,6 +550,19 @@ $fake->silent = true;
 $call = $server->handle(['jsonrpc' => '2.0', 'id' => 7, 'method' => 'tools/call', 'params' => ['name' => 'aamio_send', 'arguments' => ['to' => 'Bea', 'text' => 'void']]]);
 $fake->silent = false;
 $check($call['result']['isError'] === true && $call['result']['structuredContent']['error_code'] === 'send_unknown' && $call['result']['structuredContent']['retryable'] === null, 'an unknown send over MCP says send_unknown with the message id and no permission to retry');
+ob_start();
+$wrong = [
+    $server->handle(['jsonrpc' => '2.0', 'id' => 30, 'method' => 'tools/call', 'params' => ['name' => 'aamio_open_channel', 'arguments' => ['label' => ['x'], 'ttl' => 60]]]),
+    $server->handle(['jsonrpc' => '2.0', 'id' => 31, 'method' => 'tools/call', 'params' => ['name' => 'aamio_scope_add', 'arguments' => ['name' => 'x', 'key' => ['not', 'a', 'string']]]]),
+    $server->handle(['jsonrpc' => '2.0', 'id' => 32, 'method' => 'tools/call', 'params' => ['name' => 'aamio_board_post', 'arguments' => ['kind' => 'need', 'title' => 't', 'text' => 'x', 'tags' => 'not-a-list']]]),
+    $server->handle(['jsonrpc' => '2.0', 'id' => 33, 'method' => 'tools/call', 'params' => ['name' => 'aamio_scope_share', 'arguments' => ['name' => 'chapter-review', 'to' => $strangerW, 'access' => 'read']]]),
+];
+$printed = (string) ob_get_clean();
+$check(array_filter($wrong, static fn (array $reply): bool => ($reply['result']['isError'] ?? null) !== true) === [] && $printed === '', 'an argument of the wrong type, or a share to an address, is a tool error, and nothing is printed beside the protocol', $printed);
+$fake->explode = true;
+$fell = $server->safely(['jsonrpc' => '2.0', 'id' => 34, 'method' => 'tools/call', 'params' => ['name' => 'aamio_board_tags', 'arguments' => []]]);
+$fake->explode = false;
+$check(($fell['id'] ?? null) === 34 && ($fell['error']['code'] ?? null) === -32603 && $server->safely(['jsonrpc' => '2.0', 'id' => 35, 'method' => 'ping'])['result'] instanceof \stdClass, 'a failure nobody expected is an internal error for that call, and the server answers the next one');
 
 echo "hosts\n";
 $check(Client::DEFAULT_HOST === Hosts::DEFAULT_HOST && Board::DEFAULT_HOST === Hosts::DEFAULT_BOARD && Runtime::VERIFYUM_MCP === Hosts::VERIFYUM_MCP, 'the defaults live in Hosts, and the old names point there');

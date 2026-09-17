@@ -57,7 +57,7 @@ final class Codec
 
     public static function isKey(string $key): bool
     {
-        return preg_match('/^[A-Za-z0-9_-]{43}$/', $key) === 1;
+        return preg_match('/^[A-Za-z0-9_-]{43}$/D', $key) === 1;
     }
 
     /** JSON the way the wire wants it: no escaped slashes, raw UTF-8, floats kept. */

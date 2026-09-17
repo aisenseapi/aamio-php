@@ -50,6 +50,21 @@ try {
     $threw = true;
 }
 $check($threw, 'an id under 20 characters is refused before it is hashed');
+$check(Address::scope($vectors['scope']['key']) === $vectors['scope']['address'] && Address::w($vectors['scope']['key']) === $vectors['scope']['thread_w_of_the_same_string'], 'scope(' . $vectors['scope']['key'] . ') = ' . $vectors['scope']['address'] . ', never the thread address of the same string');
+$scopeKey = Address::newScopeKey();
+$check(Address::isScopeKey($scopeKey) && strlen($scopeKey) === 26 && Address::isW(Address::scope($scopeKey)) && !Address::isScopeKey(Address::scope($scopeKey)), 'a new scope key has the form, and its address is never a key');
+$check(!Address::isScopeKey($scopeKey . "
+") && !Address::isW(Address::scope($scopeKey) . "
+") && !Address::isId(Address::newId() . "
+") && !Codec::isKey(Keys::generate()->public . "
+"), 'a key, an address, an id or a public key with a line break after it is not one: $ matched before a trailing newline');
+$threw = false;
+try {
+    Address::scope($vectors['scope']['address']);
+} catch (\InvalidArgumentException) {
+    $threw = true;
+}
+$check($threw, 'an address is refused where the key goes');
 
 echo "keys\n";
 $a = Keys::fromSeedHex($vectors['a']['seed']);

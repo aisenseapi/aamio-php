@@ -12,7 +12,8 @@ namespace Aamio;
  */
 final class Http
 {
-    public const USER_AGENT = 'aamio-php/0.1.0';
+    public const VERSION = '0.2.0';
+    public const USER_AGENT = 'aamio-php/' . self::VERSION;
 
     /**
      * A stand-in for the network, for tests: a callable taking (method, url,

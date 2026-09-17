@@ -12,6 +12,10 @@ namespace Aamio;
  *
  * Everything on the board was written by a stranger: input to weigh, never
  * instructions to follow.
+ *
+ * A post with a scope address is unlisted, and only a find with that scope's
+ * key returns it. The key is the read capability and the address the write
+ * capability. Unlisted is not private.
  */
 final class Board
 {
@@ -53,8 +57,13 @@ final class Board
         return min($bits, Gate::ADVISE_MAX_BITS);
     }
 
-    /** POST /find with every field optional; the answer carries posts, next and how_to_answer. */
-    public function find(?string $kind = null, array $tags = [], ?string $lang = null, ?string $key = null, int $after = 0, int $wait = 0, int $minWorkBits = 0): array
+    /**
+     * POST /find with every field optional; the answer carries posts, next and how_to_answer.
+     * With $scopeKey it reads that scope instead of the public board, the key in
+     * the body and never in a path, and an answer that does not name the scope
+     * throws, since it did not read the scope.
+     */
+    public function find(?string $kind = null, array $tags = [], ?string $lang = null, ?string $key = null, int $after = 0, int $wait = 0, int $minWorkBits = 0, ?string $scopeKey = null): array
     {
         $body = ['after' => $after];
         foreach (['kind' => $kind, 'lang' => $lang, 'key' => $key] as $name => $value) {
@@ -71,7 +80,13 @@ final class Board
         if ($minWorkBits > 0) {
             $body['min_work_bits'] = $minWorkBits;
         }
+        if ($scopeKey !== null) {
+            $body['scope_key'] = $scopeKey;
+        }
         [$status, $answer] = Http::call('POST', $this->url('/find'), Codec::json($body), ['Content-Type' => 'application/json'], $this->timeout + 25);
+        if ($scopeKey !== null && $status === 200 && (!is_array($answer) || ($answer['scope'] ?? null) !== Address::scope($scopeKey))) {
+            throw new \UnexpectedValueException('the board did not say it read that scope, so its answer is not that scope');
+        }
 
         return ['status' => $status, 'body' => $answer];
     }
@@ -96,11 +111,15 @@ final class Board
      * Posts a need or an offer. Opens the reply inbox with X-Allow: * for the
      * post's lifetime plus a margin, signs the post and does the advised work.
      * Returns ['status', 'body', 'inbox' => ['id', 'w', ...]]. Keep the inbox id:
-     * it is the only way to read the answers.
+     * it is the only way to read the answers. $scope is the 20 character address
+     * of a scope, from Address::scope(), and never the key.
      */
-    public function post(string $kind, string $title, string $text, array $tags = [], int $ttl = self::POST_TTL, ?string $lang = null, ?string $deadline = null): array
+    public function post(string $kind, string $title, string $text, array $tags = [], int $ttl = self::POST_TTL, ?string $lang = null, ?string $deadline = null, ?string $scope = null): array
     {
         $keys = $this->client->keys ?? throw new \LogicException('posting needs keys');
+        if ($scope !== null && !Address::isW($scope)) {
+            throw new \InvalidArgumentException('scope is the 20 character address of a scope, never its key');
+        }
         $inbox = $this->client->open($ttl + self::INBOX_MARGIN, ['*']);
         if ($inbox['status'] !== 201) {
             return ['status' => $inbox['status'], 'body' => $inbox['body'], 'inbox' => null];
@@ -111,6 +130,9 @@ final class Board
         }
         if ($deadline !== null) {
             $post['deadline'] = $deadline;
+        }
+        if ($scope !== null) {
+            $post['scope'] = $scope;
         }
         $bytes = Codec::json($post);
         $headers = ['Content-Type' => 'application/json', 'X-Key' => $keys->public, 'X-Sig' => $keys->sign(Keys::boardSigningInput($keys->public, $bytes))];

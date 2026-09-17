@@ -42,9 +42,63 @@ final class McpServer
         return ['content' => [['type' => 'text', 'text' => Codec::json($data)]], 'structuredContent' => is_array($data) && !array_is_list($data) ? ($data === [] ? new \stdClass() : $data) : ['result' => $data], 'isError' => $isError];
     }
 
+    /** A string argument, or null when it is not there. Anything else is refused, never cast. */
+    private static function text(array $arguments, string $name, bool $required = false): ?string
+    {
+        $value = $arguments[$name] ?? null;
+        if ($value === null && $required) {
+            throw new \InvalidArgumentException($name . ' is required, as a string');
+        }
+        if ($value !== null && !is_string($value)) {
+            throw new \InvalidArgumentException($name . ' must be a string');
+        }
+
+        return $value;
+    }
+
+    /** A whole number argument, or the default when it is not there. */
+    private static function number(array $arguments, string $name, int $default = 0): int
+    {
+        $value = $arguments[$name] ?? null;
+        if ($value === null) {
+            return $default;
+        }
+        if (!is_int($value) && !(is_float($value) && floor($value) === $value && abs($value) < 1e9) && !(is_string($value) && preg_match('/^-?[0-9]{1,9}$/D', $value) === 1)) {
+            throw new \InvalidArgumentException($name . ' must be a whole number');
+        }
+
+        return (int) $value;
+    }
+
+    /** A list of strings, or null when it is not there. */
+    private static function strings(array $arguments, string $name): ?array
+    {
+        $value = $arguments[$name] ?? null;
+        if ($value === null) {
+            return null;
+        }
+        if (!is_array($value) || !array_is_list($value) || array_filter($value, static fn ($item): bool => !is_string($item)) !== []) {
+            throw new \InvalidArgumentException($name . ' must be a list of strings');
+        }
+
+        return $value;
+    }
+
+    /** An object argument, or null when it is not there. */
+    private static function map(array $arguments, string $name): ?array
+    {
+        $value = $arguments[$name] ?? null;
+        if ($value !== null && (!is_array($value) || ($value !== [] && array_is_list($value)))) {
+            throw new \InvalidArgumentException($name . ' must be an object');
+        }
+
+        return $value;
+    }
+
     public function dispatch(string $name, array $arguments): ?array
     {
         $r = $this->runtime;
+        $a = $arguments;
         try {
             switch ($name) {
                 case 'aamio_whoami':
@@ -52,35 +106,45 @@ final class McpServer
                 case 'aamio_partners':
                     return self::resultOf(['partners' => $r->partnerList()]);
                 case 'aamio_presence_lookup':
-                    return self::resultOf($r->lookup($arguments['names'] ?? null, (int) ($arguments['wait'] ?? 0)));
+                    return self::resultOf($r->lookup(self::strings($a, 'names'), self::number($a, 'wait')));
                 case 'aamio_send':
-                    return self::resultOf($r->send((string) ($arguments['to'] ?? ''), $arguments['text'] ?? null, is_array($arguments['data'] ?? null) ? $arguments['data'] : null));
+                    return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::map($a, 'data')));
                 case 'aamio_read':
-                    $messages = $r->read((int) ($arguments['wait'] ?? 0));
+                    $messages = $r->read(self::number($a, 'wait'));
 
                     return self::resultOf(['messages' => $messages, 'count' => count($messages)]);
                 case 'aamio_receipt':
-                    return self::resultOf($r->receipt((string) ($arguments['channel'] ?? 'inbox') ?: 'inbox', (bool) ($arguments['anchor'] ?? false)));
+                    return self::resultOf($r->receipt(self::text($a, 'channel') ?: 'inbox', (bool) ($a['anchor'] ?? false)));
                 case 'aamio_open_channel':
-                    return self::resultOf($r->openChannel((string) $arguments['label'], (int) $arguments['ttl'], $arguments['allow'] ?? null));
+                    return self::resultOf($r->openChannel(self::text($a, 'label', true), self::number($a, 'ttl', 600), self::strings($a, 'allow')));
                 case 'aamio_channels':
                     return self::resultOf(['channels' => $r->channelList()]);
                 case 'aamio_close_channel':
-                    return self::resultOf($r->closeChannel((string) $arguments['label']));
+                    return self::resultOf($r->closeChannel(self::text($a, 'label', true)));
                 case 'aamio_board_post':
-                    return self::resultOf($r->boardPost((string) $arguments['kind'], (string) $arguments['title'], (string) $arguments['text'], $arguments['tags'] ?? null, (int) ($arguments['ttl'] ?? Runtime::BOARD_TTL) ?: Runtime::BOARD_TTL, $arguments['lang'] ?? null, $arguments['deadline'] ?? null));
+                    return self::resultOf($r->boardPost(self::text($a, 'kind', true), self::text($a, 'title', true), self::text($a, 'text', true), self::strings($a, 'tags'), self::number($a, 'ttl', Runtime::BOARD_TTL) ?: Runtime::BOARD_TTL, self::text($a, 'lang'), self::text($a, 'deadline'), self::text($a, 'scope')));
                 case 'aamio_board_find':
-                    return self::resultOf($r->boardFind($arguments['kind'] ?? null, $arguments['tags'] ?? null, $arguments['lang'] ?? null, null, (int) ($arguments['after'] ?? 0), (int) ($arguments['wait'] ?? 0), (int) ($arguments['min_work_bits'] ?? 0)));
+                    return self::resultOf($r->boardFind(self::text($a, 'kind'), self::strings($a, 'tags'), self::text($a, 'lang'), null, self::number($a, 'after'), self::number($a, 'wait'), self::number($a, 'min_work_bits'), self::text($a, 'scope')));
                 case 'aamio_board_answer':
-                    return self::resultOf($r->boardAnswer((string) $arguments['post'], $arguments['text'] ?? null, is_array($arguments['data'] ?? null) ? $arguments['data'] : null));
+                    return self::resultOf($r->boardAnswer(self::text($a, 'post', true), self::text($a, 'text'), self::map($a, 'data'), self::text($a, 'scope')));
                 case 'aamio_board_withdraw':
-                    return self::resultOf($r->boardWithdraw((string) $arguments['post']));
+                    return self::resultOf($r->boardWithdraw(self::text($a, 'post', true)));
                 case 'aamio_pending':
                     $pending = array_map(static fn (array $p): array => array_diff_key($p, ['envelope' => 1, 'to_key' => 1]), $r->outboxPending());
 
                     return self::resultOf(['count' => count($pending), 'pending' => $pending]);
                 case 'aamio_board_tags':
                     return self::resultOf($r->boardTags());
+                case 'aamio_scopes':
+                    return self::resultOf(['scopes' => $r->scopeList()]);
+                case 'aamio_scope_new':
+                    return self::resultOf($r->scopeNew(self::text($a, 'name', true)));
+                case 'aamio_scope_add':
+                    return self::resultOf($r->scopeAdd(self::text($a, 'name', true), self::text($a, 'key'), self::text($a, 'address')));
+                case 'aamio_scope_share':
+                    return self::resultOf($r->scopeShare(self::text($a, 'name', true), self::text($a, 'to', true), self::text($a, 'access', true)));
+                case 'aamio_scope_remove':
+                    return self::resultOf($r->scopeRemove(self::text($a, 'name', true)));
             }
 
             return null;
@@ -92,6 +156,10 @@ final class McpServer
             return self::resultOf(['error' => $error->getMessage(), 'error_code' => 'gate', 'operation' => 'send', 'retryable' => false, 'fix' => $error->fix], true);
         } catch (\InvalidArgumentException | \RuntimeException | \LogicException $error) {
             return self::resultOf(['error' => $error->getMessage()], true);
+        } catch (\TypeError | \ValueError | \JsonException $error) {
+            // An argument of a type the runtime does not take. This call's
+            // failure, and the server stays up for the next one.
+            return self::resultOf(['error' => $error->getMessage(), 'fix' => "Check each argument against the tool's inputSchema and call again."], true);
         }
     }
 
@@ -111,13 +179,13 @@ final class McpServer
                 $requested = $params['protocolVersion'] ?? null;
                 $version = in_array($requested, $this->supported, true) ? $requested : '2025-11-25';
 
-                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => ['protocolVersion' => $version, 'capabilities' => ['tools' => ['listChanged' => false]], 'serverInfo' => ['name' => 'aamio', 'version' => '0.1.0'], 'instructions' => $this->instructions]];
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => ['protocolVersion' => $version, 'capabilities' => ['tools' => ['listChanged' => false]], 'serverInfo' => ['name' => 'aamio', 'version' => Http::VERSION], 'instructions' => $this->instructions]];
             case 'ping':
                 return ['jsonrpc' => '2.0', 'id' => $id, 'result' => new \stdClass()];
             case 'tools/list':
                 return ['jsonrpc' => '2.0', 'id' => $id, 'result' => ['tools' => $this->tools]];
             case 'tools/call':
-                $name = (string) ($params['name'] ?? '');
+                $name = is_string($params['name'] ?? null) ? $params['name'] : '';
                 $arguments = is_array($params['arguments'] ?? null) ? $params['arguments'] : [];
                 $result = $this->dispatch($name, $arguments);
                 if ($result === null) {
@@ -136,9 +204,28 @@ final class McpServer
         return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32601, 'message' => 'Method not found: ' . $method]];
     }
 
+    /** handle, with anything it did not expect answered as an internal error instead of ending the server. */
+    public function safely(mixed $message): ?array
+    {
+        try {
+            return $this->handle($message);
+        } catch (\Throwable $error) {
+            $kind = (new \ReflectionClass($error))->getShortName();
+            ($this->runtime->log)($kind . ': ' . $error->getMessage());
+            if (!is_array($message) || !array_key_exists('id', $message)) {
+                return null;
+            }
+
+            return ['jsonrpc' => '2.0', 'id' => $message['id'], 'error' => ['code' => -32603, 'message' => 'Internal error: ' . $kind . '. The server is still running.']];
+        }
+    }
+
     /** Reads stdin line by line until it closes. */
     public function serve($in = STDIN, $out = STDOUT): void
     {
+        // stdout carries JSON-RPC and nothing else. A warning printed there
+        // would break the line the client is reading.
+        ini_set('display_errors', 'stderr');
         $this->runtime->log = static function (string $line): void {
             fwrite(STDERR, '[aamio ' . date('H:i:s') . '] ' . $line . "\n");
         };
@@ -153,7 +240,7 @@ final class McpServer
             if (json_last_error() !== JSON_ERROR_NONE) {
                 $reply = ['jsonrpc' => '2.0', 'id' => null, 'error' => ['code' => -32700, 'message' => 'Parse error']];
             } else {
-                $replies = array_values(array_filter(array_map([$this, 'handle'], is_array($message) && array_is_list($message) ? $message : [$message]), static fn ($r) => $r !== null));
+                $replies = array_values(array_filter(array_map([$this, 'safely'], is_array($message) && array_is_list($message) ? $message : [$message]), static fn ($r) => $r !== null));
                 if ($replies === []) {
                     continue;
                 }
