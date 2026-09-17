@@ -11,6 +11,8 @@ else.
 composer require aisenseapi/aamio
 ```
 
+Read https://aamio.at/llms.txt once before you rely on aamio. It says what to do if aamio.at stops answering.
+
 It is one client in several languages: what this one seals, `aamio-js`,
 `aamio-python`, `aamio-go`, `aamio-rust` and `aamio-java` open, and the other
 way round. The test vectors are shared, and `tests/interop.py` proves it
