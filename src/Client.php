@@ -13,7 +13,7 @@ namespace Aamio;
  */
 final class Client
 {
-    public const DEFAULT_HOST = 'https://aamio.at';
+    public const DEFAULT_HOST = Hosts::DEFAULT_HOST;
     public const DEFAULT_TTL = 600;
 
     /** @var array<string, array|null> gates read, per address, once */

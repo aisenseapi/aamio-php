@@ -14,9 +14,12 @@ declare(strict_types=1);
 
 require __DIR__ . '/bootstrap.php';
 
+use Aamio\Board;
 use Aamio\Channel;
+use Aamio\Client;
 use Aamio\Codec;
 use Aamio\GateStop;
+use Aamio\Hosts;
 use Aamio\Http;
 use Aamio\Keys;
 use Aamio\McpServer;
@@ -351,6 +354,24 @@ $fake->silent = true;
 $call = $server->handle(['jsonrpc' => '2.0', 'id' => 7, 'method' => 'tools/call', 'params' => ['name' => 'aamio_send', 'arguments' => ['to' => 'Bea', 'text' => 'void']]]);
 $fake->silent = false;
 $check($call['result']['isError'] === true && $call['result']['structuredContent']['error_code'] === 'send_unknown' && $call['result']['structuredContent']['retryable'] === null, 'an unknown send over MCP says send_unknown with the message id and no permission to retry');
+
+echo "hosts\n";
+$check(Client::DEFAULT_HOST === Hosts::DEFAULT_HOST && Board::DEFAULT_HOST === Hosts::DEFAULT_BOARD && Runtime::VERIFYUM_MCP === Hosts::VERIFYUM_MCP, 'the defaults live in Hosts, and the old names point there');
+putenv('AAMIO_BOARD=https://board.elsewhere.test');
+putenv('AAMIO_VERIFYUM=https://verifyum.elsewhere.test/mcp/');
+$homeC = $root . DIRECTORY_SEPARATOR . 'c';
+mkdir($homeC, 0700, true);
+$c = new Runtime($homeC, 'https://elsewhere.test', null, true, $quiet);
+putenv('AAMIO_BOARD');
+putenv('AAMIO_VERIFYUM');
+$check($c->host === 'https://elsewhere.test' && $c->board->host === 'https://board.elsewhere.test' && $c->verifyum === 'https://verifyum.elsewhere.test/mcp', 'AAMIO_BOARD and AAMIO_VERIFYUM point the runtime elsewhere, beside the host it was given');
+$fake->calls = [];
+$c->boardFind('need');
+$c->ensureInbox();
+$c->receipt('inbox', true);
+$urls = array_column($fake->calls, 1);
+$check(array_filter($urls, static fn (string $u): bool => str_starts_with($u, 'https://board.elsewhere.test/')) !== [] && in_array('https://verifyum.elsewhere.test/mcp', $urls, true) && array_filter($urls, static fn (string $u): bool => str_contains($u, 'aamio.at')) === [], 'and every call goes there, none to aamio.at', implode(' ', array_unique(array_map(static fn (string $u): string => (string) parse_url($u, PHP_URL_HOST), $urls))));
+$c->close();
 
 $a->close();
 $b->close();

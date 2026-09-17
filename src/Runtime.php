@@ -27,7 +27,7 @@ final class Runtime
     public const RENEW_BEFORE = 180;
     public const SEND_DETERMINISTIC = [400, 403, 410, 413, 415, 422, 428, 501];
     public const SEND_TRY_LATER = [429, 502, 503, 504];
-    public const VERIFYUM_MCP = 'https://api.verifyum.com/mcp';
+    public const VERIFYUM_MCP = Hosts::VERIFYUM_MCP;
 
     /** Only the spellings seen in the wild, and only for an answer to a post. */
     private const ANSWER_ALIASES = ['post' => ['post_id', 'postId'], 'reply_to' => ['replyTo', 'w', 'reply_address'], 'text' => ['reply', 'message']];
@@ -37,6 +37,8 @@ final class Runtime
     public readonly Keys $keys;
     public readonly Client $client;
     public readonly Board $board;
+    /** Where a receipt is anchored: AAMIO_VERIFYUM, or Hosts::VERIFYUM_MCP without it. */
+    public readonly string $verifyum;
     /** @var string[] */
     public array $tags;
     /** @var array<int, array{name:string,key:string}> */
@@ -61,7 +63,7 @@ final class Runtime
     public function __construct(?string $home = null, ?string $host = null, ?array $tags = null, bool $archive = true, ?callable $log = null)
     {
         $this->home = $home ?: self::homeDir();
-        $this->host = rtrim($host ?: (getenv('AAMIO_HOST') ?: Client::DEFAULT_HOST), '/');
+        $this->host = rtrim($host ?: (getenv('AAMIO_HOST') ?: Hosts::DEFAULT_HOST), '/');
         $this->archiveEnabled = $archive;
         $this->log = $log ?: static function (string $line): void {
         };
@@ -71,7 +73,8 @@ final class Runtime
         $this->takeLock();
         $this->keys = $this->loadOrCreateKeys();
         $this->client = new Client($this->host, $this->keys);
-        $this->board = new Board($this->client, getenv('AAMIO_BOARD') ?: Board::DEFAULT_HOST);
+        $this->board = new Board($this->client, getenv('AAMIO_BOARD') ?: Hosts::DEFAULT_BOARD);
+        $this->verifyum = rtrim(getenv('AAMIO_VERIFYUM') ?: Hosts::VERIFYUM_MCP, '/');
         $this->partners = array_values(array_filter((array) $this->loadJson('partners.json', []), static fn ($p) => is_array($p) && isset($p['name'], $p['key'])));
         $state = (array) $this->loadJson('state.json', []);
         $envTags = array_values(array_filter(explode(',', (string) (getenv('AAMIO_TAGS') ?: ''))));
@@ -1064,7 +1067,7 @@ final class Runtime
         if ($anchor) {
             $idem = substr(Codec::sha256hex('aamio-listen:' . $this->keys->hash . ':' . $data['root']), 0, 32);
             $message = ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => 'verifyum_anchor_commitment', 'arguments' => ['commitment' => 'sha256:' . $data['root'], 'idempotency_key' => $idem]]];
-            [$status, $reply] = Http::call('POST', self::VERIFYUM_MCP, Codec::json($message), ['Content-Type' => 'application/json', 'MCP-Protocol-Version' => '2025-11-25']);
+            [$status, $reply] = Http::call('POST', $this->verifyum, Codec::json($message), ['Content-Type' => 'application/json', 'MCP-Protocol-Version' => '2025-11-25']);
             $proof = is_array($reply) ? json_decode((string) ($reply['result']['content'][0]['text'] ?? ''), true) : null;
             $result['anchor'] = $status === 200 && is_array($proof) ? $proof : ['error' => $status, 'detail' => $reply];
         }

@@ -15,7 +15,7 @@ namespace Aamio;
  */
 final class Board
 {
-    public const DEFAULT_HOST = 'https://board.aamio.at';
+    public const DEFAULT_HOST = Hosts::DEFAULT_BOARD;
     public const POST_TTL = 1800;
     public const INBOX_MARGIN = 60;
 

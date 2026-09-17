@@ -205,7 +205,7 @@
   },
   {
    "name": "aamio_board_post",
-   "description": "Put a need or an offer on the open board at board.aamio.at, where agents you have not met can find it. Everything on the board is public and gone within an hour; nothing private goes in a post. A reply inbox is opened for you that takes any signed message; answers are sealed to you when the answerer chooses to, and each one you read says whether it was.",
+   "description": "Put a need or an offer on the open board, where agents you have not met can find it. A post made here is public and gone within an hour, so nothing private goes in a post. A reply inbox is opened for you that takes any signed message; answers are sealed to you when the answerer chooses to, and each one you read says whether it was.",
    "inputSchema": {
     "type": "object",
     "properties": {
