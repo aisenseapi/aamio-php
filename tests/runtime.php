@@ -341,6 +341,15 @@ $check(count($everyReply) === count($onlyPost) + 1 && array_filter($everyReply, 
 unset($b->channels['aside']);
 array_pop($b->channels['board']->received);
 
+// A board inbox is renewed while the old one still holds answers, and the old
+// one keeps its own label and its own archive. Reading only the channels the
+// process holds made those answers vanish from the replies command.
+$rotated = ['kind' => 'received', 'channel' => 'board-1789470000', 'seq' => 1, 'at' => 1789470000, 'verified' => true, 'known_contact' => false, 'from_key' => 'their-key', 'sender' => 'unknown key', 'sha256' => str_repeat('e', 64), 'body' => ['post' => 'p9', 'reply_to' => str_repeat('r', 20), 'text' => 'answered before the inbox was renewed']];
+file_put_contents($homeB . '/archive/board-1789470000.jsonl', json_encode($rotated) . "\n", FILE_APPEND);
+$fromRotated = $b->boardReplies('p9');
+$check(count($fromRotated) === 1 && ($fromRotated[0]['sha256'] ?? '') === str_repeat('e', 64), 'an answer on a board inbox that has since been renewed is still found', count($fromRotated) . ' funnet');
+unlink($homeB . '/archive/board-1789470000.jsonl');
+
 $where = $a->boardReplyAddress();
 $check($where['open'] === true && $where['w'] === $a->channels['board']->w, 'the reply address is open');
 $b->close();
@@ -348,6 +357,25 @@ $b3 = new Runtime($homeB, 'https://fake.test', null, true, $quiet);
 $check(count($b3->boardReplies($post['id'])) === 1 && ($b3->boardReplies($post['id'])[0]['from_archive'] ?? false) === true, 'after a restart the answer is still there, from the archive');
 $b3->close();
 $b = new Runtime($homeB, 'https://fake.test', null, true, $quiet);
+
+// An empty read used to mean four different things: a quiet inbox, an expired
+// thread, a service that did not answer, and a key that no longer matched.
+echo "an empty read that is not an empty inbox\n";
+$lost = $a->channels['inbox'];
+$missing = $fake->threads[$lost->w];
+unset($fake->threads[$lost->w]);
+$nothing = $a->read();
+$attention = $a->attentionTaken();
+$fake->threads[$lost->w] = $missing;
+$check($nothing === [] && count($attention) === 1 && $attention[0]['state'] === 'unread' && str_contains($attention[0]['what'], 'may be messages waiting'), 'a channel the service would not answer for is reported, not read as an empty inbox', json_encode($attention));
+$check($a->attentionTaken() === [], 'and what is taken once is not taken twice');
+$server = new McpServer($a);
+unset($fake->threads[$lost->w]);
+$told = $server->handle(['jsonrpc' => '2.0', 'id' => 40, 'method' => 'tools/call', 'params' => ['name' => 'aamio_read', 'arguments' => []]]);
+$fake->threads[$lost->w] = $missing;
+$check(($told['result']['structuredContent']['count'] ?? null) === 0 && ($told['result']['structuredContent']['attention'][0]['state'] ?? null) === 'unread', 'and the model is told the same over MCP');
+$a->read();
+$a->attentionTaken();
 
 echo "aliases\n";
 [$body, $meta] = Runtime::canonical(['post_id' => 'p1', 'w' => 'wwwwwwwwwwwwwwwwwwww', 'reply' => 'hello']);

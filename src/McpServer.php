@@ -111,8 +111,10 @@ final class McpServer
                     return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::map($a, 'data')));
                 case 'aamio_read':
                     $messages = $r->read(self::number($a, 'wait'));
+                    $attention = $r->attentionTaken();
+                    $result = ['messages' => $messages, 'count' => count($messages)];
 
-                    return self::resultOf(['messages' => $messages, 'count' => count($messages)]);
+                    return self::resultOf($attention === [] ? $result : $result + ['attention' => $attention]);
                 case 'aamio_receipt':
                     return self::resultOf($r->receipt(self::text($a, 'channel') ?: 'inbox', (bool) ($a['anchor'] ?? false)));
                 case 'aamio_open_channel':

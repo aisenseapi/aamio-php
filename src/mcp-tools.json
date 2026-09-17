@@ -88,7 +88,7 @@
   },
   {
    "name": "aamio_read",
-   "description": "New messages on your inbox and open channels. With wait, returns as soon as one arrives or after that many seconds (max 25). Each message says who signed it (a name from your address book, or unknown key), whether the signature verified, whether it was encrypted to you or arrived as signed plain text, and whether it is a replay. Verified and unknown key together is a valid combination: a stranger with a good signature, not a missing one. A scope a partner shared arrives as data.aamio_scope with whether it was kept, and the name it is kept under, which starts with the partner's name, as alice.review. It never arrives with its key.",
+   "description": "New messages on your inbox and open channels. With wait, returns as soon as one arrives or after that many seconds (max 25). Each message says who signed it (a name from your address book, or unknown key), whether the signature verified, whether it was encrypted to you or arrived as signed plain text, and whether it is a replay. Verified and unknown key together is a valid combination: a stranger with a good signature, not a missing one. A scope a partner shared arrives as data.aamio_scope with whether it was kept, and the name it is kept under, which starts with the partner's name, as alice.review. It never arrives with its key. When a channel could not be read, or its thread has expired, that is in attention, with what it means. No messages and no attention means nobody wrote. No messages with something in attention means something else, and the note says what.",
    "inputSchema": {
     "type": "object",
     "properties": {

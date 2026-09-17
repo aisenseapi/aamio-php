@@ -127,7 +127,11 @@ try {
             out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), is_array($data) ? $data : null));
             break;
         case 'read':
-            out($runtime->read((int) ($opts['wait'] ?? 0)));
+            // attention carries what the read could not do. Without it an
+            // expired thread and a service that did not answer both read as
+            // no messages at all.
+            $messages = $runtime->read((int) ($opts['wait'] ?? 0));
+            out(['messages' => $messages, 'count' => count($messages), 'attention' => $runtime->attentionTaken()]);
             break;
         case 'receipt':
             out($runtime->receipt((string) ($opts['channel'] ?? 'inbox'), isset($opts['anchor'])));
@@ -165,7 +169,7 @@ try {
                         $runtime->read($wait);
                     }
                     $replies = $runtime->boardReplies($opts['post'] ?? null);
-                    $answer = ['replies' => $replies, 'reply_address' => $runtime->boardReplyAddress()];
+                    $answer = ['replies' => $replies, 'reply_address' => $runtime->boardReplyAddress(), 'attention' => $runtime->attentionTaken()];
                     if (isset($opts['post'])) {
                         // What else is on the board inbox, so an empty list for
                         // one post is never read as an empty inbox.

@@ -68,6 +68,15 @@ final class Runtime
     public bool $archiveEnabled;
     /** @var callable */
     public $log;
+    /**
+     * What a read could not do, kept by channel and state until it is handed
+     * to a caller. An empty read means nothing arrived. An empty read on a
+     * thread that has expired, or that the service would not answer for,
+     * means something else entirely, and both used to look the same.
+     *
+     * @var array<string, array>
+     */
+    public array $attention = [];
     private float $presenceAt = 0.0;
     /** @var array<string, array> */
     private array $gates = [];
@@ -319,6 +328,20 @@ final class Runtime
             $line = json_encode($record, JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
         }
         file_put_contents($this->path('archive' . DIRECTORY_SEPARATOR . $label . '.jsonl'), $line . "\n", FILE_APPEND | LOCK_EX);
+    }
+
+    /** @return string[] labels this runtime has an archive for, the ones a board inbox uses */
+    private function archiveLabels(string $prefix = 'board'): array
+    {
+        if (!$this->archiveEnabled) {
+            return [];
+        }
+        $labels = [];
+        foreach ((array) @glob($this->path('archive' . DIRECTORY_SEPARATOR . $prefix . '*.jsonl')) as $file) {
+            $labels[] = basename((string) $file, '.jsonl');
+        }
+
+        return $labels;
     }
 
     /** Entries this client wrote down for a channel, oldest first; empty when archiving is off or the file is not there. */
@@ -961,7 +984,12 @@ final class Runtime
                 }
             }
         }
-        $labels = array_unique(array_merge(array_keys($this->channels), ['board']));
+        // A board inbox is renewed while the old one still holds answers, and
+        // the old one keeps its own label and its own archive. Once that
+        // channel expires it leaves $this->channels, and reading only the
+        // channels this process holds made those answers vanish from here
+        // although they had arrived, been decrypted and been written down.
+        $labels = array_unique(array_merge(array_keys($this->channels), ['board'], $this->archiveLabels()));
         sort($labels);
         foreach ($labels as $label) {
             foreach ($this->archived($label, 'received') as $entry) {
@@ -1399,9 +1427,13 @@ final class Runtime
     {
         $read = $this->client->read($channel->w, $channel->readKey, $channel->after, $wait);
         if ($read['status'] === 410) {
+            $this->note($channel, 'expired', 'the thread at this address has expired, so anything written to it before now is gone and nothing more will arrive here');
+
             return ['expired', []];
         }
         if ($read['status'] !== 200) {
+            $this->note($channel, 'unread', 'the service answered ' . $read['status'] . ', so this channel was not read and there may be messages waiting');
+
             return ['error', []];
         }
         $entries = [];
@@ -1445,6 +1477,23 @@ final class Runtime
         }
 
         return ['ok', $entries];
+    }
+
+    /** Something a caller has to hear about, even though the read returned no messages. */
+    private function note(Channel $channel, string $state, string $what): void
+    {
+        $this->attention[$channel->label . '|' . $state] = ['channel' => $channel->label, 'w' => $channel->w, 'state' => $state, 'what' => $what, 'at' => time()];
+        ($this->log)($channel->label . ': ' . $what);
+    }
+
+    /** What the reads since the last call could not do, once, and then cleared. */
+    public function attentionTaken(): array
+    {
+        $taken = array_values($this->attention);
+        usort($taken, static fn (array $a, array $b): int => [$a['at'], $a['channel']] <=> [$b['at'], $b['channel']]);
+        $this->attention = [];
+
+        return $taken;
     }
 
     /** New messages on the inbox and every open channel; the first channel waits, the rest are read at once. */
