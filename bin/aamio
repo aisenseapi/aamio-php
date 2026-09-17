@@ -164,7 +164,14 @@ try {
                     if ($wait > 0) {
                         $runtime->read($wait);
                     }
-                    out($runtime->boardReplies($opts['post'] ?? null));
+                    $replies = $runtime->boardReplies($opts['post'] ?? null);
+                    $answer = ['replies' => $replies, 'reply_address' => $runtime->boardReplyAddress()];
+                    if (isset($opts['post'])) {
+                        // What else is on the board inbox, so an empty list for
+                        // one post is never read as an empty inbox.
+                        $answer['others_on_the_board_inbox'] = count($runtime->boardReplies()) - count($replies);
+                    }
+                    out($answer);
                     break;
                 case 'withdraw':
                     out($runtime->boardWithdraw((string) ($args[2] ?? fail('board withdraw POST'))));

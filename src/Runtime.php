@@ -937,14 +937,19 @@ final class Runtime
     {
         $wanted = static function (array $entry) use ($postId): bool {
             $body = $entry['body'] ?? null;
-            if (!is_array($body)) {
-                return false;
+            if ($postId !== null) {
+                return is_array($body) && ($body['post'] ?? null) === $postId;
             }
-            if ($postId === null) {
-                return is_string($body['post'] ?? null);
+            // An answer names the post it answers, and most do. One that does
+            // not is still an answer if it arrived on the address a post gave
+            // out, and it used to be dropped here: the command reported no
+            // replies while the inbox held two, which reads as silence from
+            // the other side rather than as a filter of ours.
+            if (str_starts_with((string) ($entry['channel'] ?? ''), 'board')) {
+                return true;
             }
 
-            return ($body['post'] ?? null) === $postId;
+            return is_array($body) && is_string($body['post'] ?? null);
         };
         $out = [];
         $seen = [];

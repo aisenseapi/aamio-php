@@ -330,6 +330,17 @@ $check($answer['post'] === $post['id'] && $answer['seq'] === 1 && $answer['reply
 $b->read();
 $replies = $b->boardReplies($post['id']);
 $check(count($replies) === 1 && $replies[0]['body']['text'] === 'I have it, 41 h, no excursion' && $replies[0]['encrypted'] && $replies[0]['sender'] === 'Al', 'the poster reads the answer, decrypted and verified');
+// Found in the wild 17 September 2026: the command said no replies while the
+// board inbox held two, because neither named the post it answered.
+$b->channels['board']->received[] = ['channel' => 'board', 'seq' => 99, 'at' => time(), 'sha256' => str_repeat('n', 64), 'body' => ['reply_to' => str_repeat('r', 20), 'text' => 'an answer that never names the post']];
+$b->channels['aside'] = new Channel('aside', 'read', str_repeat('c', 20), time() + 600);
+$b->channels['aside']->received[] = ['channel' => 'aside', 'seq' => 1, 'at' => time(), 'sha256' => str_repeat('p', 64), 'body' => ['text' => 'a private message, nobody\'s board reply']];
+$everyReply = $b->boardReplies();
+$onlyPost = $b->boardReplies($post['id']);
+$check(count($everyReply) === count($onlyPost) + 1 && array_filter($everyReply, static fn (array $r): bool => ($r['sha256'] ?? '') === str_repeat('p', 64)) === [], 'an answer without a post id is still a reply on the board inbox, while a private message is not', count($everyReply) . ' and ' . count($onlyPost));
+unset($b->channels['aside']);
+array_pop($b->channels['board']->received);
+
 $where = $a->boardReplyAddress();
 $check($where['open'] === true && $where['w'] === $a->channels['board']->w, 'the reply address is open');
 $b->close();
