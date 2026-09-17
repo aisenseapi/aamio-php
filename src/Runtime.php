@@ -327,11 +327,18 @@ final class Runtime
         if ($line === false) {
             $line = json_encode($record, JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
         }
-        file_put_contents($this->path('archive' . DIRECTORY_SEPARATOR . $label . '.jsonl'), $line . "\n", FILE_APPEND | LOCK_EX);
+        // A write that failed says so. file_put_contents warns and returns
+        // false, so the caller used to record archived: true for a message
+        // that never reached the disk, and the command line, one process per
+        // command, could never read it again.
+        $file = $this->path('archive' . DIRECTORY_SEPARATOR . $label . '.jsonl');
+        if (@file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX) === false) {
+            throw new \RuntimeException('could not append to ' . $file);
+        }
     }
 
     /** @return string[] labels this runtime has an archive for, the ones a board inbox uses */
-    private function archiveLabels(string $prefix = 'board'): array
+    private function archiveLabels(string $prefix = ''): array
     {
         if (!$this->archiveEnabled) {
             return [];
@@ -354,8 +361,14 @@ final class Runtime
         if (!is_file($path)) {
             return [];
         }
+        $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines === false) {
+            $this->noteTrouble('archive', 'unread', 'the archive ' . basename($path) . ' could not be read, so answers written down earlier are not in this result');
+
+            return [];
+        }
         $found = [];
-        foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+        foreach ($lines as $line) {
             $record = json_decode($line, true);
             if (is_array($record) && ($record['kind'] ?? null) === $kind) {
                 $found[] = $record;
@@ -863,11 +876,25 @@ final class Runtime
         return $body;
     }
 
+    /**
+     * The post, or null when the board says there is none. Anything else throws.
+     *
+     * Every status but 200 used to be null, and the caller turned null into
+     * "no live post with that id". A board that was down, rate limiting or
+     * unreachable was therefore reported as a post that does not exist, which
+     * is the opposite of what a reader should do about it.
+     */
     public function boardGet(string $postId): ?array
     {
         $got = $this->board->get($postId);
+        if ($got['status'] === 200 && is_array($got['body'])) {
+            return $got['body'];
+        }
+        if (in_array($got['status'], [404, 410], true)) {
+            return null;
+        }
 
-        return $got['status'] === 200 && is_array($got['body']) ? $got['body'] : null;
+        throw new \RuntimeException('the board answered ' . $got['status'] . ' for post ' . $postId . ', so whether that post is live is unknown. Ask again rather than treating it as gone');
     }
 
     public function boardTags(): array
@@ -1482,8 +1509,13 @@ final class Runtime
     /** Something a caller has to hear about, even though the read returned no messages. */
     private function note(Channel $channel, string $state, string $what): void
     {
-        $this->attention[$channel->label . '|' . $state] = ['channel' => $channel->label, 'w' => $channel->w, 'state' => $state, 'what' => $what, 'at' => time()];
-        ($this->log)($channel->label . ': ' . $what);
+        $this->noteTrouble($channel->label, $state, $what, $channel->w);
+    }
+
+    private function noteTrouble(string $where, string $state, string $what, ?string $w = null): void
+    {
+        $this->attention[$where . '|' . $state] = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
+        ($this->log)($where . ': ' . $what);
     }
 
     /** What the reads since the last call could not do, once, and then cleared. */
@@ -1502,13 +1534,22 @@ final class Runtime
         $this->ensureInbox();
         $this->publishPresence();
         $collected = [];
-        $first = true;
+        $waited = false;
         foreach (array_values($this->channels) as $channel) {
-            [, $entries] = $this->poll($channel, $first ? $wait : 0);
-            $first = false;
+            [$state, $entries] = $this->poll($channel, $waited ? 0 : $wait);
+            // A channel that answered 410 or nothing at all used to eat the
+            // whole wait, so a read with wait 25 came back at once and the
+            // inbox was only ever asked with wait 0.
+            $waited = $waited || $state === 'ok';
             foreach ($entries as $entry) {
                 $collected[] = $entry;
             }
+        }
+        if (count($collected) > $limit) {
+            // The cursor has already moved past all of them. The surplus is in
+            // the archive, and a read will not hand it over again, so saying
+            // nothing here loses messages the runtime did receive.
+            $this->noteTrouble('read', 'truncated', sprintf('%d more messages were read than this call hands over, and the cursor has moved past them. They are in the archive, and another read will not bring them back. Ask for a higher limit to see them here.', count($collected) - $limit));
         }
 
         return array_slice($collected, 0, $limit);

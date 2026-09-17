@@ -147,16 +147,30 @@ final class Client
     {
         $out = ['seq' => $message['seq'] ?? null, 'at' => $message['at'] ?? null, 'from' => $message['from'] ?? null, 'verified' => (bool) ($message['verified'] ?? false), 'sealed' => (bool) ($message['sealed'] ?? false), 'body' => $message['body'] ?? '', 'opened' => null, 'format' => 'text'];
         $body = (string) ($message['body'] ?? '');
-        if ($out['sealed'] && $this->keys !== null && !empty($message['from'])) {
-            try {
-                $out['opened'] = $this->keys->open((string) $message['from'], $body);
-                $out['format'] = 'sealed';
-            } catch (\Throwable $error) {
-                $out['format'] = 'unreadable';
-                $out['error'] = $error->getMessage();
+        if ($out['sealed']) {
+            // The envelope names who it is sealed to, as the first 8 hex of
+            // sha256 over the recipient key, so that question is answered by
+            // reading it rather than guessed at. Without keys, or without a
+            // sender to open against, this client cannot tell and says so:
+            // it used to answer "sealed to someone else" for envelopes that
+            // were sealed to the reader, with no error beside the claim.
+            $envelope = json_decode($body, true);
+            $to = is_array($envelope) ? ($envelope['to'] ?? null) : null;
+            $mine = $this->keys !== null ? $this->keys->hashPrefix : null;
+            if (is_string($to) && $mine !== null && $to !== $mine) {
+                $out['format'] = 'sealed-to-someone-else';
+                $out['error'] = 'this envelope is sealed to ' . $to . ', not to ' . $mine;
+            } elseif ($this->keys === null || empty($message['from'])) {
+                $out['format'] = 'sealed-unchecked';
+            } else {
+                try {
+                    $out['opened'] = $this->keys->open((string) $message['from'], $body);
+                    $out['format'] = 'sealed';
+                } catch (\Throwable $error) {
+                    $out['format'] = 'unreadable';
+                    $out['error'] = $error->getMessage();
+                }
             }
-        } elseif ($out['sealed']) {
-            $out['format'] = 'sealed-to-someone-else';
         }
         $text = $out['opened'] ?? $body;
         $json = json_decode($text, true);

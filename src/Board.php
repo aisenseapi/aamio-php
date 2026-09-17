@@ -189,10 +189,10 @@ final class Board
         $out = ['status' => $read['status'], 'next' => $read['body']['next'] ?? $after, 'replies' => []];
         foreach ((array) ($read['body']['messages'] ?? []) as $message) {
             $decoded = $this->client->decode($message);
-            $json = $decoded['json'] ?? null;
-            if (!is_array($json)) {
-                continue;
-            }
+            // A reply that is not a JSON object is still a reply. Dropping it
+            // here, with nothing counting what was dropped, told the poster
+            // that nobody had written.
+            $json = is_array($decoded['json'] ?? null) ? $decoded['json'] : [];
             $renamed = [];
             foreach (['post' => ['post_id'], 'reply_to' => ['w', 'reply_address', 'replyTo'], 'text' => ['reply', 'message']] as $canonical => $aliases) {
                 if (!array_key_exists($canonical, $json)) {
@@ -210,7 +210,12 @@ final class Board
             }
             $out['replies'][] = [
                 'seq' => $decoded['seq'], 'at' => $decoded['at'], 'from' => $decoded['from'], 'verified' => $decoded['verified'], 'sealed' => $decoded['sealed'],
-                'post' => $json['post'] ?? null, 'reply_to' => $json['reply_to'] ?? null, 'text' => $json['text'] ?? null, 'data' => $json['data'] ?? null, 'renamed' => $renamed,
+                'format' => $decoded['format'],
+                // A reply that is plain text, or an envelope this client cannot
+                // open, carries what there is instead of nothing at all.
+                'post' => $json['post'] ?? null, 'reply_to' => $json['reply_to'] ?? null,
+                'text' => $json['text'] ?? ($json === [] ? ($decoded['opened'] ?? $decoded['body']) : null),
+                'data' => $json['data'] ?? null, 'renamed' => $renamed,
             ];
         }
 
