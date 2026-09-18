@@ -50,6 +50,8 @@ final class FakeService
     public bool $oldBoard = false;
     public bool $forgetScope = false;
     public bool $explode = false;
+    /** Every read answers 503, a service that is there and will not read. */
+    public bool $down = false;
     public int $pageSize = 200;
     public int $now;
     private int $seq = 0;
@@ -101,7 +103,7 @@ final class FakeService
             $w = $m[1];
             $sub = $m[2] ?? '';
             if ($method === 'PUT') {
-                $this->threads[$w] = ['id' => $headers['X-Read'], 'expire_at' => $this->now + (int) ($headers['X-TTL'] ?? 600), 'allow' => isset($headers['X-Allow']) ? explode(',', $headers['X-Allow']) : [], 'messages' => [], 'gate' => $json['gate'] ?? []];
+                $this->threads[$w] = ['id' => $headers['X-Read'], 'created_at' => $this->now, 'expire_at' => $this->now + (int) ($headers['X-TTL'] ?? 600), 'allow' => isset($headers['X-Allow']) ? explode(',', $headers['X-Allow']) : [], 'messages' => [], 'gate' => $json['gate'] ?? []];
 
                 return [201, ['w' => $w, 'created_at' => $this->now, 'expire_at' => $this->threads[$w]['expire_at'], 'ttl' => (int) ($headers['X-TTL'] ?? 600), 'count' => 0, 'bytes' => 0, 'allow' => $this->threads[$w]['allow']], []];
             }
@@ -129,6 +131,14 @@ final class FakeService
 
                 return [201, ['w' => $w, 'seq' => $seq, 'at' => $message['at'], 'sha256' => $message['sha256'], 'verified' => $message['verified'], 'sealed' => $message['sealed'], 'count' => $seq, 'expire_at' => $thread['expire_at']], []];
             }
+            if ($method === 'GET' && $sub === '' && $this->down) {
+                return [503, ['error' => 'the fake will not read', 'fix' => 'ask again later'], []];
+            }
+            if ($method === 'GET' && $sub === '' && $thread === null && isset($headers['X-Read'])) {
+                $after = (int) ($m[3] ?? 0);
+
+                return [200, ['w' => $w, 'exists' => false, 'created_at' => null, 'expire_at' => null, 'count' => 0, 'messages' => [], 'next' => 0, 'waited' => 0, 'note' => 'There is no thread at this address.'] + ($after > 0 ? ['reset' => ['after' => $after, 'newest' => 0, 'what' => 'The cursor sent was for a thread that is not here now.']] : []), []];
+            }
             if ($thread === null || ($headers['X-Read'] ?? '') !== $thread['id']) {
                 return [$thread === null ? 404 : 403, ['error' => 'no', 'fix' => 'no'], []];
             }
@@ -147,9 +157,14 @@ final class FakeService
                 return [200, ['w' => $w, 'deleted' => true], []];
             }
             $after = (int) ($m[3] ?? 0);
+            $reset = null;
+            if ($after > count($thread['messages'])) {
+                $reset = ['after' => $after, 'newest' => count($thread['messages']), 'what' => 'after ' . $after . ' is past the last message this thread holds'];
+                $after = 0;
+            }
             $messages = array_values(array_filter($thread['messages'], static fn (array $msg): bool => $msg['seq'] > $after));
 
-            return [200, ['w' => $w, 'exists' => true, 'count' => count($thread['messages']), 'messages' => $messages, 'next' => $messages === [] ? $after : end($messages)['seq'], 'waited' => 0], []];
+            return [200, ['w' => $w, 'exists' => true, 'created_at' => $thread['created_at'] ?? $this->now, 'count' => count($thread['messages']), 'messages' => $messages, 'next' => $messages === [] ? $after : end($messages)['seq'], 'waited' => 0] + ($reset === null ? [] : ['reset' => $reset]), []];
         }
 
         return [404, ['error' => 'Not found', 'fix' => 'no such route in the fake'], []];
@@ -375,19 +390,67 @@ $b = new Runtime($homeB, 'https://fake.test', null, true, $quiet);
 // An empty read used to mean four different things: a quiet inbox, an expired
 // thread, a service that did not answer, and a key that no longer matched.
 echo "an empty read that is not an empty inbox\n";
-$lost = $a->channels['inbox'];
-$missing = $fake->threads[$lost->w];
-unset($fake->threads[$lost->w]);
+$fake->down = true;
 $nothing = $a->read();
 $attention = $a->attentionTaken();
-$fake->threads[$lost->w] = $missing;
-$check($nothing === [] && count($attention) === 1 && $attention[0]['state'] === 'unread' && str_contains($attention[0]['what'], 'may be messages waiting'), 'a channel the service would not answer for is reported, not read as an empty inbox', json_encode($attention));
+$fake->down = false;
+$check($nothing === [] && $attention !== [] && array_filter($attention, static fn (array $n): bool => $n['state'] !== 'unread') === [] && in_array('inbox', array_column($attention, 'channel'), true) && str_contains($attention[0]['what'], 'may be messages waiting'), 'a channel the service would not answer for is reported, every one of them, not read as an empty inbox', json_encode($attention));
 $check($a->attentionTaken() === [], 'and what is taken once is not taken twice');
 $server = new McpServer($a);
-unset($fake->threads[$lost->w]);
+$fake->down = true;
 $told = $server->handle(['jsonrpc' => '2.0', 'id' => 40, 'method' => 'tools/call', 'params' => ['name' => 'aamio_read', 'arguments' => []]]);
-$fake->threads[$lost->w] = $missing;
+$fake->down = false;
 $check(($told['result']['structuredContent']['count'] ?? null) === 0 && ($told['result']['structuredContent']['attention'][0]['state'] ?? null) === 'unread', 'and the model is told the same over MCP');
+$a->read();
+$a->attentionTaken();
+
+// Threads live on tmpfs. A restart takes them, and a write to an address whose
+// thread is gone opens a new one there that counts from one again, with none
+// of the old allowlist. A missing thread read as a quiet inbox, and a cursor
+// from the old thread was past everything in the new one.
+echo "a thread that went, and one that came back at the same address\n";
+$side = str_repeat('q', 20);
+$fake->threads[$side] = ['id' => 'side-key', 'created_at' => 1000, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => []];
+$put = static function (int $count) use ($fake, $side): void {
+    for ($n = 1; $n <= $count; $n++) {
+        $fake->threads[$side]['messages'][] = ['seq' => $n, 'at' => $fake->now + $n, 'type' => 'text', 'body' => 'm' . $n . '-' . $fake->threads[$side]['created_at'], 'sha256' => hash('sha256', 'm' . $n . '-' . $fake->threads[$side]['created_at']), 'from' => null, 'sig' => null, 'verified' => false, 'sealed' => false];
+    }
+};
+$put(3);
+$a->channels['side'] = new Channel('side', 'side-key', $side, $fake->now + 600);
+$sideChannel = $a->channels['side'];
+[, $first] = $a->poll($sideChannel);
+$check(count($first) === 3 && $sideChannel->after === 3 && $sideChannel->createdAt === 1000, 'the channel reads the thread and learns which one it is');
+
+// A new thread whose count has passed the old cursor: no answer can flag it.
+$fake->threads[$side] = ['id' => 'side-key', 'created_at' => 2000, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => []];
+$put(5);
+[, $again] = $a->poll($sideChannel);
+$noted = $a->attentionTaken();
+$check(count($again) === 5 && $again[0]['seq'] === 1 && $sideChannel->after === 5 && $sideChannel->createdAt === 2000 && ($noted[0]['state'] ?? null) === 'restarted', 'a new thread at the address that passed the old cursor is read again from the start, and said', json_encode($noted));
+
+// A new thread that has not reached the old cursor: the service resets it.
+$fake->threads[$side] = ['id' => 'side-key', 'created_at' => 3000, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => []];
+$put(2);
+[, $reset] = $a->poll($sideChannel);
+$noted = $a->attentionTaken();
+$callsBefore = count($fake->calls);
+$a->poll($sideChannel);
+$asked = end($fake->calls)[1];
+$check(count($reset) === 2 && $sideChannel->after === 2 && ($noted[0]['state'] ?? null) === 'restarted' && str_contains($asked, '/after/2') && !array_filter($reset, static fn (array $e): bool => $e['replay']), 'a reset is followed with the service\'s next, so the next read asks from 2 and nothing comes twice', $asked);
+
+// Gone: said once, the cursor goes back, and the inbox is opened again.
+unset($fake->threads[$side]);
+[$state] = $a->poll($sideChannel);
+$gone = $a->attentionTaken();
+$a->poll($sideChannel);
+$check($state === 'gone' && ($gone[0]['state'] ?? null) === 'gone' && $sideChannel->after === 0 && $sideChannel->createdAt === null && $a->attentionTaken() === [], 'a thread that is gone is said once, and the cursor goes back to zero', json_encode($gone));
+unset($a->channels['side']);
+$oldInbox = $a->channels['inbox'];
+$oldInbox->gone = true;
+$renewed = $a->ensureInbox();
+$check($renewed->w !== $oldInbox->w && isset($a->channels['inbox-' . $oldInbox->expireAt]), 'a gone inbox is opened again, and the old address is still read');
+unset($a->channels['inbox-' . $oldInbox->expireAt]);
 $a->read();
 $a->attentionTaken();
 

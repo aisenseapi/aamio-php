@@ -698,7 +698,11 @@ final class Runtime
     public function ensureInbox(): Channel
     {
         $inbox = $this->channels['inbox'] ?? null;
-        if ($inbox !== null && $inbox->expireAt - time() > self::RENEW_BEFORE) {
+        // A gone inbox is opened again at once. A write to the old address
+        // opens a thread there with none of this inbox's allowlist, so the
+        // partners are pointed at a new one that has it. The old address is
+        // still read until its time runs out, for whoever writes there anyway.
+        if ($inbox !== null && $inbox->expireAt - time() > self::RENEW_BEFORE && !$inbox->gone) {
             return $inbox;
         }
         $allow = $this->partners !== [] ? array_map(static fn (array $p): string => $p['key'], $this->partners) : null;
@@ -1486,6 +1490,41 @@ final class Runtime
 
             return ['error', []];
         }
+        // Three answers that used to read as a quiet inbox. No thread at the
+        // address: never written to, swept after expiry, or taken by a
+        // restart. A reset: the cursor was past everything the thread holds, so
+        // the service read from the start. And a created_at that is not the one
+        // this channel knew: a new thread at the same address whose count has
+        // already passed the old cursor, which the service cannot flag, since
+        // it does not know what this channel has seen. In all three the old
+        // cursor and the old hashes belong to another thread.
+        // Not $body: the loop below decodes each message into $body, and a
+        // read of next after it got the last message's body instead.
+        $answer = (array) ($read['body'] ?? []);
+        if (($answer['exists'] ?? null) === false) {
+            if (!$channel->gone) {
+                $this->note($channel, 'gone', 'there is no thread at this address any more. It expired and was swept, or the service restarted and it went with it. A write opens a new one here with the default lifetime and without the allowlist or gate this channel was opened with' . ($channel->label === 'inbox' ? ', so a new inbox is opened for the partners' : ''));
+            }
+            $channel->gone = true;
+            $channel->forgetThread();
+            $this->saveState();
+
+            return ['gone', []];
+        }
+        $channel->gone = false;
+        $created = isset($answer['created_at']) ? (int) $answer['created_at'] : null;
+        $reset = $answer['reset'] ?? null;
+        if ($channel->createdAt !== null && $created !== null && $created !== $channel->createdAt && !$reset) {
+            $this->note($channel, 'restarted', 'the thread at this address is a new one, opened at ' . $created . ' where this channel knew one opened at ' . $channel->createdAt . ', so it is read again from the start');
+            $channel->forgetThread();
+
+            return $this->poll($channel, 0);
+        }
+        if ($reset) {
+            $this->note($channel, 'restarted', (is_array($reset) && is_string($reset['what'] ?? null)) ? $reset['what'] : 'the service read this thread from the start');
+            $channel->seen = [];
+        }
+        $channel->createdAt = $created;
         $entries = [];
         foreach ((array) ($read['body']['messages'] ?? []) as $message) {
             $from = $message['from'] ?? null;
@@ -1523,6 +1562,14 @@ final class Runtime
         if ($entries !== []) {
             // The cursor moves and the hashes are stored in the same save, before the caller sees a message.
             $channel->after = max($channel->after, (int) end($entries)['seq']);
+            $this->saveState();
+        }
+        // After a reset the service's next is the cursor, and it is lower than
+        // the one this channel held. Keeping the higher of the two would ask
+        // past the new thread on every call and hand the same messages over
+        // each time.
+        if ($reset && is_int($answer['next'] ?? null)) {
+            $channel->after = $answer['next'];
             $this->saveState();
         }
 
@@ -1563,7 +1610,8 @@ final class Runtime
             // A channel that answered 410 or nothing at all used to eat the
             // whole wait, so a read with wait 25 came back at once and the
             // inbox was only ever asked with wait 0.
-            $waited = $waited || $state === 'ok';
+            // A gone channel did wait: the service holds a read of a missing thread for a write.
+            $waited = $waited || $state === 'ok' || $state === 'gone';
             foreach ($entries as $entry) {
                 $collected[] = $entry;
             }
