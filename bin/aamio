@@ -15,6 +15,7 @@ declare(strict_types=1);
  *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO] [--scope NAME]
  *   board find [--kind K] [--tags a,b] [--lang L] [--after N] [--wait N] [--min-work-bits N] [--scope NAME]
  *   board tags | board answer POST TEXT [--scope NAME] | board replies [--post ID] [--wait N] | board withdraw POST
+ *   (board replies filters. read shows everything on the inbox, opened bodies and the ones that would not open)
  *   board channel KEY [--ttl N] [--reply-to W] [--note TEXT]
  *   scope new NAME | scope add NAME (--key KEY | --address ADDRESS) | scope list | scope key NAME
  *   scope share NAME PARTNER --access read|write | scope remove NAME

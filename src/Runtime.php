@@ -1003,11 +1003,14 @@ final class Runtime
         };
         $out = [];
         $seen = [];
+        $skipped = [];
         foreach ($this->channels as $channel) {
             foreach ($channel->received as $entry) {
+                $seen[$entry['sha256']] = true;
                 if ($wanted($entry)) {
-                    $seen[$entry['sha256']] = true;
                     $out[] = $entry;
+                } else {
+                    $skipped[] = $entry;
                 }
             }
         }
@@ -1020,14 +1023,34 @@ final class Runtime
         sort($labels);
         foreach ($labels as $label) {
             foreach ($this->archived($label, 'received') as $entry) {
-                if ($wanted($entry) && !isset($seen[$entry['sha256'] ?? ''])) {
-                    $seen[$entry['sha256'] ?? ''] = true;
+                if (isset($seen[$entry['sha256'] ?? ''])) {
+                    continue;
+                }
+                $seen[$entry['sha256'] ?? ''] = true;
+                if ($wanted($entry)) {
                     $entry['from_archive'] = true;
                     $out[] = $entry;
+                } else {
+                    $skipped[] = $entry;
                 }
             }
         }
         usort($out, static fn (array $a, array $b): int => [(int) ($a['at'] ?? 0), (int) ($a['seq'] ?? 0)] <=> [(int) ($b['at'] ?? 0), (int) ($b['seq'] ?? 0)]);
+        // An empty list here used to be read as an empty inbox, and the reader
+        // went looking for the fault at the other end. Whatever this filter
+        // passed over is still a message, so it says how many and where they
+        // are. Only when the answer is empty: a caller that got what it asked
+        // for does not need to hear about the rest, and a note on every call
+        // is noise that teaches the reader to skip notes.
+        if ($skipped !== [] && $out === []) {
+            $unopened = count(array_filter($skipped, static fn (array $entry): bool => !($entry['verified'] ?? false)));
+            $unread = $unopened > 0 ? ', and ' . $unopened . ' of them arrived unsigned, so the body was never opened' : '';
+            if ($postId !== null) {
+                $this->noteTrouble('board replies', 'filtered', 'Nothing here answers post ' . $postId . ', but ' . count($skipped) . ' other message(s) are on your channels' . $unread . '. Run board replies without a post, or read, to see them.');
+            } else {
+                $this->noteTrouble('board replies', 'filtered', count($skipped) . ' message(s) are here and none of them looks like a board answer, because they name no post and did not arrive on a board inbox' . $unread . '. Run read to see them.');
+            }
+        }
 
         return $out;
     }

@@ -341,6 +341,20 @@ $check(count($everyReply) === count($onlyPost) + 1 && array_filter($everyReply, 
 unset($b->channels['aside']);
 array_pop($b->channels['board']->received);
 
+// Found in the wild 18 September 2026: an agent asked for replies, got an
+// empty list while its inbox held the answer, stopped believing the client
+// and spent an hour hand rolling nacl on the raw envelope. The filter was
+// right. Saying nothing about what it filtered was not.
+$b->attentionTaken();
+$b->channels['aside'] = new Channel('aside', 'read', str_repeat('c', 20), time() + 600);
+$b->channels['aside']->received[] = ['channel' => 'aside', 'seq' => 1, 'at' => time(), 'verified' => false, 'sha256' => str_repeat('q', 64), 'body' => ['text' => '{"e2ee":"nacl.box.v1"}']];
+$noAnswer = $b->boardReplies('p404');
+$noted = $b->attentionTaken();
+$check($noAnswer === [] && count($noted) === 1 && $noted[0]['state'] === 'filtered' && str_contains($noted[0]['what'], 'p404') && str_contains($noted[0]['what'], 'arrived unsigned'), 'an empty answer says how many messages it passed over, and that one was never opened', json_encode($noted));
+$stillThere = $b->boardReplies($post['id']);
+$check(count($stillThere) === 1 && $b->attentionTaken() === [], 'a call that found its answer says nothing about the rest of the inbox');
+unset($b->channels['aside']);
+
 // A board inbox is renewed while the old one still holds answers, and the old
 // one keeps its own label and its own archive. Reading only the channels the
 // process holds made those answers vanish from the replies command.
