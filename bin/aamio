@@ -170,7 +170,14 @@ try {
                         $runtime->read($wait);
                     }
                     $replies = $runtime->boardReplies($opts['post'] ?? null);
-                    $answer = ['replies' => $replies, 'reply_address' => $runtime->boardReplyAddress(), 'attention' => $runtime->attentionTaken()];
+                    // How many messages this left out, every time and not only
+                    // when it found nothing: an answer that names no post is
+                    // still somebody answering.
+                    $leftOut = $runtime->boardRepliesLeftOut;
+                    $answer = ['replies' => $replies, 'left_out' => $leftOut, 'reply_address' => $runtime->boardReplyAddress(), 'attention' => $runtime->attentionTaken()];
+                    if ($leftOut > 0) {
+                        $answer['note'] = $leftOut . ' message(s) on your inboxes are not listed here, because they name no post of yours and did not arrive on a board inbox. aamio read shows every message.';
+                    }
                     if (isset($opts['post'])) {
                         // What else is on the board inbox, so an empty list for
                         // one post is never read as an empty inbox.

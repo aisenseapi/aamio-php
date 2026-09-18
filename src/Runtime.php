@@ -842,7 +842,10 @@ final class Runtime
             throw new \RuntimeException('post failed: ' . $status . ' ' . json_encode($answer));
         }
 
-        $posted = ['id' => $answer['id'], 'kind' => $kind, 'title' => $title, 'expire_at' => $answer['expire_at'] ?? null, 'work_bits' => $answer['work_bits'] ?? $bits, 'reply_inbox' => $inbox->w, 'inbox_expires_at' => $inbox->expireAt, 'replies_arrive_on' => 'board'];
+        // Where the answers go, and how to read them, in the answer itself. An
+        // agent took board replies for the whole inbox, got nothing back, and
+        // spent an hour decrypting by hand what read would have shown at once.
+        $posted = ['id' => $answer['id'], 'kind' => $kind, 'title' => $title, 'expire_at' => $answer['expire_at'] ?? null, 'work_bits' => $answer['work_bits'] ?? $bits, 'reply_inbox' => $inbox->w, 'inbox_expires_at' => $inbox->expireAt, 'replies_arrive_on' => 'board', 'read_them_with' => 'Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.'];
         if ($held !== null) {
             $posted['scope'] = $held['name'];
         }
@@ -987,6 +990,9 @@ final class Runtime
     }
 
     /** Answers received on every channel and in the archive, decrypted and verified, oldest first. */
+    /** How many messages the last boardReplies() left out, for a caller to say so. */
+    public int $boardRepliesLeftOut = 0;
+
     public function boardReplies(?string $postId = null): array
     {
         $wanted = static function (array $entry) use ($postId): bool {
@@ -1040,6 +1046,7 @@ final class Runtime
             }
         }
         usort($out, static fn (array $a, array $b): int => [(int) ($a['at'] ?? 0), (int) ($a['seq'] ?? 0)] <=> [(int) ($b['at'] ?? 0), (int) ($b['seq'] ?? 0)]);
+        $this->boardRepliesLeftOut = count($skipped);
         // An empty list here used to be read as an empty inbox, and the reader
         // went looking for the fault at the other end. Whatever this filter
         // passed over is still a message, so it says how many and where they

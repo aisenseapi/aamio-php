@@ -366,6 +366,9 @@ $b->channels['aside']->received[] = ['channel' => 'aside', 'seq' => 1, 'at' => t
 $noAnswer = $b->boardReplies('p404');
 $noted = $b->attentionTaken();
 $check($noAnswer === [] && count($noted) === 1 && $noted[0]['state'] === 'filtered' && str_contains($noted[0]['what'], 'p404') && str_contains($noted[0]['what'], 'arrived unsigned'), 'an empty answer says how many messages it passed over, and that one was never opened', json_encode($noted));
+// And the count of what it left out is there on every call, not only when
+// the list is empty, with the answer to a post saying how answers are read.
+$check($b->boardRepliesLeftOut === 4 && str_contains((string) ($post['read_them_with'] ?? ''), 'aamio read'), 'board replies counts what it left out every time, and a post says its answers are read with read', $b->boardRepliesLeftOut . ' left out');
 $stillThere = $b->boardReplies($post['id']);
 $check(count($stillThere) === 1 && $b->attentionTaken() === [], 'a call that found its answer says nothing about the rest of the inbox');
 unset($b->channels['aside']);
