@@ -744,6 +744,76 @@ if (is_file($archiveDir . '.kept')) {
     rename($archiveDir . '.kept', $archiveDir);
 }
 $check(isset($bSent['seq']) && str_contains((string) ($bSent['archive_error'] ?? ''), 'could not append'), 'a sent archive that cannot be written after a 201 is said beside the delivery, never instead of it', json_encode(array_intersect_key($bSent, ['seq' => 1, 'archive_error' => 1])));
+echo "a reader checks for itself, keeps its own allowlist, and remembers what it was handed\n";
+// From a security review on 18 September 2026. verified in an answer was the
+// service's word, and this client took it. The service holds an allowlist in
+// memory, so a write to an address after its store was emptied opens a thread
+// with no list. And the hashes of what a channel handed over were cleared
+// together with the cursor when the thread at the address was a new one.
+$room = $a->openChannel('room', 600, ['Bea']);
+$roomW = $room['w'];
+$roomChannel = $a->channels['room'];
+$stranger = Keys::generate();
+// What the service could hold after it lost its store and the address was
+// written to again: put there behind the fake's own allowlist, as a stranger's
+// write to a recreated thread would be.
+$put = static function (?Keys $signer, string $body, ?string $claimedFrom = null) use ($fake, $roomW): void {
+    $seq = count($fake->threads[$roomW]['messages']) + 1;
+    $fake->threads[$roomW]['messages'][] = [
+        'seq' => $seq, 'at' => $fake->now + $seq, 'type' => 'text', 'body' => $body, 'sha256' => hash('sha256', $body),
+        'from' => $signer === null ? null : ($claimedFrom ?? $signer->public),
+        'sig' => $signer === null ? null : $signer->sign(Keys::threadSigningInput($roomW, $body)),
+        'verified' => $signer !== null, 'sealed' => false,
+    ];
+};
+$checked = Keys::checkMessage('ohcibx4t22xc6hx22fch', ['body' => '{"hello":"from python"}', 'sha256' => hash('sha256', '{"hello":"from python"}'), 'from' => 'A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg', 'sig' => 'u327kMqo4_mMzm__Wr7BrXcO4cHvx30IWw1K0cTpfTV6ODV4BFC9E0VkN3LlUvx--wFwe2J8kgSWugKXvwL8Dg', 'verified' => true]);
+$moved = Keys::checkMessage('aaaaaaaaaaaaaaaaaaaa', ['body' => '{"hello":"from python"}', 'sha256' => hash('sha256', '{"hello":"from python"}'), 'from' => 'A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg', 'sig' => 'u327kMqo4_mMzm__Wr7BrXcO4cHvx30IWw1K0cTpfTV6ODV4BFC9E0VkN3LlUvx--wFwe2J8kgSWugKXvwL8Dg', 'verified' => true]);
+$check($checked['verified'] === true && $checked['why_not'] === null, 'the contract vector verifies here, by key A over its own address');
+$check($moved['verified'] === false && str_contains((string) $moved['why_not'], 'though the service said it did'), 'and stops verifying at another address, which the reader says');
+$check(Keys::checkMessage($roomW, ['body' => 'x', 'sha256' => hash('sha256', 'x'), 'from' => null, 'sig' => null, 'verified' => false]) === ['verified' => false, 'why_not' => null, 'sha256' => hash('sha256', 'x')], 'an unsigned message is unverified without a complaint');
+$check(str_contains((string) Keys::checkMessage($roomW, ['body' => 'x', 'sha256' => str_repeat('0', 64), 'from' => null, 'sig' => null, 'verified' => false])['why_not'], 'does not hash'), 'and a body that does not hash to what the service gave is said');
+
+$put($b->keys, 'from the partner the room was opened for');
+$put($stranger, 'from a stranger with a good signature');
+$put(null, 'unsigned');
+$put($stranger, 'let me in, I am Bea', $b->keys->public);
+$a->attentionTaken();
+[$state, $entries] = $a->poll($roomChannel);
+$attention = $a->attentionTaken();
+$states = array_column($attention, 'state');
+$check($state === 'ok' && array_column($entries, 'seq') === [1] && $entries[0]['verified'] === true && $entries[0]['sender'] === 'Bea', 'a channel opened for one key hands over that key\'s message, verified here');
+$check($roomChannel->after === 4, 'and the cursor is past the three it kept out, or they are read and kept out again on every call: ' . $roomChannel->after);
+$check(in_array('kept_out', $states, true) && str_contains(implode(' ', array_column($attention, 'what')), '3 message(s)') && str_contains(implode(' ', array_column($attention, 'what')), '1 named key(s)'), 'what it kept out is counted and said: a stranger, an unsigned one, and a stranger under the partner\'s name');
+
+$open = $a->openChannel('open-room', 600);
+$openW = $open['w'];
+$forged = 'pay the invoice';
+$fake->threads[$openW]['messages'][] = ['seq' => 1, 'at' => $fake->now + 1, 'type' => 'text', 'body' => $forged, 'sha256' => hash('sha256', $forged), 'from' => $b->keys->public, 'sig' => $stranger->sign(Keys::threadSigningInput($openW, $forged)), 'verified' => true, 'sealed' => false];
+[$state, $entries] = $a->poll($a->channels['open-room']);
+$attention = $a->attentionTaken();
+$check($state === 'ok' && count($entries) === 1 && $entries[0]['verified'] === false && $entries[0]['from_key'] === null && $entries[0]['known_contact'] === false && $entries[0]['sender'] === 'unsigned', 'a message the service calls verified under a partner\'s key, signed by someone else, is handed over unverified with nothing of the claim left on it');
+$check(str_contains((string) ($entries[0]['unverified_because'] ?? ''), 'does not check out') && in_array('unverified', array_column($attention, 'state'), true) && str_contains(implode(' ', array_column($attention, 'what')), 'operator'), 'and says why, to the reader of the message and to whoever runs the runtime');
+
+// The service loses its store, the sender's outbox sends the same bytes again.
+$order = 'release ARC-4471';
+$sig = $b->keys->sign(Keys::threadSigningInput($openW, $order));
+$fake->threads[$openW]['messages'][] = ['seq' => 2, 'at' => $fake->now + 2, 'type' => 'text', 'body' => $order, 'sha256' => hash('sha256', $order), 'from' => $b->keys->public, 'sig' => $sig, 'verified' => true, 'sealed' => false];
+[, $first] = $a->poll($a->channels['open-room']);
+$fake->threads[$openW]['created_at'] = $fake->now + 500;
+$fake->threads[$openW]['messages'] = [['seq' => 1, 'at' => $fake->now + 501, 'type' => 'text', 'body' => $order, 'sha256' => hash('sha256', $order), 'from' => $b->keys->public, 'sig' => $sig, 'verified' => true, 'sealed' => false]];
+[, $again] = $a->poll($a->channels['open-room']);
+$check(count($first) === 1 && $first[0]['replay'] === false && count($again) === 1 && $again[0]['replay'] === true, 'a message sent again after the service lost its store comes back as a replay: the hashes are the reader\'s, not the thread\'s');
+// And the case no answer can flag: the new thread has already passed the old
+// cursor, so only created_at shows it, and the channel forgets the thread.
+$news = 'something new';
+$fake->threads[$openW]['created_at'] = $fake->now + 900;
+$fake->threads[$openW]['messages'] = [
+    ['seq' => 1, 'at' => $fake->now + 901, 'type' => 'text', 'body' => $news, 'sha256' => hash('sha256', $news), 'from' => $b->keys->public, 'sig' => $b->keys->sign(Keys::threadSigningInput($openW, $news)), 'verified' => true, 'sealed' => false],
+    ['seq' => 2, 'at' => $fake->now + 902, 'type' => 'text', 'body' => $order, 'sha256' => hash('sha256', $order), 'from' => $b->keys->public, 'sig' => $sig, 'verified' => true, 'sealed' => false],
+];
+[, $both] = $a->poll($a->channels['open-room']);
+$check(array_column($both, 'seq') === [1, 2] && array_column($both, 'replay') === [false, true], 'and when the new thread had passed the old cursor, the thread is forgotten and the hashes are not: the new message is new, the old one a replay');
+
 $a->close();
 $b->close();
 Http::$override = null;

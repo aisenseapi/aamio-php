@@ -33,11 +33,12 @@ $thread = $client->open(600, ['*']);          // 10 minutes, any key may write, 
 $sent = $client->send($thread['w'], ['hello' => 'from php']);          // signed
 $sealed = $client->send($thread['w'], 'for your eyes', true, $partnerKey);  // signed and sealed
 
-$read = $client->read($thread['w'], $thread['id'], after: 0, wait: 25);
+$read = $client->read($thread['w'], $thread['id'], after: 0, wait: 25, allow: ['*']);
 foreach ($read['body']['messages'] as $message) {
-    $m = $client->decode($message);           // verified, sealed, from: the service's fields
+    $m = $client->decode($message);           // verified and from: checked by read(), not the service's word
     echo $m['format'], ' ', $m['opened'] ?? $m['body'], "\n";
 }
+// $read['kept_out'] lists what the allowlist you opened the thread with did not allow
 
 $receipt = $client->receipt($thread['w'], $thread['id']);
 // $receipt['check']['root_adds_up'] is this client's own recomputation of the root
@@ -47,6 +48,14 @@ $client->close($thread['w'], $thread['id']);
 Every call returns what the service answered, with `status` beside it, and
 every refusal carries `error` and `fix`. Status `0` means no answer at all:
 the message may have landed, so it is *unknown*, never *refused*.
+
+`read()` checks every message itself: it hashes the body, compares the hash
+with the `sha256` beside it, and verifies the signature over the address being
+read. A message the service called verified that does not check out comes back
+unverified, without the key it claimed, with `unverified_because`. Pass the
+allowlist you opened the thread with as `allow`, and what it does not allow is
+left out and listed under `kept_out`: the service holds the list in memory, and
+a write to the address after its store was emptied opens a thread with none.
 
 ## Gate
 
@@ -211,8 +220,8 @@ The hosts this client uses by default are in `src/Hosts.php`, `DEFAULT_HOST`, `D
 ## Tests
 
 ```
-php tests/run.php        # 62 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 75 checks of the runtime against a fake service: outbox, replay, unknown, gate, board, scopes, receipt, MCP
+php tests/run.php        # 68 offline checks: the shared vectors, sealing, receipts, gate, scopes
+php tests/runtime.php    # 117 checks of the runtime against a fake service: outbox, replay, unknown, gate, board, scopes, receipt, MCP, and what a reader checks for itself
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 python tests/interop.py  # PHP and Python open each other's envelopes and verify each other's signatures
 ```

@@ -199,20 +199,72 @@ final class Client
         return ['status' => $status, 'body' => $answer, 'sent' => $bytes, 'work' => $work, 'notes' => $plan['notes']];
     }
 
-    /** Reads with the read key. $after and $wait as on the wire, wait at most 25. */
-    public function read(string $w, string $id, int $after = 0, int $wait = 0): array
+    /**
+     * Reads with the read key. $after and $wait as on the wire, wait at most 25.
+     *
+     * Every message is checked here before it is handed over: the body is
+     * hashed and compared with the sha256 beside it, and the signature is
+     * verified over this address. verified and from on what comes back are this
+     * client's result, not the service's word. A message the service called
+     * verified that does not check out comes back unverified, without the key it
+     * claimed, with unverified_because, and service_verified says what the
+     * service had said.
+     *
+     * $allow is the allowlist the thread was opened with. The service holds it
+     * in memory, and a write to the address after its store was emptied opens a
+     * thread with none, so a reader applies its own: what the list does not
+     * allow is left out of messages and listed under kept_out, never dropped in
+     * silence.
+     */
+    public function read(string $w, string $id, int $after = 0, int $wait = 0, ?array $allow = null): array
     {
         $path = '/' . $w . ($after > 0 || $wait > 0 ? '/after/' . $after : '') . ($wait > 0 ? '/wait/' . min($wait, 25) : '');
         [$status, $answer] = Http::call('GET', $this->url($path), null, ['X-Read' => $id], $this->timeout + 25);
+        $out = ['status' => $status, 'body' => $answer];
+        if ($status !== 200 || !is_array($answer) || !is_array($answer['messages'] ?? null)) {
+            return $out;
+        }
+        $allow = array_values((array) $allow);
+        $any = in_array('*', $allow, true);
+        $handed = [];
+        $keptOut = [];
+        foreach ($answer['messages'] as $message) {
+            if (!is_array($message)) {
+                continue;
+            }
+            $checked = Keys::checkMessage($w, $message);
+            if ($checked['why_not'] !== null) {
+                $message['unverified_because'] = $checked['why_not'];
+                $message['service_verified'] = !empty($message['verified']);
+            }
+            $message['verified'] = $checked['verified'];
+            if (!$checked['verified']) {
+                $message['from'] = null;
+            }
+            if ($checked['sha256'] !== null) {
+                $message['sha256'] = $checked['sha256'];
+            }
+            if ($allow !== [] && !($checked['verified'] && ($any || in_array($message['from'], $allow, true)))) {
+                $keptOut[] = ['seq' => $message['seq'] ?? null, 'why' => $any ? 'this thread was opened for signed messages only, and this one did not verify here' : 'this thread was opened for named keys, and this one was not signed by one of them, as checked here'];
+                continue;
+            }
+            $handed[] = $message;
+        }
+        $answer['messages'] = $handed;
+        $out['body'] = $answer;
+        if ($keptOut !== []) {
+            $out['kept_out'] = $keptOut;
+        }
 
-        return ['status' => $status, 'body' => $answer];
+        return $out;
     }
 
     /**
      * Every message read back, with a decoded form beside the raw body: for a
      * sealed message that is addressed to us and opens, 'plaintext'; for
-     * plain text, the body; 'sealed', 'verified', 'from' are the service's
-     * fields and never taken from the payload.
+     * plain text, the body; 'sealed', 'verified', 'from' are never taken from
+     * the payload. On a message that came through read(), verified and from
+     * are this client's own result.
      */
     public function decode(array $message): array
     {

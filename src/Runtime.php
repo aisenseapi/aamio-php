@@ -1518,7 +1518,9 @@ final class Runtime
     /** One read of a channel from its cursor: [state, entries], state ok | expired | error. */
     public function poll(Channel $channel, int $wait = 0): array
     {
-        $read = $this->client->read($channel->w, $channel->readKey, $channel->after, $wait);
+        // The channel's own allowlist goes with the read: the client checks
+        // every message itself and keeps out what the list does not allow.
+        $read = $this->client->read($channel->w, $channel->readKey, $channel->after, $wait, $channel->allow);
         if ($read['status'] === 410) {
             $this->note($channel, 'expired', 'the thread at this address has expired, so anything written to it before now is gone and nothing more will arrive here');
 
@@ -1561,7 +1563,6 @@ final class Runtime
         }
         if ($reset) {
             $this->note($channel, 'restarted', (is_array($reset) && is_string($reset['what'] ?? null)) ? $reset['what'] : 'the service read this thread from the start');
-            $channel->seen = [];
         }
         $channel->createdAt = $created;
         $entries = [];
@@ -1573,6 +1574,12 @@ final class Runtime
                 'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'),
                 'sha256' => $message['sha256'], 'replay' => isset($channel->seen[$message['sha256']]),
             ];
+            if (isset($message['unverified_because'])) {
+                $entry['unverified_because'] = $message['unverified_because'];
+                if (!empty($message['service_verified'])) {
+                    $this->note($channel, 'unverified', 'message ' . $message['seq'] . ' on this channel was called verified by the service and does not check out here: ' . $message['unverified_because'] . '. It is handed over as unverified. That is a fault in the service or an operator that lies, and whoever runs it should hear of it.');
+                }
+            }
             $channel->seen[$message['sha256']] = true;
             try {
                 [$body, $meta] = $this->open($message);
@@ -1602,6 +1609,17 @@ final class Runtime
             // The cursor moves and the hashes are stored in the same save, before the caller sees a message.
             $channel->after = max($channel->after, (int) end($entries)['seq']);
             $this->saveState();
+        }
+        $keptOut = (array) ($read['kept_out'] ?? []);
+        if ($keptOut !== []) {
+            // Past them as well, or the same messages are read and kept out on
+            // every call. And said, since a message that does not arrive has to
+            // be told from one that was never sent.
+            $seqs = array_map('intval', array_column($keptOut, 'seq'));
+            $channel->after = max($channel->after, max($seqs));
+            $this->saveState();
+            $openedFor = in_array('*', $channel->allow, true) ? 'any key, signed only' : count($channel->allow) . ' named key(s)';
+            $this->note($channel, 'kept_out', count($keptOut) . ' message(s) were kept out of this channel (seq ' . implode(', ', array_slice($seqs, 0, 10)) . (count($seqs) > 10 ? ' and more' : '') . '): it was opened for ' . $openedFor . ', and these were not signed by a key it allows, as checked here. The service enforces the list while it holds the thread; a thread written to after the service lost its store has none, which is how they got this far. They are not handed over and not archived.');
         }
         // After a reset the service's next is the cursor, and it is lower than
         // the one this channel held. Keeping the higher of the two would ask

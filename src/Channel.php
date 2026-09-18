@@ -38,11 +38,16 @@ final class Channel
     ) {
     }
 
-    /** The cursor and the hashes belonged to a thread that is not there now. */
+    /**
+     * The cursor belonged to a thread that is not there now. The hashes stay:
+     * they are what this reader has been handed, whichever thread carried it.
+     * They used to be cleared here with the cursor, which lost the replay mark
+     * when it is most needed: after the service loses its store, every sender
+     * whose message went with it sends the same bytes again.
+     */
     public function forgetThread(): void
     {
         $this->after = 0;
-        $this->seen = [];
         $this->createdAt = null;
     }
 
