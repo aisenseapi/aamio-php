@@ -1193,8 +1193,17 @@ final class Runtime
      */
     private function sendSealed(string $w, string $key, ?string $partner, ?string $text = null, ?array $data = null, ?string $replyTo = null, ?array $archivedData = null): array
     {
-        // What the inbox asks of writers is read before anything is stored.
-        $plan = Gate::plan($this->gateFor($w));
+        // What the inbox asks of writers is read before anything is stored,
+        // with how long it still takes writes, so work that would not be done
+        // in time, or not within a tool call, stops here with its reason. A no
+        // that rests on a gate read earlier is checked against a fresh read
+        // once, since the address may have a new inbox by now.
+        $cached = array_key_exists($w, $this->gates);
+        $plan = Gate::plan($this->gateFor($w), $this->client->secondsLeft($w), $this->client->workBudget);
+        if ($plan['stop'] !== null && $cached) {
+            $this->forgetGate($w);
+            $plan = Gate::plan($this->gateFor($w), $this->client->secondsLeft($w), $this->client->workBudget);
+        }
         if ($plan['stop'] !== null) {
             throw new GateStop($plan['stop']);
         }
@@ -1210,6 +1219,9 @@ final class Runtime
         $envelope = $this->keys->seal($key, $plaintext);
         $entry = $this->outboxAdd($w, $key, $envelope, $body);
         [$status, $result] = $this->deliver($entry);
+        if (in_array($status, [404, 410], true)) {
+            $this->forgetGate($w);
+        }
         if (in_array($status, [404, 410], true) && $partner !== null) {
             // The partner may have renewed its inbox. Ask presence again, once.
             [$w, $key] = $this->addressFor($partner);
@@ -1220,7 +1232,17 @@ final class Runtime
         $entry = $this->outbox[$entry['id']];
         $archived = $archivedData === null ? $body : ['data' => $archivedData] + $body;
         $record = ['kind' => 'sent', 'at' => time(), 'to' => $this->nameForKey($key) ?? $key, 'w' => $entry['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $archived];
-        $this->archive('sent', $record);
+        // The archive is a record of the send, not the send. A failed write
+        // after a 201 threw here, and the caller heard an error for a message
+        // that was delivered, and might send it again as new bytes: a real
+        // duplicate. It is said beside the outcome instead.
+        $archiveError = null;
+        try {
+            $this->archive('sent', $record);
+        } catch (\Throwable $error) {
+            $archiveError = $error->getMessage();
+            ($this->log)('archive sent ' . $entry['id'] . ': ' . $archiveError);
+        }
         if ($status !== 201) {
             throw new SendFailed($entry['status'], $entry['id'], $status, $result);
         }
@@ -1232,8 +1254,18 @@ final class Runtime
         if (!empty($entry['gate_notes'])) {
             $sent['notes'] = $entry['gate_notes'];
         }
+        if ($archiveError !== null) {
+            $sent['archive_error'] = $archiveError;
+        }
 
         return $sent;
+    }
+
+    /** The gate kept for w, here and in the client, belongs to an inbox that may not be there now. */
+    private function forgetGate(string $w): void
+    {
+        unset($this->gates[$w]);
+        $this->client->forgetGate($w);
     }
 
     private function outboxAdd(string $w, string $key, string $envelope, array $body, ?string $replaces = null): array

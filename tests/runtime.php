@@ -109,7 +109,7 @@ final class FakeService
             }
             $thread = $this->threads[$w] ?? null;
             if ($sub === 'gate') {
-                return $thread === null ? [404, ['error' => 'No thread', 'fix' => 'Open one'], []] : [200, $thread['gate'], []];
+                return $thread === null ? [404, ['error' => 'No thread', 'fix' => 'Open one'], []] : [200, $thread['gate'], ['x-seconds-left' => (string) max(0, $thread['expire_at'] - $this->now), 'x-expire-at' => (string) $thread['expire_at']]];
             }
             if ($method === 'POST') {
                 if ($thread === null) {
@@ -408,6 +408,37 @@ $a->attentionTaken();
 // thread is gone opens a new one there that counts from one again, with none
 // of the old allowlist. A missing thread read as a quiet inbox, and a cursor
 // from the old thread was past everything in the new one.
+// The time an inbox still takes writes comes from a header on its gate, so a
+// writer facing long work knows before it starts whether the work can fit.
+$timed = str_repeat('t', 20);
+$fake->threads[$timed] = ['id' => 'timed-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 900, 'allow' => [], 'messages' => [], 'gate' => ['require' => ['pow' => ['bits' => 8, 'covers' => 1]]]];
+$a->client->gate($timed, true);
+$left = $a->client->secondsLeft($timed);
+$check($left !== null && $left > 890 && $left <= 900, 'the client reads how long an inbox still takes writes from its gate, and counts it down', (string) $left);
+unset($fake->threads[$timed]);
+
+// A gate kept for an address, and a new inbox at the same address. Found by
+// an outside review on 18 September 2026: the time a kept gate said counted
+// down to nothing and stayed there, and a send to the new inbox was refused on
+// the old one's terms without the service being asked.
+echo "a gate kept for an address that has a new inbox\n";
+$lives = str_repeat('l', 20);
+$fake->threads[$lives] = ['id' => 'lives-key', 'created_at' => $fake->now, 'expire_at' => $fake->now, 'allow' => [], 'messages' => [], 'gate' => ['require' => ['pow' => ['bits' => 17, 'covers' => 1]]]];
+$a->client->gate($lives, true);
+// The first life's time is up, and a new inbox opens there asking nothing.
+$fake->threads[$lives] = ['id' => 'lives-key', 'created_at' => $fake->now + 1, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => []];
+$gateReads = count(array_filter($fake->calls, static fn (array $c): bool => str_ends_with($c[1], '/gate')));
+$sentThere = $a->client->send($lives, 'hello', false);
+$gateReadsAfter = count(array_filter($fake->calls, static fn (array $c): bool => str_ends_with($c[1], '/gate')));
+$check(($sentThere['status'] ?? 0) === 201 && empty($sentThere['stopped']) && $gateReadsAfter - $gateReads === 1, 'a new inbox at an old address is asked about once more before a no, and the send goes through', json_encode([$sentThere['status'] ?? null, $sentThere['body']['error'] ?? null, $gateReadsAfter - $gateReads]));
+$fake->threads[$lives] = ['id' => 'lives-key', 'created_at' => $fake->now + 2, 'expire_at' => $fake->now, 'allow' => [], 'messages' => [], 'gate' => ['require' => ['pow' => ['bits' => 30, 'covers' => 1]]]];
+$a->client->gate($lives, true);
+$refused = $a->client->send($lives, 'hello', false);
+$check(!empty($refused['stopped']), 'and a real no is still a no after that one read');
+unset($fake->threads[$lives]);
+$gone = $a->client->send($lives, 'hello', false);
+$check(($gone['status'] ?? 0) === 404 && $a->client->secondsLeft($lives) === null, 'an inbox that is not there takes its gate with it, so the next send reads what is there then');
+
 echo "a thread that went, and one that came back at the same address\n";
 $side = str_repeat('q', 20);
 $fake->threads[$side] = ['id' => 'side-key', 'created_at' => 1000, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => []];
@@ -698,6 +729,18 @@ $urls = array_column($fake->calls, 1);
 $check(array_filter($urls, static fn (string $u): bool => str_starts_with($u, 'https://board.elsewhere.test/')) !== [] && in_array('https://verifyum.elsewhere.test/mcp', $urls, true) && array_filter($urls, static fn (string $u): bool => str_contains($u, 'aamio.at')) === [], 'and every call goes there, none to aamio.at', implode(' ', array_unique(array_map(static fn (string $u): string => (string) parse_url($u, PHP_URL_HOST), $urls))));
 $c->close();
 
+// The archive is a record of a send, never the outcome of it.
+$archiveDir = $homeA . '/archive/sent.jsonl';
+if (is_file($archiveDir)) {
+    rename($archiveDir, $archiveDir . '.kept');
+}
+mkdir($archiveDir);
+$bSent = $a->send('Bea', 'the archive cannot take this');
+rmdir($archiveDir);
+if (is_file($archiveDir . '.kept')) {
+    rename($archiveDir . '.kept', $archiveDir);
+}
+$check(isset($bSent['seq']) && str_contains((string) ($bSent['archive_error'] ?? ''), 'could not append'), 'a sent archive that cannot be written after a 201 is said beside the delivery, never instead of it', json_encode(array_intersect_key($bSent, ['seq' => 1, 'archive_error' => 1])));
 $a->close();
 $b->close();
 Http::$override = null;

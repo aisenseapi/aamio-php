@@ -228,6 +228,11 @@ final class McpServer
         // stdout carries JSON-RPC and nothing else. A warning printed there
         // would break the line the client is reading.
         ini_set('display_errors', 'stderr');
+        // A host cuts a tool call after a minute or so, and this server cannot
+        // work in the background, so longer work is refused with a reason that
+        // points at the command line rather than started in a call that times
+        // out with nobody knowing whether the message went.
+        $this->runtime->client->workBudget = 40.0;
         $this->runtime->log = static function (string $line): void {
             fwrite(STDERR, '[aamio ' . date('H:i:s') . '] ' . $line . "\n");
         };

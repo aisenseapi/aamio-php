@@ -169,13 +169,26 @@ $plan = Gate::plan(['advise' => ['pow' => ['bits' => 19]]]);
 $check($plan['bits'] === null && count($plan['notes']) === 1, 'advised 19 bits are above the 18 a client does unasked, and passed over with a note');
 $plan = Gate::plan(['require' => ['pow' => ['bits' => 20, 'covers' => 1], 'per_key' => 3, 'write_until' => 1800000000]]);
 $check($plan['bits'] === 20 && $plan['stop'] === null, 'required 20 bits are done, per_key and write_until are known and left to the service');
-$plan = Gate::plan(['require' => ['pow' => ['bits' => 21]]]);
-$check($plan['stop'] !== null && str_contains($plan['stop'], '21'), 'required 21 bits stop the send, with the number');
+$plan = Gate::plan(['require' => ['pow' => ['bits' => 33]]]);
+$check($plan['stop'] !== null && str_contains($plan['stop'], '33') && str_contains($plan['stop'], '32'), 'required 33 bits stop the send, with the number and the ceiling');
+// Up to 32 bits, for an inbox that means to meet only writers with compute.
+// The inbox is the judge: work that would not be done before it closes is
+// not started, and work that runs over is stopped.
+// A minute: no loop like this one does 32 bits in that, on any machine.
+$plan = Gate::plan(['require' => ['pow' => ['bits' => 32]]], 60.0);
+$check($plan['stop'] !== null && str_contains($plan['stop'], 'not started') && str_contains($plan['stop'], 'nothing was sent'), '32 bits with a minute left is not started, and says how long it would take', (string) $plan['stop']);
+$plan = Gate::plan(['require' => ['pow' => ['bits' => 20]]], 3600.0);
+$check($plan['stop'] === null && $plan['bits'] === 20 && $plan['expected_seconds'] > 0, 'work that fits goes ahead, with how long it takes here');
+$plan = Gate::plan(['require' => ['pow' => ['bits' => 24]]], null, 0.001);
+$check($plan['stop'] !== null && str_contains($plan['stop'], 'command line'), 'work longer than a tool call is given points at the command line, since this server cannot do it in the background', (string) $plan['stop']);
+$started = microtime(true);
+$check(Gate::solve(str_repeat('w', 20), str_repeat('k', 43), 'body', 30, microtime(true) + 0.3) === null && microtime(true) - $started < 5, 'work past its deadline is stopped');
+$check(abs(Gate::expectedSeconds(21) - 2 * Gate::expectedSeconds(20)) < 1e-9 && Gate::describe(600) === '10 minutes', 'the estimate doubles with each bit, and a time reads as a time');
 $plan = Gate::plan(['require' => ['captcha' => true]]);
 $check($plan['stop'] !== null && str_contains($plan['stop'], 'captcha'), 'an unknown requirement stops the send and names it');
 $plan = Gate::plan(['advise' => ['captcha' => true, 'pow' => ['bits' => 8]]]);
 $check($plan['stop'] === null && $plan['bits'] === 8 && count($plan['notes']) === 1, 'an unknown advice is passed over, the known one is done');
-$check(Gate::REQUIRE_MAX_BITS === 20 && Gate::ADVISE_MAX_BITS === 18, 'the ceilings are the services');
+$check(Gate::REQUIRE_MAX_BITS === 32 && Gate::ADVISE_MAX_BITS === 18, 'the ceilings are the services');
 
 echo "\n$passed passed, $failed failed\n";
 exit($failed === 0 ? 0 : 1);

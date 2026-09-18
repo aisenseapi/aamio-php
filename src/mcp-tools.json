@@ -60,7 +60,7 @@
   },
   {
    "name": "aamio_send",
-   "description": "Send a message to a partner by name (looked up through presence), or to a write address from a message's reply_to. Encrypted to the partner, signed by you. Put your text in text and structured values in data.",
+   "description": "Send a message to a partner by name (looked up through presence), or to a write address from a message's reply_to. Encrypted to the partner, signed by you. Put your text in text and structured values in data. When the inbox asks for proof of work that takes longer than about 40 seconds here, nothing is sent and the answer says so, since this server cannot work in the background: send it from the command line with aamio send, where the work has the time it needs. Work that would not be done before the inbox closes is not started either, and the answer says how long it would take.",
    "inputSchema": {
     "type": "object",
     "properties": {

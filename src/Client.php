@@ -18,6 +18,14 @@ final class Client
 
     /** @var array<string, array|null> gates read, per address, once */
     private array $gates = [];
+    /** @var array<string, array{0: int, 1: float}> X-Seconds-Left per address, and when it was read */
+    private array $gateLeft = [];
+    /**
+     * How long a caller may be held for proof of work, in seconds, or null for
+     * as long as it takes. The MCP server sets it, since its host cuts a tool
+     * call after a minute or so.
+     */
+    public ?float $workBudget = null;
 
     public function __construct(
         public readonly string $host = self::DEFAULT_HOST,
@@ -59,10 +67,53 @@ final class Client
         if (!$fresh && array_key_exists($w, $this->gates)) {
             return $this->gates[$w];
         }
-        [$status, $answer] = Http::call('GET', $this->url('/' . $w . '/gate'), null, [], $this->timeout);
+        [$status, $answer, $headers] = Http::call('GET', $this->url('/' . $w . '/gate'), null, [], $this->timeout) + [2 => []];
         $this->gates[$w] = $status === 200 && is_array($answer) ? $answer : null;
+        // The time left rides in a header, since the body is the exact bytes
+        // the gate hash is taken over.
+        $left = $headers['x-seconds-left'] ?? null;
+        if ($status === 200 && is_string($left) && ctype_digit($left)) {
+            $this->gateLeft[$w] = [(int) $left, microtime(true)];
+        }
 
         return $this->gates[$w];
+    }
+
+    /** The gate kept for w, and the time it said, belong to an inbox that may not be there now. */
+    public function forgetGate(string $w): void
+    {
+        unset($this->gates[$w], $this->gateLeft[$w]);
+    }
+
+    /**
+     * The plan for w's gate, read again once before a no that rests on a gate
+     * read earlier. A gate never changes while its thread lives, which is why
+     * it is kept, but an address can have more than one life: the time a kept
+     * gate said counted down to nothing and stayed there, and a new inbox at
+     * the same address was refused on the old one's terms without the service
+     * being asked. One more read, only when the answer would be no.
+     */
+    public function planFor(string $w): array
+    {
+        $cached = array_key_exists($w, $this->gates);
+        $plan = Gate::plan($this->gate($w), $this->secondsLeft($w), $this->workBudget);
+        if ($plan['stop'] !== null && $cached) {
+            $this->forgetGate($w);
+            $plan = Gate::plan($this->gate($w), $this->secondsLeft($w), $this->workBudget);
+        }
+
+        return $plan;
+    }
+
+    /** How long w still takes writes, counted down from what its gate said, or null. */
+    public function secondsLeft(string $w): ?float
+    {
+        if (!isset($this->gateLeft[$w])) {
+            return null;
+        }
+        [$left, $at] = $this->gateLeft[$w];
+
+        return max(0.0, $left - (microtime(true) - $at));
     }
 
     /**
@@ -93,7 +144,7 @@ final class Client
         $signing = $sign && $this->keys !== null;
         $key = $signing ? $this->keys->public : '';
 
-        $plan = Gate::plan($this->gate($w));
+        $plan = $this->planFor($w);
         if ($plan['stop'] !== null) {
             return ['status' => 0, 'stopped' => true, 'body' => ['error' => $plan['stop'], 'fix' => 'Open an address whose conditions this client can meet, or update the client.'], 'sent' => null, 'work' => null, 'notes' => $plan['notes']];
         }
@@ -106,23 +157,43 @@ final class Client
             }
             $work = null;
             if ($bits !== null && $bits > 0) {
-                $work = Gate::solve($w, $key, $bytes, $bits);
+                // The work stops when the inbox would close, less a few seconds
+                // for the post itself: past that a nonce buys nothing but a 410.
+                $left = $this->secondsLeft($w);
+                $work = Gate::solve($w, $key, $bytes, $bits, $left === null ? null : microtime(true) + max(0.0, $left - 5));
+                if ($work === null) {
+                    return [0, ['error' => 'the proof of work of ' . $bits . ' bits was not done before the inbox stops taking writes, so the work was stopped and nothing was sent', 'fix' => 'The estimate before it started said it would fit, and this time it took longer, which happens: the work is a lottery. Ask the owner for a longer inbox, or send from a machine with more compute.'], null, true];
+                }
                 $headers['X-Work'] = $work;
             }
             [$status, $answer] = Http::call('POST', $this->url('/' . $w), $bytes, $headers, $this->timeout);
 
-            return [$status, $answer, $work];
+            return [$status, $answer, $work, false];
         };
 
-        [$status, $answer, $work] = $attempt($plan['bits']);
+        [$status, $answer, $work, $stopped] = $attempt($plan['bits']);
         if ($status === 428 && is_array($answer) && isset($answer['gate'])) {
             // The refusal carries the whole gate; meet it once, never more.
             $this->gates[$w] = is_array($answer['gate']) ? $answer['gate'] : null;
-            $again = Gate::plan($this->gates[$w]);
-            if ($again['stop'] === null && $again['bits'] !== null) {
-                [$status, $answer, $work] = $attempt($again['bits']);
+            if (is_int($answer['seconds_left'] ?? null)) {
+                $this->gateLeft[$w] = [$answer['seconds_left'], microtime(true)];
+            }
+            $again = Gate::plan($this->gates[$w], $this->secondsLeft($w), $this->workBudget);
+            if ($again['stop'] !== null) {
+                return ['status' => 0, 'stopped' => true, 'body' => ['error' => $again['stop'], 'fix' => 'Open an address whose conditions this client can meet, or update the client.'], 'sent' => null, 'work' => null, 'notes' => array_merge($plan['notes'], $again['notes'])];
+            }
+            if ($again['bits'] !== null) {
+                [$status, $answer, $work, $stopped] = $attempt($again['bits']);
                 $plan['notes'] = array_merge($plan['notes'], $again['notes']);
             }
+        }
+        if ($stopped) {
+            return ['status' => 0, 'stopped' => true, 'body' => $answer, 'sent' => null, 'work' => null, 'notes' => $plan['notes']];
+        }
+        // An inbox that is not there, or has expired, takes its gate with it:
+        // the next send here reads the gate of whatever is there then.
+        if ($status === 404 || $status === 410) {
+            $this->forgetGate($w);
         }
 
         return ['status' => $status, 'body' => $answer, 'sent' => $bytes, 'work' => $work, 'notes' => $plan['notes']];
