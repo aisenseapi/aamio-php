@@ -79,13 +79,13 @@ $check($worked['status'] === 201 && ($worked['body']['met']['pow'] ?? null) === 
 $required = $client->open(120, ['*'], ['require' => ['pow' => ['bits' => 10]]]);
 $firstTry = $client->send($required['w'], 'required work');
 $check($firstTry['status'] === 201 && ($firstTry['body']['met']['pow'] ?? null) === 10, 'required work is done before the first attempt', (string) $firstTry['status']);
-$tooMuch = $client->open(120, ['*'], ['require' => ['pow' => ['bits' => 20]]]);
-$check($tooMuch['status'] === 201, 'a thread may require 20 bits, the ceiling');
-$stopped = (new Client($host, Keys::generate()))->send($tooMuch['w'], 'x', true);
-$check($stopped['status'] === 201 && ($stopped['body']['met']['pow'] ?? null) === 20, '20 bits are still done by a client, since it is within the ceiling', sprintf('nonce %s', $stopped['work']));
+$heavy = $client->open(120, ['*'], ['require' => ['pow' => ['bits' => 20]]]);
+$check($heavy['status'] === 201, 'a thread may require 20 bits, well within the ceiling of 32');
+$heavyWork = (new Client($host, Keys::generate()))->send($heavy['w'], 'x', true);
+$check($heavyWork['status'] === 201 && ($heavyWork['body']['met']['pow'] ?? null) === 20, '20 bits are done by a client, since they fit in the two minutes the inbox takes writes', sprintf('nonce %s', $heavyWork['work']));
 $client->close($gated['w'], $gated['id']);
 $client->close($required['w'], $required['id']);
-$client->close($tooMuch['w'], $tooMuch['id']);
+$client->close($heavy['w'], $heavy['id']);
 
 echo "presence\n";
 $inbox = $client->open(120);
