@@ -179,14 +179,25 @@ final class Board
     }
 
     /**
-     * The answers on an inbox, decoded: each with the service's verified/sealed
+     * Listless compatibility reader. Use repliesThread() to retain the inbox policy.
+     * The answers on an inbox, decoded: verified/from are locally checked,
      * and the poster-side fields post, reply_to, text, data. Aliases post_id,
      * w, reply and message are accepted and named under 'renamed'.
      */
     public function replies(string $w, string $id, int $after = 0, int $wait = 0, ?string $post = null): array
     {
         $read = $this->client->read($w, $id, $after, $wait);
-        $out = ['status' => $read['status'], 'next' => $read['body']['next'] ?? $after, 'replies' => []];
+        return $this->decodeReplies($read, $after, $post);
+    }
+
+    public function repliesThread(array $inbox, int $after = 0, int $wait = 0, ?string $post = null): array
+    {
+        return $this->decodeReplies($this->client->readThread($inbox, $after, $wait), $after, $post);
+    }
+
+    private function decodeReplies(array $read, int $after, ?string $post): array
+    {
+        $out = ['status' => $read['status'], 'next' => $read['body']['next'] ?? $after, 'replies' => [], 'kept_out' => $read['kept_out'] ?? [], 'left_out' => 0];
         foreach ((array) ($read['body']['messages'] ?? []) as $message) {
             $decoded = $this->client->decode($message);
             // A reply that is not a JSON object is still a reply. Dropping it
@@ -206,11 +217,13 @@ final class Board
                 }
             }
             if ($post !== null && ($json['post'] ?? null) !== $post) {
+                $out['left_out']++;
                 continue;
             }
             $out['replies'][] = [
                 'seq' => $decoded['seq'], 'at' => $decoded['at'], 'from' => $decoded['from'], 'verified' => $decoded['verified'], 'sealed' => $decoded['sealed'],
                 'format' => $decoded['format'],
+                'unverified_because' => $decoded['unverified_because'] ?? null, 'service_verified' => $decoded['service_verified'] ?? false,
                 // A reply that is plain text, or an envelope this client cannot
                 // open, carries what there is instead of nothing at all.
                 'post' => $json['post'] ?? null, 'reply_to' => $json['reply_to'] ?? null,

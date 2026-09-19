@@ -117,6 +117,14 @@ final class Runtime
         foreach ((array) ($state['channels'] ?? []) as $item) {
             if (is_array($item) && (int) ($item['expire_at'] ?? 0) > time()) {
                 $channel = Channel::fromState($item);
+                $held = $this->channels[$channel->label] ?? null;
+                if ($held !== null) {
+                    if ($held->expireAt > $channel->expireAt) {
+                        $this->retireChannel($channel);
+                        continue;
+                    }
+                    $this->retireChannel($held);
+                }
                 $this->channels[$channel->label] = $channel;
             }
         }
@@ -695,6 +703,18 @@ final class Runtime
 
     // -------------------------------------------------------------- inbox --
 
+    private function retireChannel(Channel $channel): void
+    {
+        $base = $channel->label . '-' . $channel->expireAt;
+        $label = $base;
+        $suffix = 1;
+        while (isset($this->channels[$label]) && $this->channels[$label] !== $channel) {
+            $label = $base . '-' . $suffix++;
+        }
+        $channel->label = $label;
+        $this->channels[$label] = $channel;
+    }
+
     public function ensureInbox(): Channel
     {
         $inbox = $this->channels['inbox'] ?? null;
@@ -713,7 +733,7 @@ final class Runtime
         $fresh = new Channel('inbox', $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], $allow ?? []);
         if ($inbox !== null) {
             // Keep reading the old one until it dies; partners may still write there.
-            $this->channels['inbox-' . $inbox->expireAt] = $inbox;
+            $this->retireChannel($inbox);
         }
         $this->channels['inbox'] = $fresh;
         $this->saveState();
@@ -794,7 +814,7 @@ final class Runtime
     public function ensureBoardInbox(int $seconds = 900): Channel
     {
         $held = $this->channels['board'] ?? null;
-        if ($held !== null && $held->expireAt - time() > $seconds) {
+        if ($held !== null && $held->expireAt - time() > $seconds && !$held->gone) {
             return $held;
         }
         $ttl = min(self::INBOX_TTL, max($seconds + 60, 900));
@@ -804,7 +824,7 @@ final class Runtime
         }
         $channel = new Channel('board', $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], ['*']);
         if ($held !== null) {
-            $this->channels['board-' . $held->expireAt] = $held;
+            $this->retireChannel($held);
         }
         $this->channels['board'] = $channel;
         $this->saveState();
@@ -968,19 +988,31 @@ final class Runtime
             $body['data'] = $data;
         }
         $envelope = $this->keys->seal((string) $post['key'], Codec::json($body));
-        $notes = [];
-        [$status, $result] = $this->post((string) $post['w'], $envelope, $notes);
-        $this->archive('board', ['kind' => 'answered', 'at' => time(), 'post' => $post['id'], 'w' => $post['w'], 'status' => $status, 'body' => $body]);
-        if ($status !== 201) {
-            throw new \RuntimeException('answer failed: ' . $status . ' ' . json_encode($result));
+        // An answer is a send, and goes the way a send goes: one outbox entry
+        // written before the first attempt, and an outcome that tells refused
+        // from unknown. It used to post the envelope directly. When no answer
+        // came back it threw "answer failed", with no message id and nothing in
+        // the outbox, although the message may have landed; the only move left
+        // was to answer again, which seals a new envelope with a new nonce, and
+        // the poster cannot tell that from a second answer. From the outbox the
+        // same bytes go again, and a copy is a replay there.
+        $entry = $this->outboxAdd((string) $post['w'], (string) $post['key'], $envelope, $body);
+        [$status, $result] = $this->deliver($entry);
+        if (in_array($status, [404, 410], true)) {
+            $this->forgetGate((string) $post['w']);
         }
-        $answer = ['post' => $post['id'], 'w' => $post['w'], 'seq' => $result['seq'], 'at' => $result['at'], 'replies_arrive_on' => 'board', 'reply_to' => $channel->w];
+        $entry = $this->outbox[$entry['id']];
+        $this->archive('board', ['kind' => 'answered', 'at' => time(), 'post' => $post['id'], 'w' => $post['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $body]);
+        if ($status !== 201) {
+            throw new SendFailed($entry['status'], $entry['id'], $status, $result);
+        }
+        $answer = ['post' => $post['id'], 'w' => $post['w'], 'message_id' => $entry['id'], 'seq' => $result['seq'], 'at' => $result['at'], 'replies_arrive_on' => 'board', 'reply_to' => $channel->w];
         if (isset($result['met'])) {
             $answer['met'] = $result['met'];
             $answer['proof_id'] = $result['proof_id'] ?? null;
         }
-        if ($notes !== []) {
-            $answer['notes'] = $notes;
+        if (($entry['gate_notes'] ?? []) !== []) {
+            $answer['notes'] = $entry['gate_notes'];
         }
         if ($ownPost) {
             $answer['warning'] = 'You answered your own post. The answer is sealed to your own key, so it reaches nobody but you.';
@@ -1483,7 +1515,7 @@ final class Runtime
     /** What was said, and separately, what can be trusted about it: [body, meta]. */
     public function open(array $message): array
     {
-        $raw = (string) ($message['body'] ?? '');
+        $raw = is_string($message['body'] ?? null) ? $message['body'] : '';
         if (empty($message['verified']) || empty($message['from'])) {
             return [['text' => $raw], ['signed' => false, 'encrypted' => false, 'format' => 'unsigned']];
         }
@@ -1515,9 +1547,33 @@ final class Runtime
         return [['text' => $parsed], ['signed' => true, 'encrypted' => true, 'format' => 'json']];
     }
 
-    /** One read of a channel from its cursor: [state, entries], state ok | expired | error. */
-    public function poll(Channel $channel, int $wait = 0): array
+    /** Decode one checked message. Failure never grants it sender authority. */
+    private function readEntry(Channel $channel, array $message): array
     {
+        try {
+            $from = $message['from'] ?? null;
+            $known = $this->nameForKey($from);
+            [$body, $meta] = $this->open($message);
+            $digest = $message['sha256'] ?? null;
+            return ['channel' => $channel->label, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => $message['verified'], 'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'), 'sha256' => $digest, 'replay' => is_string($digest) && isset($channel->seen[$digest]), 'body' => $body, 'unverified_because' => $message['unverified_because'] ?? null] + $meta;
+        } catch (\Throwable $error) {
+            $why = 'the message could not be checked here: ' . (new \ReflectionClass($error))->getShortName();
+            return ['channel' => $channel->label, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => false, 'from_key' => null, 'known_contact' => false, 'sender' => 'unsigned', 'sha256' => null, 'replay' => false, 'body' => ['text' => $message['body'] ?? null], 'signed' => false, 'encrypted' => false, 'format' => 'unreadable', 'error' => $why, 'unverified_because' => $why];
+        }
+    }
+
+    /** One read of a channel from its cursor: [state, entries], state ok | expired | error. */
+    /**
+     * Reads one channel. With a limit, at most that many messages are handed over.
+     *
+     * The cursor then stops at the last message this call dealt with, and what
+     * the service returned beyond it is fetched again by the next poll. It used
+     * to be the caller that cut the list, after the cursor had moved past
+     * everything: the messages over the limit were gone for good.
+     */
+    public function poll(Channel $channel, int $wait = 0, ?int $limit = null): array
+    {
+        $channel->leftWaiting = 0;
         // The channel's own allowlist goes with the read: the client checks
         // every message itself and keeps out what the list does not allow.
         $read = $this->client->read($channel->w, $channel->readKey, $channel->after, $wait, $channel->allow);
@@ -1541,7 +1597,11 @@ final class Runtime
         // cursor and the old hashes belong to another thread.
         // Not $body: the loop below decodes each message into $body, and a
         // read of next after it got the last message's body instead.
-        $answer = (array) ($read['body'] ?? []);
+        if (!is_array($read['body'] ?? null) || !is_array($read['body']['messages'] ?? null)) {
+            $this->note($channel, 'unread', 'the service returned a malformed read answer; this channel was not read');
+            return ['error', []];
+        }
+        $answer = $read['body'];
         if (($answer['exists'] ?? null) === false) {
             if (!$channel->gone) {
                 $this->note($channel, 'gone', 'there is no thread at this address any more. It expired and was swept, or the service restarted and it went with it. A write opens a new one here with the default lifetime and without the allowlist or gate this channel was opened with' . ($channel->label === 'inbox' ? ', so a new inbox is opened for the partners' : ''));
@@ -1559,35 +1619,43 @@ final class Runtime
             $this->note($channel, 'restarted', 'the thread at this address is a new one, opened at ' . $created . ' where this channel knew one opened at ' . $channel->createdAt . ', so it is read again from the start');
             $channel->forgetThread();
 
-            return $this->poll($channel, 0);
+            return $this->poll($channel, 0, $limit);
         }
         if ($reset) {
             $this->note($channel, 'restarted', (is_array($reset) && is_string($reset['what'] ?? null)) ? $reset['what'] : 'the service read this thread from the start');
+            $channel->observed = [];
         }
         $channel->createdAt = $created;
+        // Where this poll stops, when the limit is reached before the end of
+        // what the service returned: the seq of the last message handed over.
+        // Whatever lies beyond it, handed over or kept out, has not been dealt
+        // with: it is not observed, not noted and not passed by the cursor,
+        // and the next poll fetches it again.
+        $handed = array_values((array) ($read['body']['messages'] ?? []));
+        $keptOut = array_values((array) ($read['kept_out'] ?? []));
+        $stopAt = null;
+        if ($limit !== null && count($handed) > max(0, $limit)) {
+            $stopAt = $limit > 0 ? (int) ($handed[$limit - 1]['seq'] ?? 0) : -1;
+            $within = static fn (array $item): bool => (int) ($item['seq'] ?? 0) <= $stopAt;
+            $channel->leftWaiting = count($handed) + count($keptOut);
+            $handed = array_values(array_filter($handed, $within));
+            $keptOut = array_values(array_filter($keptOut, $within));
+            $channel->leftWaiting -= count($handed) + count($keptOut);
+            $read['observed'] = array_values(array_filter((array) ($read['observed'] ?? []), $within));
+        }
+        foreach ($read['observed'] ?? [] as $observed) {
+            $channel->observed[$observed['seq']] = $observed;
+            if ($observed['unverified_because'] !== null && $observed['service_verified']) {
+                $disposition = $observed['kept_out'] ? 'kept out by this channel\'s list' : 'handed over as unverified';
+                $this->note($channel, 'unverified', 'message ' . $observed['seq'] . ' was called verified by the service and does not check out here: ' . $observed['unverified_because'] . '. It is ' . $disposition . '. This can indicate a faulty service or an operator that lies.', [$observed['seq']]);
+            }
+        }
         $entries = [];
-        foreach ((array) ($read['body']['messages'] ?? []) as $message) {
-            $from = $message['from'] ?? null;
-            $known = $this->nameForKey($from);
-            $entry = [
-                'channel' => $channel->label, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => (bool) ($message['verified'] ?? false),
-                'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'),
-                'sha256' => $message['sha256'], 'replay' => isset($channel->seen[$message['sha256']]),
-            ];
-            if (isset($message['unverified_because'])) {
-                $entry['unverified_because'] = $message['unverified_because'];
-                if (!empty($message['service_verified'])) {
-                    $this->note($channel, 'unverified', 'message ' . $message['seq'] . ' on this channel was called verified by the service and does not check out here: ' . $message['unverified_because'] . '. It is handed over as unverified. That is a fault in the service or an operator that lies, and whoever runs it should hear of it.');
-                }
-            }
-            $channel->seen[$message['sha256']] = true;
-            try {
-                [$body, $meta] = $this->open($message);
-            } catch (\Throwable $error) {
-                [$body, $meta] = [['text' => $message['body'] ?? null], ['signed' => (bool) $from, 'encrypted' => false, 'format' => 'undecodable', 'error' => (new \ReflectionClass($error))->getShortName()]];
-            }
-            $entry['body'] = $body;
-            $entry += $meta;
+        foreach ($handed as $message) {
+            $entry = $this->readEntry($channel, $message);
+            $from = $entry['from_key'];
+            $body = $entry['body'];
+            if (is_string($entry['sha256'])) { $channel->seen[$entry['sha256']] = true; }
             // Before the message is kept, archived or shown: a scope key in it
             // goes to scopes.json or nowhere, never to the reader.
             $this->takeScopeShare($entry);
@@ -1610,7 +1678,6 @@ final class Runtime
             $channel->after = max($channel->after, (int) end($entries)['seq']);
             $this->saveState();
         }
-        $keptOut = (array) ($read['kept_out'] ?? []);
         if ($keptOut !== []) {
             // Past them as well, or the same messages are read and kept out on
             // every call. And said, since a message that does not arrive has to
@@ -1619,13 +1686,22 @@ final class Runtime
             $channel->after = max($channel->after, max($seqs));
             $this->saveState();
             $openedFor = in_array('*', $channel->allow, true) ? 'any key, signed only' : count($channel->allow) . ' named key(s)';
-            $this->note($channel, 'kept_out', count($keptOut) . ' message(s) were kept out of this channel (seq ' . implode(', ', array_slice($seqs, 0, 10)) . (count($seqs) > 10 ? ' and more' : '') . '): it was opened for ' . $openedFor . ', and these were not signed by a key it allows, as checked here. The service enforces the list while it holds the thread; a thread written to after the service lost its store has none, which is how they got this far. They are not handed over and not archived.');
+            $this->note($channel, 'kept_out', 'This channel was opened for ' . $openedFor . ', and these messages did not satisfy its list as checked here. They are not handed over and not archived.', $seqs);
         }
         // After a reset the service's next is the cursor, and it is lower than
         // the one this channel held. Keeping the higher of the two would ask
         // past the new thread on every call and hand the same messages over
         // each time.
-        if ($reset && is_int($answer['next'] ?? null)) {
+        //
+        // A poll that stopped at its limit is the exception: the service's next
+        // covers messages this call never looked at, so the cursor is the last
+        // one it did look at.
+        if ($stopAt !== null) {
+            if ($stopAt > 0) {
+                $channel->after = $stopAt;
+                $this->saveState();
+            }
+        } elseif (is_int($answer['next'] ?? null)) {
             $channel->after = $answer['next'];
             $this->saveState();
         }
@@ -1634,14 +1710,23 @@ final class Runtime
     }
 
     /** Something a caller has to hear about, even though the read returned no messages. */
-    private function note(Channel $channel, string $state, string $what): void
+    private function note(Channel $channel, string $state, string $what, ?array $seqs = null): void
     {
-        $this->noteTrouble($channel->label, $state, $what, $channel->w);
+        $this->noteTrouble($channel->label, $state, $what, $channel->w, $seqs);
     }
 
-    private function noteTrouble(string $where, string $state, string $what, ?string $w = null): void
+    private function noteTrouble(string $where, string $state, string $what, ?string $w = null, ?array $seqs = null): void
     {
-        $this->attention[$where . '|' . $state] = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
+        $key = $where . '|' . $state;
+        $note = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
+        if (in_array($state, ['kept_out', 'unverified'], true) && $seqs !== null) {
+            $previous = $this->attention[$key] ?? [];
+            $note['seqs'] = array_merge($previous['seqs'] ?? [], $seqs);
+            $note['count'] = count($note['seqs']);
+            $note['details'] = array_merge($previous['details'] ?? [], [$what]);
+            $note['what'] = $note['count'] . ' message(s) (seq ' . implode(', ', $note['seqs']) . '): ' . implode(' ', $note['details']);
+        }
+        $this->attention[$key] = $note;
         ($this->log)($where . ': ' . $what);
     }
 
@@ -1662,8 +1747,25 @@ final class Runtime
         $this->publishPresence();
         $collected = [];
         $waited = false;
+        $leftWaiting = 0;
+        $notAsked = [];
         foreach (array_values($this->channels) as $channel) {
-            [$state, $entries] = $this->poll($channel, $waited ? 0 : $wait);
+            // A channel is only asked for what this call still has room for.
+            // poll() moves the cursor and saves it before the caller sees a
+            // message, so whatever was fetched beyond the limit and cut off
+            // here afterwards was past the cursor and never came back: 60
+            // waiting, 50 handed over, the last ten gone.
+            $room = $limit - count($collected);
+            if ($room <= 0) {
+                $notAsked[] = $channel->label;
+                continue;
+            }
+            try {
+                [$state, $entries] = $this->poll($channel, $waited ? 0 : $wait, $room);
+            } catch (\Throwable $error) {
+                $this->note($channel, 'unread', 'this channel could not be read: ' . (new \ReflectionClass($error))->getShortName() . '. Messages from other channels are still returned.');
+                continue;
+            }
             // A channel that answered 410 or nothing at all used to eat the
             // whole wait, so a read with wait 25 came back at once and the
             // inbox was only ever asked with wait 0.
@@ -1672,15 +1774,18 @@ final class Runtime
             foreach ($entries as $entry) {
                 $collected[] = $entry;
             }
+            $leftWaiting += $channel->leftWaiting;
         }
-        if (count($collected) > $limit) {
-            // The cursor has already moved past all of them. The surplus is in
-            // the archive, and a read will not hand it over again, so saying
-            // nothing here loses messages the runtime did receive.
-            $this->noteTrouble('read', 'truncated', sprintf('%d more messages were read than this call hands over, and the cursor has moved past them. They are in the archive, and another read will not bring them back. Ask for a higher limit to see them here.', count($collected) - $limit));
+        if ($leftWaiting > 0 || $notAsked !== []) {
+            // Nothing is lost, and the caller still has to hear it: a read that
+            // stopped at its limit is not a read of everything.
+            $this->noteTrouble('read', 'more', 'this read stopped at its limit of ' . $limit . ' message(s). '
+                . ($leftWaiting > 0 ? $leftWaiting . ' more that the service had already returned were left where they are. ' : '')
+                . ($notAsked !== [] ? count($notAsked) . ' channel(s) were not asked this time: ' . implode(', ', $notAsked) . '. ' : '')
+                . 'Nothing was passed over: every cursor stands at the last message this read dealt with, so read again for the rest.');
         }
 
-        return array_slice($collected, 0, $limit);
+        return $collected;
     }
 
     // ------------------------------------------------------------ receipt --
@@ -1696,24 +1801,39 @@ final class Runtime
             throw new \RuntimeException('receipt failed: ' . $taken['status'] . ' ' . json_encode($taken['body']));
         }
         $data = $taken['body'];
-        $entries = $channel->received;
+        $entries = array_values($channel->observed);
         usort($entries, static fn (array $a, array $b): int => $a['seq'] <=> $b['seq']);
         $held = count($entries);
         $comparable = $held === (int) $data['count'];
         $ours = '';
         foreach ($entries as $e) {
-            $ours .= sprintf("%d\t%d\t%s\t%s\n", $e['seq'], $e['at'], $e['sha256'], $e['from_key'] ?: '-');
+            $ours .= sprintf("%d\t%d\t%s\t%s\n", $e['seq'], $e['at'], $e['sha256'], is_string($e['from']) ? ($e['from'] ?: '-') : '-');
         }
+        $verifiedKeys = array_values(array_unique(array_column(array_filter($entries, static fn (array $entry): bool => $entry['verified'] && is_string($entry['from_key'])), 'from_key')));
+        $claims = (array) ($data['keys'] ?? []);
+        $unverifiedKeys = array_values(array_filter($claims, static fn ($key): bool => !in_array($key, $verifiedKeys, true)));
         $attestation = sprintf("aamio-receipt-v1\n%s\n%s\n%d\n%d", $channel->w, $data['root'], $data['count'], $data['issued_at'] ?? 0);
         $result = [
             'label' => $label, 'w' => $channel->w, 'root' => $data['root'], 'commitment' => $data['commitment'] ?? null, 'count' => $data['count'],
-            'keys' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, (array) ($data['keys'] ?? [])),
-            'root_adds_up' => $taken['check']['root_adds_up'], 'local_root_matches' => $comparable ? hash('sha256', $ours) === $data['root'] : null,
+            'keys' => array_map(fn ($key) => in_array($key, $verifiedKeys, true) ? ($this->nameForKey($key) ?? $key) : $key, $claims),
+            'keys_unverified_count' => count($unverifiedKeys), 'keys_service_claim_only' => $unverifiedKeys, 'held_locally' => $held,
+            'root_adds_up' => $taken['check']['root_adds_up'], 'local_root_matches' => $comparable ? hash('sha256', $ours) === $data['root'] : ($held > (int) $data['count'] ? false : null),
             'issued_at' => $data['issued_at'] ?? null, 'expire_at' => $data['expire_at'] ?? null, 'gate_hash' => $data['gate_hash'] ?? null,
             'attestation' => ['key' => $this->keys->public, 'over' => $attestation, 'sig' => $this->keys->sign($attestation)],
         ];
-        if (!$comparable) {
-            $result['local_check'] = sprintf('Not compared: this process holds %d of the %d messages the receipt counts, so a local root would differ for a reason that is not the receipt\'s. The receipt stands on root_adds_up and the signature. For the independent check, take the receipt in the process that read the messages.', $held, $data['count']);
+        if ($comparable) {
+            $result['local_differences'] = [];
+            foreach ($data['messages'] ?? [] as $message) {
+                $observed = $channel->observed[$message['seq']] ?? [];
+                $fields = array_values(array_filter(['at', 'sha256', 'from'], static fn (string $field): bool => ($observed[$field] ?? null) !== ($message[$field] ?? null)));
+                if ($fields !== []) { $result['local_differences'][] = ['seq' => $message['seq'], 'fields' => $fields]; }
+            }
+            $result['signers_not_verified_locally'] = array_values(array_column(array_filter($entries, static fn (array $entry): bool => !empty($entry['from']) && !$entry['verified']), 'seq'));
+        }
+        if ($held > (int) $data['count']) {
+            $result['local_check'] = 'Mismatch: the receipt counts fewer messages than this process read. The thread was replaced or the service lost messages.';
+        } elseif (!$comparable) {
+            $result['local_check'] = sprintf('Not compared: this process holds %d of the %d messages the receipt counts. root_adds_up checks arithmetic only; our signature records what was fetched, not that its claims are true. Take the receipt in the process that read the messages for the independent comparison.', $held, $data['count']);
         }
         if ($anchor) {
             $idem = substr(Codec::sha256hex('aamio-listen:' . $this->keys->hash . ':' . $data['root']), 0, 32);

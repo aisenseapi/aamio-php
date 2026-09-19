@@ -17,9 +17,18 @@ final class Channel
     public array $seen = [];
     /** @var array<int, array> entries this process has received, in order */
     public array $received = [];
+    /** Metadata of all messages observed in this process, including kept-out ones. */
+    public array $observed = [];
     public bool $closed = false;
     /** Told already that the thread at this address is gone, so it is said once. */
     public bool $gone = false;
+
+    /**
+     * How many messages the last poll had fetched and left for the next one,
+     * because the caller's limit was reached. They are still at the service,
+     * and the cursor stands before them.
+     */
+    public int $leftWaiting = 0;
 
     /**
      * $createdAt is which thread at this address the cursor and the hashes
@@ -28,7 +37,7 @@ final class Channel
      * only thing that tells the two apart.
      */
     public function __construct(
-        public readonly string $label,
+        public string $label,
         public readonly string $readKey,
         public readonly string $w,
         public int $expireAt,
@@ -36,6 +45,7 @@ final class Channel
         public int $after = 0,
         public ?int $createdAt = null,
     ) {
+        $this->allow = Client::normalizeAllow($allow);
     }
 
     /**
@@ -49,6 +59,7 @@ final class Channel
     {
         $this->after = 0;
         $this->createdAt = null;
+        $this->observed = [];
     }
 
     public function secondsLeft(int $now): int
@@ -58,18 +69,19 @@ final class Channel
 
     public function toState(): array
     {
-        $seen = array_keys($this->seen);
+        $seen = array_values(array_filter(array_keys($this->seen), static fn ($hash): bool => is_string($hash) && preg_match('/^[0-9a-f]{64}$/D', $hash) === 1));
         sort($seen);
 
-        return ['label' => $this->label, 'read_key' => $this->readKey, 'w' => $this->w, 'expire_at' => $this->expireAt, 'allow' => array_values($this->allow), 'after' => $this->after, 'created_at' => $this->createdAt, 'seen' => $seen];
+        return ['label' => $this->label, 'read_key' => $this->readKey, 'w' => $this->w, 'expire_at' => $this->expireAt, 'allow' => array_values($this->allow), 'after' => $this->after, 'created_at' => $this->createdAt, 'gone' => $this->gone, 'seen' => $seen];
     }
 
     public static function fromState(array $item): self
     {
         $channel = new self((string) $item['label'], (string) $item['read_key'], (string) $item['w'], (int) $item['expire_at'], array_values((array) ($item['allow'] ?? [])), (int) ($item['after'] ?? 0), isset($item['created_at']) ? (int) $item['created_at'] : null);
         foreach ((array) ($item['seen'] ?? []) as $hash) {
-            $channel->seen[(string) $hash] = true;
+            if (is_string($hash) && preg_match('/^[0-9a-f]{64}$/D', $hash) === 1) { $channel->seen[$hash] = true; }
         }
+        $channel->gone = ($item['gone'] ?? null) === true;
 
         return $channel;
     }

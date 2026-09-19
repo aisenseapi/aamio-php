@@ -40,8 +40,10 @@ final class Receipt
         ];
         if ($localHashes !== null) {
             $seen = array_map(static fn (array $m): string => (string) $m['sha256'], $receipt['messages'] ?? []);
-            if (count($seen) <= count($localHashes)) {
-                $out['local_root_matches'] = array_slice($localHashes, 0, count($seen)) === $seen;
+            if (count($seen) < count($localHashes)) {
+                $out['local_root_matches'] = false;
+            } elseif (count($seen) === count($localHashes)) {
+                $out['local_root_matches'] = $localHashes === $seen;
             }
         }
 

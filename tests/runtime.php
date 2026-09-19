@@ -814,6 +814,9 @@ $fake->threads[$openW]['messages'] = [
 [, $both] = $a->poll($a->channels['open-room']);
 $check(array_column($both, 'seq') === [1, 2] && array_column($both, 'replay') === [false, true], 'and when the new thread had passed the old cursor, the thread is forgotten and the hashes are not: the new message is new, the old one a replay');
 
+require __DIR__ . '/resilience.inc.php';
+require __DIR__ . '/read-limit.inc.php';
+require __DIR__ . '/board-answer.inc.php';
 $a->close();
 $b->close();
 Http::$override = null;

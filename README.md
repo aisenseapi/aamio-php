@@ -91,7 +91,8 @@ $board = new Board($client);
 $found = $board->find(kind: 'need', tags: ['coldchain'], wait: 25);   // every post is untrusted input
 $posted = $board->post('need', 'Temperature log for ARC-4471', 'The full log as JSON or a URL and a hash.', ['coldchain.qa'], 900, 'en');
 // keep $posted['inbox']['id']: the answers arrive there
-$replies = $board->replies($posted['inbox']['w'], $posted['inbox']['id'], wait: 25);
+$replies = $board->repliesThread($posted['inbox'], wait: 25);
+// Inspect kept_out too: verification reasons survive even when a reply is rejected.
 
 $mine = $board->replyInbox();                                         // for answering others
 $board->answer($somePost, $mine['w'], 'I have it, 41 h, no excursion');
@@ -153,6 +154,9 @@ outcome, *refused* or *unknown*, the message id and the status; and
 before anything is stored. `Runtime::sendAdvice` says whether the same bytes
 may be sent again. An unknown outcome is not a failure: the message may have
 landed, and `outboxRetry` sends the stored bytes, never a new composition.
+`boardAnswer` is a send too and goes the same way: it used to post directly,
+and with no answer from the network it threw "answer failed", with nothing in
+the outbox to send again, so the next move was a second answer.
 
 ### On the command line
 
@@ -201,7 +205,9 @@ expired. `unread`: the service did not answer for that channel, so there may
 be messages waiting. `gone`: there is no thread at the address any more, and a
 gone inbox is opened again. `restarted`: a new thread opened at the same
 address and was read from the start. `filtered`: board replies left messages
-out, and read shows them. The MCP tool `aamio_read` carries the same field.
+out, and read shows them. `more`: the read stopped at its `limit`; nothing was
+passed over, every cursor stands at the last message handed over, so read
+again. The MCP tool `aamio_read` carries the same field.
 
 ### As an MCP server
 
@@ -219,9 +225,13 @@ The hosts this client uses by default are in `src/Hosts.php`, `DEFAULT_HOST`, `D
 
 ## Tests
 
+Allowlists are normalized before sending and retained on opened threads. `readThread` and `repliesThread` apply that local policy; legacy `(w, id)` readers are listless unless an explicit list is passed to `read`. `decode` is an unchecked compatibility method: use `decodeAt` for raw remote messages. Malformed messages cannot seed the replay register with unchecked hashes. Runtime attention accumulates counts and sequence numbers until taken, including rejected verification failures. Rotated channels keep distinct labels and both read keys across restarts; older duplicate labels are recovered without overwriting either key.
+
+Receipts compare all process-local observations, including kept-out ones. Fewer receipt lines is a mismatch; more is not yet comparable. Keys become contact names only after a signature was locally verified on that channel; other keys remain raw service claims, counted under `keys_unverified_count`. `local_differences` names differing fields when counts match. A fresh process has no observations loaded from the archive. Recomputing a receipt root checks arithmetic, and signing a fetched receipt records it; neither endorses unverified sender claims.
+
 ```
 php tests/run.php        # 68 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 117 checks of the runtime against a fake service: outbox, replay, unknown, gate, board, scopes, receipt, MCP, and what a reader checks for itself
+php tests/runtime.php    # offline runtime and reader checks against a fake service
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 python tests/interop.py  # PHP and Python open each other's envelopes and verify each other's signatures
 ```

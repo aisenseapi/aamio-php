@@ -49,6 +49,7 @@ final class Client
      */
     public function open(int $ttl = self::DEFAULT_TTL, ?array $allow = null, ?array $gate = null): array
     {
+        $allow = self::normalizeAllow($allow);
         $id = Address::newId();
         $w = Address::w($id);
         $headers = ['X-Read' => $id, 'X-TTL' => (string) $ttl, 'Content-Type' => 'application/json'];
@@ -58,7 +59,64 @@ final class Client
         $body = $gate !== null ? Codec::json(['gate' => $gate]) : null;
         [$status, $answer] = Http::call('PUT', $this->url('/' . $w), $body, $headers, $this->timeout);
 
-        return ['id' => $id, 'w' => $w, 'status' => $status, 'body' => $answer];
+        return ['id' => $id, 'w' => $w, 'allow' => $allow, 'status' => $status, 'body' => $answer];
+    }
+
+    public static function normalizeAllow(?array $allow): array
+    {
+        $out = [];
+        foreach ($allow ?? [] as $entry) {
+            if (!is_string($entry)) {
+                throw new \InvalidArgumentException('an allowlist entry must be a string');
+            }
+            foreach (explode(',', $entry) as $part) {
+                $key = trim($part);
+                if ($key !== '' && !in_array($key, $out, true)) { $out[] = $key; }
+            }
+        }
+        return in_array('*', $out, true) ? ['*'] : $out;
+    }
+
+    /** Checks one remote record; only locally computed hashes survive. */
+    private function checkedMessage(string $w, mixed $raw): array
+    {
+        $message = is_array($raw) ? $raw : [];
+        $message['service_verified'] = ($message['verified'] ?? null) === true;
+        $message['service_from'] = $message['from'] ?? null;
+        unset($message['unverified_because']);
+        try {
+            if (!is_int($message['seq'] ?? null) || !is_int($message['at'] ?? null)) {
+                throw new \UnexpectedValueException('invalid message metadata');
+            }
+            $checked = Keys::checkMessage($w, $message);
+        } catch (\Throwable $error) {
+            $checked = ['verified' => false, 'sha256' => null, 'why_not' => 'the message could not be checked here: ' . (new \ReflectionClass($error))->getShortName()];
+        }
+        $message['seq'] = is_int($message['seq'] ?? null) ? $message['seq'] : 0;
+        $message['at'] = is_int($message['at'] ?? null) ? $message['at'] : 0;
+        $message['verified'] = $checked['verified'];
+        $message['from'] = $checked['verified'] ? $message['from'] : null;
+        $message['sha256'] = $checked['sha256'];
+        if ($checked['why_not'] !== null) { $message['unverified_because'] = $checked['why_not']; }
+        return $message;
+    }
+
+    /** Checks, then decodes one remote message without aborting the batch. */
+    public function decodeAt(string $w, mixed $raw): array
+    {
+        $message = $this->checkedMessage($w, $raw);
+        try {
+            return $this->decode($message);
+        } catch (\Throwable $error) {
+            $why = 'the message could not be checked here: ' . (new \ReflectionClass($error))->getShortName();
+            return ['seq' => $message['seq'], 'at' => $message['at'], 'from' => null, 'verified' => false, 'sealed' => false, 'body' => $message['body'] ?? null, 'opened' => null, 'format' => 'unreadable', 'error' => $why, 'unverified_because' => $why];
+        }
+    }
+
+    /** Policy-aware reader for the object returned by open(). */
+    public function readThread(array $thread, int $after = 0, int $wait = 0): array
+    {
+        return $this->read($thread['w'], $thread['id'], $after, $wait, $thread['allow'] ?? []);
     }
 
     /** The gate an inbox was opened with, read once per address; {} for none, null when the thread is gone. */
@@ -218,34 +276,23 @@ final class Client
      */
     public function read(string $w, string $id, int $after = 0, int $wait = 0, ?array $allow = null): array
     {
+        $allow = self::normalizeAllow($allow);
         $path = '/' . $w . ($after > 0 || $wait > 0 ? '/after/' . $after : '') . ($wait > 0 ? '/wait/' . min($wait, 25) : '');
         [$status, $answer] = Http::call('GET', $this->url($path), null, ['X-Read' => $id], $this->timeout + 25);
         $out = ['status' => $status, 'body' => $answer];
         if ($status !== 200 || !is_array($answer) || !is_array($answer['messages'] ?? null)) {
             return $out;
         }
-        $allow = array_values((array) $allow);
         $any = in_array('*', $allow, true);
         $handed = [];
         $keptOut = [];
-        foreach ($answer['messages'] as $message) {
-            if (!is_array($message)) {
-                continue;
-            }
-            $checked = Keys::checkMessage($w, $message);
-            if ($checked['why_not'] !== null) {
-                $message['unverified_because'] = $checked['why_not'];
-                $message['service_verified'] = !empty($message['verified']);
-            }
-            $message['verified'] = $checked['verified'];
-            if (!$checked['verified']) {
-                $message['from'] = null;
-            }
-            if ($checked['sha256'] !== null) {
-                $message['sha256'] = $checked['sha256'];
-            }
-            if ($allow !== [] && !($checked['verified'] && ($any || in_array($message['from'], $allow, true)))) {
-                $keptOut[] = ['seq' => $message['seq'] ?? null, 'why' => $any ? 'this thread was opened for signed messages only, and this one did not verify here' : 'this thread was opened for named keys, and this one was not signed by one of them, as checked here'];
+        $out['observed'] = [];
+        foreach ($answer['messages'] as $raw) {
+            $message = $this->checkedMessage($w, $raw);
+            $excluded = $allow !== [] && !($message['verified'] && ($any || in_array($message['from'], $allow, true)));
+            $out['observed'][] = ['seq' => $message['seq'], 'at' => $message['at'], 'sha256' => $message['sha256'], 'from' => $message['service_from'], 'from_key' => $message['from'], 'verified' => $message['verified'], 'service_verified' => $message['service_verified'], 'unverified_because' => $message['unverified_because'] ?? null, 'kept_out' => $excluded];
+            if ($excluded) {
+                $keptOut[] = ['seq' => $message['seq'], 'why' => $any ? 'this thread was opened for signed messages only, and this one did not verify here' : 'this thread was opened for named keys, and this one was not signed by one of them, as checked here', 'unverified_because' => $message['unverified_because'] ?? null];
                 continue;
             }
             $handed[] = $message;
@@ -264,12 +311,16 @@ final class Client
      * sealed message that is addressed to us and opens, 'plaintext'; for
      * plain text, the body; 'sealed', 'verified', 'from' are never taken from
      * the payload. On a message that came through read(), verified and from
-     * are this client's own result.
+     * are this client's own result. UNSAFE for raw remote input: this legacy
+     * method trusts supplied fields. Use decodeAt() or read() for such input.
      */
     public function decode(array $message): array
     {
         $out = ['seq' => $message['seq'] ?? null, 'at' => $message['at'] ?? null, 'from' => $message['from'] ?? null, 'verified' => (bool) ($message['verified'] ?? false), 'sealed' => (bool) ($message['sealed'] ?? false), 'body' => $message['body'] ?? '', 'opened' => null, 'format' => 'text'];
-        $body = (string) ($message['body'] ?? '');
+        foreach (['unverified_because', 'service_verified'] as $field) {
+            if (array_key_exists($field, $message)) { $out[$field] = $message[$field]; }
+        }
+        $body = is_string($message['body'] ?? null) ? $message['body'] : '';
         if ($out['sealed']) {
             // The envelope names who it is sealed to, as the first 8 hex of
             // sha256 over the recipient key, so that question is answered by

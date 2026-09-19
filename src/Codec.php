@@ -20,9 +20,16 @@ final class Codec
     public static function unb64url(string $text): string
     {
         $text = rtrim($text, '=');
-        $variant = (str_contains($text, '+') || str_contains($text, '/')) ? SODIUM_BASE64_VARIANT_ORIGINAL_NO_PADDING : SODIUM_BASE64_VARIANT_URLSAFE_NO_PADDING;
-
-        return sodium_base642bin($text, $variant);
+        // Legacy records may contain unused trailing bits. Identity strings
+        // are still compared exactly; only their byte decoding is permissive.
+        if (preg_match('/^[A-Za-z0-9+\/_-]*$/D', $text) !== 1 || strlen($text) % 4 === 1) {
+            throw new \SodiumException('invalid base64');
+        }
+        $bytes = base64_decode(strtr($text, '-_', '+/'), true);
+        if ($bytes === false) {
+            throw new \SodiumException('invalid base64');
+        }
+        return $bytes;
     }
 
     public static function sha256hex(string $bytes): string
