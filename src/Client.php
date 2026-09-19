@@ -373,6 +373,27 @@ final class Client
         return ['status' => $status, 'body' => $answer];
     }
 
+    // ------------------------------------------------------ what it is --
+
+    /** Whether the service answers at all, and which version and commit it is. */
+    public function health(): array
+    {
+        [$status, $answer] = Http::call('GET', $this->url('/health'), null, [], $this->timeout);
+
+        return ['status' => $status, 'body' => $answer];
+    }
+
+    /**
+     * What the service says it is and can do, for `Compat` to compare with what
+     * this client needs. Two version numbers cannot answer that question.
+     */
+    public function descriptor(): array
+    {
+        [$status, $answer] = Http::call('GET', $this->url('/.well-known/aamio.json'), null, [], $this->timeout);
+
+        return ['status' => $status, 'body' => $answer];
+    }
+
     // ----------------------------------------------------------- presence --
 
     /** Publishes where this key can be reached, for up to 120 seconds. */

@@ -16,6 +16,12 @@ final class SendFailed extends \RuntimeException
         public readonly string $messageId,
         public readonly int $status,
         public readonly mixed $detail,
+        /**
+         * When the message that did not land was the one carrying the address
+         * of a channel just opened: the channel is there, and the caller has
+         * to be told which, or it is a thread nobody knows about.
+         */
+        public readonly ?array $opened = null,
     ) {
         $reason = is_array($detail) ? (string) ($detail['error'] ?? json_encode($detail)) : (string) $detail;
         parent::__construct(sprintf('send %s (%s): %s', $outcome, $status === 0 ? 'no answer' : (string) $status, $reason));

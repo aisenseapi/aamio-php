@@ -153,7 +153,7 @@ final class McpServer
         } catch (SendFailed $error) {
             [$retryable, $fix] = Runtime::sendAdvice($error->outcome, $error->status);
 
-            return self::resultOf(['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'operation' => $name === 'aamio_board_answer' ? 'board_answer' : 'send', 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => $fix], true);
+            return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'operation' => ['aamio_board_answer' => 'board_answer', 'aamio_open_channel' => 'open_channel'][$name] ?? 'send', 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => $fix], true);
         } catch (GateStop $error) {
             return self::resultOf(['error' => $error->getMessage(), 'error_code' => 'gate', 'operation' => 'send', 'retryable' => false, 'fix' => $error->fix], true);
         } catch (\InvalidArgumentException | \RuntimeException | \LogicException $error) {

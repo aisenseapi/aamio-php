@@ -817,6 +817,7 @@ $check(array_column($both, 'seq') === [1, 2] && array_column($both, 'replay') ==
 require __DIR__ . '/resilience.inc.php';
 require __DIR__ . '/read-limit.inc.php';
 require __DIR__ . '/board-answer.inc.php';
+require __DIR__ . '/local-storage.inc.php';
 $a->close();
 $b->close();
 Http::$override = null;

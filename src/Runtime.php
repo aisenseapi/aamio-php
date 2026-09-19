@@ -66,6 +66,14 @@ final class Runtime
     /** @var array<string, array> */
     public array $effects;
     public bool $archiveEnabled;
+    /** What this home does with its archive: keep, off, or so many days. */
+    public array $archivePolicy;
+    /**
+     * After close() the home may be another process's, so nothing more is
+     * written from here: a save then would be a save over somebody else's.
+     */
+    public bool $homeReleased = false;
+    private float $prunedAt = 0.0;
     /** @var callable */
     public $log;
     /**
@@ -83,23 +91,80 @@ final class Runtime
     /** @var array<string, true> */
     private static array $lockedHomes = [];
 
-    public function __construct(?string $home = null, ?string $host = null, ?array $tags = null, bool $archive = true, ?callable $log = null)
+    /**
+     * $archive null is the home's own choice, kept in config.json; false turns
+     * the archive off for this process, which is what --no-archive does, and
+     * true turns it on whatever the home says. It used to be on unless every
+     * command said otherwise.
+     */
+    public function __construct(?string $home = null, ?string $host = null, ?array $tags = null, ?bool $archive = null, ?callable $log = null)
     {
         $this->home = $home ?: self::homeDir();
         $this->host = rtrim($host ?: (getenv('AAMIO_HOST') ?: Hosts::DEFAULT_HOST), '/');
-        $this->archiveEnabled = $archive;
         $this->log = $log ?: static function (string $line): void {
         };
-        if (!is_dir($this->home . '/archive')) {
-            mkdir($this->home . '/archive', 0700, true);
-        }
+        Storage::makePrivateDir($this->home);
+        Storage::makePrivateDir($this->home . DIRECTORY_SEPARATOR . 'archive');
+        $this->archivePolicy = Storage::readPolicy($this->home);
+        $this->archiveEnabled = $archive ?? ($this->archivePolicy['mode'] !== 'off');
         $this->takeLock();
         try {
             $this->load($tags);
+            $this->tidy();
         } catch (\Throwable $error) {
             $this->close();
             throw $error;
         }
+    }
+
+    /** What the home needs before the first read: no leftovers, private files, no archive past its lifetime. */
+    private function tidy(): void
+    {
+        foreach (Storage::leftovers($this->home) as $path) {
+            // A write that was interrupted. The file it was to replace is
+            // whole, since the rename never happened.
+            @unlink($path);
+        }
+        foreach (Storage::tighten($this->home) as $path) {
+            ($this->log)('made private: ' . $path . ' (an older version wrote it with the default mode)');
+        }
+        if (!Storage::isWindows()) {
+            // Mode bits cost nothing to read. On Windows it is the access list
+            // that decides and reading it starts a shell, so that is left to
+            // `aamio doctor` and `aamio init`.
+            $found = Storage::check($this->home);
+            foreach (array_slice($found['findings'], 0, 5) as $finding) {
+                ($this->log)('WARNING: ' . ($finding['path'] ?? $this->home) . ': ' . $finding['problem'] . '. ' . ($found['fix'] ?? ''));
+            }
+        }
+        $this->prune();
+    }
+
+    private function prune(): void
+    {
+        if (!$this->archiveEnabled || !(($this->archivePolicy['days'] ?? null) || ($this->archivePolicy['max_mb'] ?? null))) {
+            return;
+        }
+        $this->prunedAt = microtime(true);
+        try {
+            $gone = Storage::prune($this->home, $this->archivePolicy);
+        } catch (\Throwable $error) {
+            ($this->log)('archive not pruned: ' . $error->getMessage());
+
+            return;
+        }
+        if ($gone['removed'] > 0) {
+            ($this->log)('archive: ' . $gone['removed'] . ' record(s) past their lifetime removed');
+        }
+    }
+
+    /** The home's own choice, written where the next process finds it. */
+    public function setArchive(array $policy): void
+    {
+        $this->saveJson('config.json', ['archive' => $policy]);
+        $this->archivePolicy = $policy;
+        $this->archiveEnabled = $policy['mode'] !== 'off';
+        $this->prune();
     }
 
     private function load(?array $tags): void
@@ -206,6 +271,13 @@ final class Runtime
 
     private function saveJson(string $name, mixed $value): void
     {
+        if ($this->homeReleased) {
+            // After close the home may be another process's. Writing here
+            // would be writing over what that one holds.
+            ($this->log)($name . ' not written: this runtime is closed');
+
+            return;
+        }
         $path = $this->path($name);
         $tmp = $path . '.tmp';
         // Private from the first byte, not made so once it has been written.
@@ -328,7 +400,7 @@ final class Runtime
 
     public function archive(string $label, array $record): void
     {
-        if (!$this->archiveEnabled) {
+        if (!$this->archiveEnabled || $this->homeReleased) {
             return;
         }
         $line = json_encode($record, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
@@ -339,9 +411,12 @@ final class Runtime
         // false, so the caller used to record archived: true for a message
         // that never reached the disk, and the command line, one process per
         // command, could never read it again.
-        $file = $this->path('archive' . DIRECTORY_SEPARATOR . $label . '.jsonl');
-        if (@file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX) === false) {
-            throw new \RuntimeException('could not append to ' . $file);
+        // Private from its first byte, locked while it is written, and with a
+        // newline first when the file does not end in one: a crash used to
+        // leave a last line with no end, and the next record became part of it.
+        Storage::appendPrivate($this->path('archive' . DIRECTORY_SEPARATOR . $label . '.jsonl'), $line);
+        if (microtime(true) - $this->prunedAt > 3600) {
+            $this->prune();
         }
     }
 
@@ -805,7 +880,9 @@ final class Runtime
     {
         $now = time();
 
-        return array_values(array_map(fn (Channel $c): array => ['label' => $c->label, 'w' => $c->w, 'expire_at' => $c->expireAt, 'seconds_left' => $c->secondsLeft($now), 'allow' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, $c->allow), 'received' => count($c->received), 'after' => $c->after], $this->channels));
+        // expired, since a channel past its time was listed like any other
+        // until a read took it away.
+        return array_values(array_map(fn (Channel $c): array => ['label' => $c->label, 'w' => $c->w, 'expire_at' => $c->expireAt, 'seconds_left' => $c->secondsLeft($now), 'expired' => $c->expireAt <= $now, 'allow' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, $c->allow), 'received' => count($c->received), 'after' => $c->after], $this->channels));
     }
 
     // -------------------------------------------------------------- board --
@@ -1025,6 +1102,37 @@ final class Runtime
     /** How many messages the last boardReplies() left out, for a caller to say so. */
     public int $boardRepliesLeftOut = 0;
 
+    /**
+     * Reads the board inboxes, and only those, when nothing listens in the background.
+     *
+     * `board replies` used to read them only when it was given a wait, so a
+     * one-shot command said no replies while answers lay on the inbox: an
+     * outside agent watched that for twenty minutes. What waits on the other
+     * channels is left where it is, for `read`.
+     */
+    public function boardPoll(int $wait = 0): array
+    {
+        $collected = [];
+        $waited = false;
+        foreach (array_values($this->channels) as $channel) {
+            if ($channel->label !== 'board' && !str_starts_with($channel->label, 'board-')) {
+                continue;
+            }
+            try {
+                [$state, $entries] = $this->poll($channel, $waited ? 0 : $wait);
+            } catch (\Throwable $error) {
+                $this->note($channel, 'unread', 'this channel could not be read: ' . (new \ReflectionClass($error))->getShortName() . '.');
+                continue;
+            }
+            $waited = $waited || $state === 'ok' || $state === 'gone';
+            foreach ($entries as $entry) {
+                $collected[] = $entry;
+            }
+        }
+
+        return $collected;
+    }
+
     public function boardReplies(?string $postId = null): array
     {
         $wanted = static function (array $entry) use ($postId): bool {
@@ -1138,10 +1246,15 @@ final class Runtime
             if ($note !== null) {
                 $body['text'] = $note;
             }
-            $notes = [];
-            [$status, $handed] = $this->post($replyTo, $this->keys->seal($key, Codec::json($body)), $notes);
+            // The message that carries the address is a send, and goes through
+            // the outbox like one. It was posted directly, and a refusal was a
+            // bare error: on the command line a traceback, with the channel
+            // open and its address delivered to nobody.
+            $entry = $this->outboxAdd($replyTo, $key, $this->keys->seal($key, Codec::json($body)), $body);
+            [$status, $handed] = $this->deliver($entry);
             if ($status !== 201) {
-                throw new \RuntimeException('channel opened but the address could not be handed over: ' . $status . ' ' . json_encode($handed));
+                $entry = $this->outbox[$entry['id']];
+                throw new SendFailed($entry['status'], $entry['id'], $status, $handed, ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt]);
             }
         }
 
@@ -1849,6 +1962,9 @@ final class Runtime
 
     public function close(): void
     {
+        // PHP has no background threads here, so there is nothing to wait for:
+        // when this returns, nothing else in this process is reading.
+        $this->homeReleased = true;
         $held = $this->loadJson('lock', null);
         if (is_array($held) && ($held['pid'] ?? null) === getmypid()) {
             @unlink($this->path('lock'));

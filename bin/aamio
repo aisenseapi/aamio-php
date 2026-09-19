@@ -12,6 +12,7 @@ declare(strict_types=1);
  *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
  *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] | read [--wait N]
  *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
+ *   archive [status|keep|off|days:N|prune] [--max-mb M] [--all] | doctor
  *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO] [--scope NAME]
  *   board find [--kind K] [--tags a,b] [--lang L] [--after N] [--wait N] [--min-work-bits N] [--scope NAME]
  *   board tags | board answer POST TEXT [--scope NAME] | board replies [--post ID] [--wait N] | board withdraw POST
@@ -30,10 +31,13 @@ foreach ([__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php
     }
 }
 
+use Aamio\Compat;
 use Aamio\GateStop;
+use Aamio\Http;
 use Aamio\McpServer;
 use Aamio\Runtime;
 use Aamio\SendFailed;
+use Aamio\Storage;
 
 function out(mixed $value): void
 {
@@ -87,7 +91,13 @@ if ($command === null || in_array($command, ['help', '-h'], true)) {
 }
 
 try {
-    $runtime = new Runtime($opts['home'] ?? null, $opts['host'] ?? null, csv($opts['tags'] ?? null), !isset($opts['no-archive']), static fn (string $line) => fwrite(STDERR, $line . "\n"));
+    // --tags on `board post` is the tags of that post, and on `board find` a
+    // filter. Every --tags used to become this runtime's own: whoami showed the
+    // last post's tags, and presence published them as where this key can be
+    // reached. --no-archive is one command; the folder's own choice is the
+    // default and lives in config.json.
+    $runtimeTags = $command === 'board' ? null : csv($opts['tags'] ?? null);
+    $runtime = new Runtime($opts['home'] ?? null, $opts['host'] ?? null, $runtimeTags, isset($opts['no-archive']) ? false : null, static fn (string $line) => fwrite(STDERR, $line . "\n"));
 } catch (\Throwable $error) {
     fail($error->getMessage());
 }
@@ -99,9 +109,53 @@ register_shutdown_function([$runtime, 'close']);
 try {
     switch ($command) {
         case 'init':
+            if (isset($opts['archive'])) {
+                $runtime->setArchive(Storage::parsePolicy((string) $opts['archive'], isset($opts['max-mb']) ? (float) $opts['max-mb'] : null));
+            }
             $runtime->ensureInbox();
             $runtime->saveState();
-            out($runtime->whoami());
+            // Said once, where a person sets the runtime up: the service
+            // forgets, and this folder does not unless it is told to.
+            out($runtime->whoami() + ['local_storage' => Storage::status($runtime->home, $runtime->archivePolicy) + ['home' => $runtime->home, 'who_can_read' => Storage::check($runtime->home)]]);
+            break;
+        case 'archive':
+            $policy = (string) ($args[1] ?? 'status');
+            if ($policy === 'prune') {
+                $gone = Storage::prune($runtime->home, $runtime->archivePolicy, null, isset($opts['all']));
+                out(Storage::status($runtime->home, $runtime->archivePolicy) + ['removed' => $gone['removed']]);
+            } elseif ($policy === 'status') {
+                out(Storage::status($runtime->home, $runtime->archivePolicy));
+            } else {
+                $runtime->setArchive(Storage::parsePolicy($policy, isset($opts['max-mb']) ? (float) $opts['max-mb'] : null));
+                out(Storage::status($runtime->home, $runtime->archivePolicy));
+            }
+            break;
+        case 'doctor':
+            // One answer to three questions: does this client fit the service,
+            // who can read the home, what is kept. Nothing here is a guess
+            // reported as a finding: what could not be checked says so.
+            $health = $runtime->client->health();
+            $service = ['host' => $runtime->host, 'reachable' => $health['status'] === 200];
+            if ($health['status'] === 200 && is_array($health['body'])) {
+                $service['version'] = $health['body']['version'] ?? null;
+                $service['revision'] = $health['body']['revision'] ?? null;
+            } else {
+                $service['problem'] = 'no answer from /health (' . $health['status'] . '), so nothing below about the service was checked';
+            }
+            $descriptor = $runtime->client->descriptor();
+            $fits = Compat::check($descriptor['status'] === 200 && is_array($descriptor['body']) ? $descriptor['body'] : null);
+            if ($descriptor['status'] !== 200) {
+                $fits['verdict'] = 'unknown';
+                $fits['why'] = 'the descriptor could not be read (' . $descriptor['status'] . '), so compatibility was not checked';
+            }
+            out([
+                'client' => ['name' => 'aamio-php', 'version' => Http::VERSION, 'protocol' => Compat::PROTOCOL],
+                'service' => $service,
+                'compatibility' => $fits,
+                'storage' => Storage::check($runtime->home),
+                'archive' => Storage::status($runtime->home, $runtime->archivePolicy),
+                'outbox_pending' => count($runtime->outboxPending()),
+            ]);
             break;
         case 'whoami':
             out($runtime->whoami());
@@ -165,10 +219,9 @@ try {
                     out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT')), null, isset($opts['scope']) ? (string) $opts['scope'] : null));
                     break;
                 case 'replies':
-                    $wait = (int) ($opts['wait'] ?? 0);
-                    if ($wait > 0) {
-                        $runtime->read($wait);
-                    }
+                    // Always, and the board inboxes only. With no wait given
+                    // this read nothing at all, and said nobody had answered.
+                    $runtime->boardPoll((int) ($opts['wait'] ?? 0));
                     $replies = $runtime->boardReplies($opts['post'] ?? null);
                     // How many messages this left out, every time and not only
                     // when it found nothing: an answer that names no post is
