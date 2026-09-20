@@ -408,7 +408,7 @@
   },
   {
    "name": "aamio_outbox_forget",
-   "description": "Stop waiting for one unsettled message. The entry leaves the outbox, nothing is sent for it afterwards, and it is gone from aamio_pending. It says neither that the message was delivered nor that it was not: it says you have stopped waiting for an answer that is not coming. Take aamio_receipt first if you need a record of what passed through the thread.",
+   "description": "Stop waiting for one unsettled message. The entry leaves the outbox and it is gone from aamio_pending. A send still working on proof of work is stopped before anything leaves this machine; a send already away cannot be recalled, and already_sending in the answer says which of the two it was, since only the first lets you compose something else. It says neither that the message was delivered nor that it was not: it says you have stopped waiting for an answer that is not coming. Take aamio_receipt first if you need a record of what passed through the thread.",
    "inputSchema": {
     "type": "object",
     "properties": {
