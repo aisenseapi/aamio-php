@@ -10,7 +10,8 @@ declare(strict_types=1);
  *   aamio [--home DIR] [--host URL] [--tags a,b] [--no-archive] <command> ...
  *
  *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
- *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] | read [--wait N]
+ *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON]
+ *   read [--wait N] [--limit N] [--max-bytes N]
  *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
  *   archive [status|keep|off|days:N|prune] [--max-mb M] [--all] | doctor
  *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO] [--scope NAME]
@@ -185,7 +186,23 @@ try {
             // attention carries what the read could not do. Without it an
             // expired thread and a service that did not answer both read as
             // no messages at all.
-            $messages = $runtime->read((int) ($opts['wait'] ?? 0));
+            //
+            // --limit and --max-bytes were written into the README of 0.2.14 and
+            // into no line of this file, so the command took them, ignored them
+            // and answered with whatever the thread held. A documented option
+            // that does nothing is worse than an undocumented one.
+            $askedLimit = isset($opts['limit']) ? (int) $opts['limit'] : 50;
+            $askedBytes = isset($opts['max-bytes']) ? (int) $opts['max-bytes'] : null;
+
+            if ($askedLimit < 1 || $askedLimit > 200) {
+                fail('--limit is a whole number of messages from 1 to 200');
+            }
+
+            if ($askedBytes !== null && $askedBytes < 512) {
+                fail('--max-bytes is 512 or more. One message can be 65536 bytes, and a budget under that is answered with the message named in too_large rather than cut.');
+            }
+
+            $messages = $runtime->read((int) ($opts['wait'] ?? 0), $askedLimit, $askedBytes);
             out(['messages' => $messages, 'count' => count($messages), 'attention' => $runtime->attentionTaken()]);
             break;
         case 'receipt':

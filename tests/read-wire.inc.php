@@ -158,3 +158,36 @@ foreach ($fake->seen as $call) {
     }
 }
 $check($resetHeaders !== [] && !in_array('none', $resetHeaders, true), 'a re-read after a thread reset keeps the byte budget the caller asked for', implode(' / ', $resetHeaders));
+
+// Codex, 20 September 2026, against published 0.2.14. The service said it had
+// more than the budget allowed, the runtime wrote it down, and nothing ever told
+// the caller: a read that stopped early looked exactly like one that finished.
+$heldW = Address::w(Address::newId());
+$fake->threads[$heldW] = ['id' => 'held-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => []];
+
+foreach (range(1, 6) as $n) {
+    $held = str_repeat('h' . $n, 400);
+    $fake->threads[$heldW]['messages'][] = ['seq' => $n, 'at' => $fake->now + $n, 'type' => 'text', 'body' => $held, 'sha256' => hash('sha256', $held), 'from' => null, 'sig' => null, 'verified' => false, 'sealed' => false];
+}
+
+$heldChannel = new Channel('held', 'held-key', $heldW, $fake->now + 600, []);
+$a->channels['held'] = $heldChannel;
+$a->read(0, 50, 2000);
+$heldNotes = $a->attentionTaken();
+$heldSaid = '';
+
+foreach ($heldNotes as $n) {
+    $heldSaid .= ' ' . ($n['what'] ?? '');
+}
+
+$check(str_contains($heldSaid, 'budget') || str_contains($heldSaid, 'more'), 'a read the service cut short says so, rather than looking finished', trim($heldSaid) ?: 'nothing was said');
+
+// And the command line, which the README of the same release says takes both.
+$cliRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-cli-limits-' . getmypid();
+$heldChannel->after = 0;
+$heldChannel->seen = [];
+$fake->seen = [];
+$cliOut = [];
+@exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(dirname(__DIR__) . '/bin/aamio') . ' --help 2>&1', $cliOut, $cliStatus);
+$cliHelp = implode(' ', $cliOut);
+$check(str_contains($cliHelp, '--limit') && str_contains($cliHelp, '--max-bytes'), 'the command line offers the two options its README says it takes', $cliHelp === '' ? 'no help output' : 'neither is in the help');

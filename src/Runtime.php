@@ -2013,6 +2013,7 @@ final class Runtime
         $collected = [];
         $waited = false;
         $leftWaiting = 0;
+        $heldBack = [];
         $notAsked = [];
         foreach (array_values($this->channels) as $channel) {
             // A channel is only asked for what this call still has room for.
@@ -2043,6 +2044,18 @@ final class Runtime
                 $collected[] = $entry;
             }
             $leftWaiting += $channel->leftWaiting;
+
+            if ($channel->moreAtService) {
+                $heldBack[] = $channel->label;
+            }
+        }
+        if ($heldBack !== []) {
+            // The service said it had more than the budget allowed. It was written
+            // down on the channel and never said out loud, so a read that stopped
+            // early looked exactly like one that had finished.
+            $this->noteTrouble('read', 'more', 'the service had more waiting on '
+                . implode(', ', $heldBack)
+                . ' than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over.');
         }
         if ($leftWaiting > 0 || $notAsked !== []) {
             // Nothing is lost, and the caller still has to hear it: a read that

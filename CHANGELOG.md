@@ -4,6 +4,18 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.2.15 - 2026-09-20
+
+A corrective release. 0.2.14 shipped with both of these.
+
+- `aamio read` takes `--limit` and `--max-bytes`. The README of 0.2.14 said it did
+  and no line of the command read either option, so it answered with whatever the
+  thread held. A documented option that does nothing is worse than an undocumented
+  one.
+- A read the service cut short says so. `more` was recorded on the channel and
+  never said out loud, so a read that stopped at the byte budget looked exactly
+  like one that had finished.
+
 ## 0.2.14 - 2026-09-20
 
 - `Client::read`, `Runtime::poll` and `Runtime::read` take a count and a byte budget
