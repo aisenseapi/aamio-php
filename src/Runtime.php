@@ -398,10 +398,11 @@ final class Runtime
         $this->saveJson('effects.json', $this->effects === [] ? new \stdClass() : $this->effects);
     }
 
-    public function archive(string $label, array $record): void
+    /** Writes one record, and says whether it wrote one: a folder that keeps nothing is not a failure, and not a write either. */
+    public function archive(string $label, array $record): bool
     {
         if (!$this->archiveEnabled || $this->homeReleased) {
-            return;
+            return false;
         }
         $line = json_encode($record, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
         if ($line === false) {
@@ -418,6 +419,8 @@ final class Runtime
         if (microtime(true) - $this->prunedAt > 3600) {
             $this->prune();
         }
+
+        return true;
     }
 
     /** @return string[] labels this runtime has an archive for, the ones a board inbox uses */
@@ -1778,8 +1781,14 @@ final class Runtime
             $channel->received[] = $entry;
             // Received, readable, archived and handled are four different things.
             try {
-                $this->archive($channel->label, $entry + ['kind' => 'received']);
-                $entry['archived'] = true;
+                $wrote = $this->archive($channel->label, $entry + ['kind' => 'received']);
+                $entry['archived'] = $wrote;
+
+                if (!$wrote) {
+                    // Nothing went wrong and nothing was written: this folder keeps
+                    // nothing decrypted. Said, so the caller does not go looking.
+                    $entry['archive_off'] = true;
+                }
             } catch (\Throwable $error) {
                 $entry['archived'] = false;
                 $entry['archive_error'] = $error->getMessage();

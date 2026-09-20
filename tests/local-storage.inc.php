@@ -233,3 +233,26 @@ Storage::appendPrivate($plain, '{"n":3}');
 $repaired = (string) file_get_contents($plain);
 $check($repaired === '{"n":1}' . "\n" . '{"n":2' . "\n" . '{"n":3}' . "\n", 'a last line with no end costs that line only, and the next record starts on its own', str_replace("\n", '[LF]', $repaired));
 @unlink($plain);
+
+
+// A message is only called archived when something was written.
+//
+// Found by a Codex project review, 20 September 2026 (F2). archive() returned
+// without writing when the folder keeps nothing, and the receiving loop set
+// archived => true regardless, so an application was told to look in an archive
+// that does not exist. Off is still not a failure: no archive_error, and the
+// reason is said.
+$quiet = sys_get_temp_dir() . '/aamio-archive-off-' . getmypid();
+@mkdir($quiet . '/archive', 0700, true);
+$offRuntime = new Runtime($quiet, null, [], false);
+
+$check($offRuntime->archive('board', ['kind' => 'received', 'at' => 1]) === false, 'a folder that keeps nothing says it wrote nothing');
+$check(!is_file($quiet . '/archive/board.jsonl'), 'and no file appears');
+
+$loudHome = sys_get_temp_dir() . '/aamio-archive-on-' . getmypid();
+@mkdir($loudHome . '/archive', 0700, true);
+$onRuntime = new Runtime($loudHome);
+$check($onRuntime->archive('board', ['kind' => 'received', 'at' => 1]) === true, 'a folder that keeps its archive says it wrote');
+$check(is_file($loudHome . '/archive/board.jsonl'), 'and the file is there');
+$offRuntime->close();
+$onRuntime->close();
