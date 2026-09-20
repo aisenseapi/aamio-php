@@ -1592,6 +1592,12 @@ final class Runtime
         // This runtime sends on the calling thread and has no post flag, but the same
         // rule holds: a message still working on proof of work has an attempt counted
         // and has sent nothing.
+        // A post that happened is history. This runtime sends on the calling thread,
+        // so it cannot be caught mid-work, but an entry carried over from a Python
+        // home, or a later change here, must not lose it to a rewritten status.
+        if (($entry['posting'] ?? false) === true) {
+            return 'attempted';
+        }
         if ($status === 'working') {
             return 'never_sent';
         }
