@@ -89,6 +89,15 @@ leave it, and you either raise the budget or step past its `seq`.
 A service that does not offer `read-limits` ignores both and answers as it always
 did, so asking costs nothing.
 
+The budget is spent per channel, not across them: a read that finds messages on
+three channels can return that much from each, because a budget split between them
+would refuse a message that fits and nothing here knows beforehand which channel
+holds the bytes. And a message already on this machine that is larger than the
+whole budget is handed over rather than held back for ever. Both are said in
+`attention`, the first as `more` and the second as `over_budget`, so neither is a
+surprise. Only the service's own budget is a hard ceiling, and there it answers
+with `too_large` and sends nothing.
+
 ```php
 $messages = $runtime->read(0, 20, 8192);
 ```

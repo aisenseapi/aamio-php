@@ -106,7 +106,7 @@
      "max_bytes": {
       "type": "integer",
       "minimum": 512,
-      "description": "at most this many bytes of messages, whole messages only"
+      "description": "how many bytes of messages to hand over, per channel: a read across several channels can return that much from each, since a budget split between them would refuse a message that fits. Whole messages only. One message larger than the budget is handed over on its own and said in attention, because it is already on this machine; everything else waits for the next read."
      }
     },
     "additionalProperties": false

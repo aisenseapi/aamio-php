@@ -15,6 +15,9 @@ A corrective release. 0.2.14 shipped with both of these.
 - A read the service cut short says so. `more` was recorded on the channel and
   never said out loud, so a read that stopped at the byte budget looked exactly
   like one that had finished.
+- The byte budget says what it does. The local `aamio_read` tool and `aamio read
+  --max-bytes` said "at most this many bytes", and the budget is spent per channel,
+  so a read across several can return that much from each.
 
 ## 0.2.14 - 2026-09-20
 

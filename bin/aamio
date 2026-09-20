@@ -12,6 +12,7 @@ declare(strict_types=1);
  *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
  *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON]
  *   read [--wait N] [--limit N] [--max-bytes N]
+ *   (--max-bytes is per channel, and one message larger than it still comes)
  *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
  *   archive [status|keep|off|days:N|prune] [--max-mb M] [--all] | doctor
  *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO] [--scope NAME]
