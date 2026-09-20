@@ -135,6 +135,24 @@ final class McpServer
                     $pending = array_map(static fn (array $p): array => array_diff_key($p, ['envelope' => 1, 'to_key' => 1]), $r->outboxPending());
 
                     return self::resultOf(['count' => count($pending), 'pending' => $pending]);
+                case 'aamio_outbox_retry':
+                    $messageId = (string) $arguments['id'];
+                    $done = $r->outboxRetry($messageId);
+
+                    if ($done !== []) {
+                        return self::resultOf($done[0]);
+                    }
+
+                    // Nothing was sent, and the two reasons want different next moves.
+                    return self::resultOf([
+                        'id' => $messageId,
+                        'retried' => false,
+                        'why' => isset($r->outbox[$messageId])
+                            ? 'that message has a settled outcome, or aamio refused it for a reason that will not change, so the same bytes are not sent again'
+                            : 'this outbox has no message with that id: aamio_pending lists what is unsettled here',
+                    ], true);
+                case 'aamio_outbox_forget':
+                    return self::resultOf($r->outboxForget((string) $arguments['id']));
                 case 'aamio_board_tags':
                     return self::resultOf($r->boardTags());
                 case 'aamio_scopes':

@@ -1543,7 +1543,7 @@ final class Runtime
     public static function sendAdvice(string $outcome, int $status): array
     {
         if ($outcome === 'unknown') {
-            return [null, 'No answer came back, so this message may already have been delivered. Keep its message_id. aamio_pending lists what has no settled outcome on this machine; it does not confirm delivery, and nothing here can, because the address it went to is not yours to read. This interface has no retry-by-id tool: do not pass the message_id to aamio_send and do not compose a replacement. An approved retry sends the stored bytes again through the runtime\'s own outbox retry.'];
+            return [null, 'No answer came back, so this message may already have been delivered. Keep its message_id. aamio_pending lists what has no settled outcome on this machine; it does not confirm delivery, and nothing here can, because the address it went to is not yours to read. Do not pass the message_id to aamio_send and do not compose a replacement. An approved retry sends the stored bytes again: aamio_outbox_retry with this id, or aamio outbox retry --id on the command line.'];
         }
         if (in_array($status, self::SEND_TRY_LATER, true)) {
             return [true, sprintf('aamio declined this for now, not because of the message: %d is a rate window or a busy service. Do not change the content. Wait, then send the stored message again through the runtime\'s outbox retry rather than composing a new one.', $status)];
