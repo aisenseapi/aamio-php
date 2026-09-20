@@ -25,10 +25,18 @@ final class Receipt
     }
 
     /**
-     * ['root_adds_up' => bool, 'commitment_matches' => bool, 'local_root_matches' => bool|null]
-     * local_root_matches compares against hashes this process saw, and is
+     * ['root_adds_up' => bool, 'commitment_matches' => bool, 'local_hashes_match' => bool|null]
+     * local_hashes_match compares against hashes this process saw, and is
      * null when the receipt counts more messages than the client holds,
      * which is a receipt taken later, not a failure.
+     *
+     * local_hashes_match compares the content hashes this client holds, in order,
+     * with the ones the receipt lists. It is not a comparison of the root, which
+     * also covers the sequence numbers, the times and the senders: a receipt with
+     * different times and senders and the same hashes matches here and does not
+     * match the root. It was called local_root_matches until 20 September 2026,
+     * which is what it was found promising and not doing. The runtime's field of
+     * that name does recompute the root and compare it.
      */
     public static function verify(array $receipt, ?array $localHashes = null): array
     {
@@ -36,14 +44,14 @@ final class Receipt
         $out = [
             'root_adds_up' => hash_equals($root, (string) ($receipt['root'] ?? '')),
             'commitment_matches' => (($receipt['commitment'] ?? null) === 'sha256:' . ($receipt['root'] ?? '')),
-            'local_root_matches' => null,
+            'local_hashes_match' => null,
         ];
         if ($localHashes !== null) {
             $seen = array_map(static fn (array $m): string => (string) $m['sha256'], $receipt['messages'] ?? []);
             if (count($seen) < count($localHashes)) {
-                $out['local_root_matches'] = false;
+                $out['local_hashes_match'] = false;
             } elseif (count($seen) === count($localHashes)) {
-                $out['local_root_matches'] = $localHashes === $seen;
+                $out['local_hashes_match'] = $localHashes === $seen;
             }
         }
 

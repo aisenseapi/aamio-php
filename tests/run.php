@@ -118,9 +118,9 @@ $broken = $receipt;
 $broken['messages'][0]['sha256'] = str_repeat('0', 64);
 $check(!Receipt::verify($broken)['root_adds_up'], 'one changed hash breaks the root');
 $hashes = array_map(static fn (array $m): string => $m['sha256'], $receipt['messages']);
-$check(Receipt::verify($receipt, $hashes)['local_root_matches'] === true, 'local hashes that match say so');
-$check(Receipt::verify($receipt, [$hashes[0]])['local_root_matches'] === null, 'fewer local hashes than the receipt counts is null, not a failure');
-$check(Receipt::verify($receipt, [str_repeat('1', 64), $hashes[1]])['local_root_matches'] === false, 'and a different local hash is false');
+$check(Receipt::verify($receipt, $hashes)['local_hashes_match'] === true, 'local hashes that match say so');
+$check(Receipt::verify($receipt, [$hashes[0]])['local_hashes_match'] === null, 'fewer local hashes than the receipt counts is null, not a failure');
+$check(Receipt::verify($receipt, [str_repeat('1', 64), $hashes[1]])['local_hashes_match'] === false, 'and a different local hash is false');
 
 echo "gate: the vectors\n";
 $g = [
@@ -189,6 +189,24 @@ $check($plan['stop'] !== null && str_contains($plan['stop'], 'captcha'), 'an unk
 $plan = Gate::plan(['advise' => ['captcha' => true, 'pow' => ['bits' => 8]]]);
 $check($plan['stop'] === null && $plan['bits'] === 8 && count($plan['notes']) === 1, 'an unknown advice is passed over, the known one is done');
 $check(Gate::REQUIRE_MAX_BITS === 32 && Gate::ADVISE_MAX_BITS === 18, 'the ceilings are the services');
+
+
+// Codex, 20 September 2026. The helper was called local_root_matches, and a receipt
+// with the same content hashes but different times and senders still answered true,
+// while the whole local root -- seq, at, sha256, from -- was different. The name
+// promised a comparison nobody was making.
+$sameHashes = [
+    ['seq' => 1, 'at' => 100, 'sha256' => str_repeat('a', 64), 'from' => 'one'],
+    ['seq' => 2, 'at' => 200, 'sha256' => str_repeat('b', 64), 'from' => 'two'],
+];
+$movedAbout = [
+    ['seq' => 1, 'at' => 999, 'sha256' => str_repeat('a', 64), 'from' => 'somebody else'],
+    ['seq' => 2, 'at' => 888, 'sha256' => str_repeat('b', 64), 'from' => 'and another'],
+];
+$ourHashes = [str_repeat('a', 64), str_repeat('b', 64)];
+$movedCheck = Receipt::verify(['messages' => $movedAbout, 'root' => Receipt::root($movedAbout), 'commitment' => 'sha256:' . Receipt::root($movedAbout)], $ourHashes);
+$check(($movedCheck['local_hashes_match'] ?? null) === true, 'the helper compares hashes, and says so in its name');
+$check(Receipt::root($sameHashes) !== Receipt::root($movedAbout), 'and the root it does not compare is a different number');
 
 echo "\n$passed passed, $failed failed\n";
 exit($failed === 0 ? 0 : 1);

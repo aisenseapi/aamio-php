@@ -13,7 +13,7 @@ use Aamio\Runtime;
 echo "reader resilience and durable rotation\n";
 $vectors = json_decode((string) file_get_contents(__DIR__ . '/vectors.json'), true);
 $check(Keys::verify($vectors['a']['public'], $vectors['strayBits']['signature'], $vectors['signInput']) && Keys::verify($vectors['strayBits']['key'], $vectors['signature'], $vectors['signInput']), 'historical trailing bits verify as the same bytes');
-$check(Receipt::verify(['messages' => [], 'root' => Receipt::root([])], ['seen'])['local_root_matches'] === false, 'a shortened receipt is not a matching prefix');
+$check(Receipt::verify(['messages' => [], 'root' => Receipt::root([])], ['seen'])['local_hashes_match'] === false, 'a shortened receipt is not a matching prefix');
 $headersSent = [];
 Http::$override = static function ($method, $url, $body, $headers) use (&$headersSent): array { $headersSent[] = $headers; return [201, ['allow' => ['*']]]; };
 $normalized = $a->client->open(600, [' ' . $b->keys->public . ', ', '', $b->keys->public]);

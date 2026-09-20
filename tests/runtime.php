@@ -48,6 +48,9 @@ final class FakeService
     public array $seen = [];
     public bool $silent = false;
     public bool $refuse = false;
+    /** The service failing on a write: it answered, and its answer says nothing
+     * about whether it stored the message first. */
+    public bool $breaks = false;
     public bool $oldBoard = false;
     public bool $forgetScope = false;
     public bool $explode = false;
@@ -125,6 +128,9 @@ final class FakeService
                 }
                 if ($this->refuse) {
                     return [403, ['error' => 'refused by the fake', 'fix' => 'change the request'], []];
+                }
+                if ($this->breaks) {
+                    return [500, ['error' => 'the fake broke', 'fix' => 'ask again'], []];
                 }
                 if ($thread['allow'] !== [] && !isset($headers['X-Key'])) {
                     return [403, ['error' => 'signed only', 'fix' => 'sign it'], []];

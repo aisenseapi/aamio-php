@@ -27,6 +27,13 @@ final class Runtime
     public const RENEW_BEFORE = 180;
     public const SEND_DETERMINISTIC = [400, 403, 410, 413, 415, 422, 428, 501];
     public const SEND_TRY_LATER = [429, 502, 503, 504];
+    /**
+     * Answers that prove the message was never stored: the deterministic ones, and a
+     * rate window, which aamio decides before it reads the body. 502, 503 and 504 are
+     * deliberately not here -- they can be a front door that saw nothing or the
+     * service failing after it had written, and this side cannot tell which.
+     */
+    public const SEND_NOT_STORED = [400, 403, 410, 413, 415, 422, 428, 501, 429];
     public const VERIFYUM_MCP = Hosts::VERIFYUM_MCP;
 
     /** Only the spellings seen in the wild, and only for an answer to a post. */
@@ -1529,7 +1536,12 @@ final class Runtime
         try {
             [$status, $result] = $this->post($entry['w'], $entry['envelope'], $notes);
         } catch (GateStop $stop) {
-            $this->outbox[$id]['status'] = 'refused';
+            // Nothing left this machine and nothing will. That is not the same as the
+            // service turning bytes away: refused with no answer behind it read as an
+            // attempt that left, so forget said already_sending about a message the
+            // transport had never been asked to send. Unless an earlier attempt is
+            // still open -- a stop now settles this decision, not that one.
+            $this->outbox[$id]['status'] = ($this->outbox[$id]['ever_open'] ?? false) ? 'unknown' : 'stopped';
             $this->outbox[$id]['error'] = $stop->getMessage();
             $this->outbox[$id]['last_at'] = time();
             $this->saveOutbox();
@@ -1540,14 +1552,30 @@ final class Runtime
         }
         $this->outbox[$id]['last_status'] = $status;
         $this->outbox[$id]['last_at'] = time();
+        if ($status !== 201) {
+            $this->outbox[$id]['error'] = is_array($result) ? ($result['error'] ?? null) : substr((string) $result, 0, 200);
+        }
+
         if ($status === 201) {
             $this->outbox[$id]['status'] = 'delivered';
             $this->outbox[$id]['seq'] = is_array($result) ? ($result['seq'] ?? null) : null;
         } elseif ($status === 0) {
+            // No reply at all. The bytes may be on the other side.
+            $this->outbox[$id]['ever_open'] = true;
             $this->outbox[$id]['status'] = 'unknown';
+        } elseif (in_array($status, self::SEND_NOT_STORED, true)) {
+            // Turned away without being stored. It settles the message unless
+            // something earlier was left open: a 410 an hour later says the thread is
+            // gone now, not that an attempt which got no answer never landed.
+            $this->outbox[$id]['status'] = ($this->outbox[$id]['ever_open'] ?? false) ? 'attempted' : 'refused';
         } else {
-            $this->outbox[$id]['status'] = 'refused';
-            $this->outbox[$id]['error'] = is_array($result) ? ($result['error'] ?? null) : substr((string) $result, 0, 200);
+            // It answered, and its answer says nothing about whether it stored the
+            // message first: a 500 is the service failing, not the service saying no.
+            // This wore the status refused, and refused is not one of the statuses
+            // outboxPending shows, so the one kind of message that most needs a
+            // decision was the one kind that did not appear on the list.
+            $this->outbox[$id]['ever_open'] = true;
+            $this->outbox[$id]['status'] = 'attempted';
         }
         $this->saveOutbox();
 
@@ -1558,7 +1586,7 @@ final class Runtime
 
     public function outboxPending(): array
     {
-        return array_values(array_filter($this->outbox, static fn (array $e): bool => in_array($e['status'], ['sending', 'unknown'], true)));
+        return array_values(array_filter($this->outbox, static fn (array $e): bool => in_array($e['status'], ['working', 'sending'], true) || self::outboxOpen($e)));
     }
 
     public function outboxRetry(?string $messageId = null): array
@@ -1569,10 +1597,11 @@ final class Runtime
             if ($messageId !== null && $id !== $messageId) {
                 continue;
             }
-            if (!in_array($entry['status'], ['unknown', 'refused'], true)) {
-                continue;
-            }
-            if ($entry['status'] === 'refused' && in_array($entry['last_status'], self::SEND_DETERMINISTIC, true)) {
+            // The same question outboxPending asks, asked once. A message whose
+            // outcome is open is exactly the message a second attempt is for; one
+            // the service will refuse again, or has already stored, is not. The two
+            // used to answer differently about the same entry in the same second.
+            if (!self::outboxOpen($entry)) {
                 continue;
             }
             try {
@@ -1626,6 +1655,16 @@ final class Runtime
      * 500 does not prove the message is absent, and a delivered one is certainly not
      * unsent: both were reported as never sent until 20 September.
      */
+    /**
+     * Whether this message still has something to decide. One place, because two
+     * places disagreed: pending listed a message and retry called the same message
+     * settled, in the same runtime, in the same second.
+     */
+    public static function outboxOpen(?array $entry): bool
+    {
+        return in_array(self::outboxOutcome($entry), ['attempted', 'unknown'], true);
+    }
+
     public static function outboxOutcome(?array $entry): string
     {
         if ($entry === null) {
@@ -1635,11 +1674,20 @@ final class Runtime
         if (in_array($status, ['delivered', 'unknown'], true)) {
             return $status;
         }
+        if ($status === 'attempted') {
+            // It left this machine and what came back settles nothing.
+            return 'attempted';
+        }
         if ($status === 'refused') {
-            // Only what the service said no to. Anything else it answered may have been
-            // stored before it failed, and SEND_DETERMINISTIC is the list of answers that
-            // mean the same bytes would be refused again.
-            return in_array($entry['last_status'] ?? 0, self::SEND_DETERMINISTIC, true) ? 'refused' : 'attempted';
+            // Only what the service turned away without storing, and only when nothing
+            // earlier was left open. An attempt that got no answer is not undone by any
+            // later refusal, and ever_open keeps that; an entry written by an older
+            // version has no such field and reads the same as it did.
+            if ($entry['ever_open'] ?? false) {
+                return 'attempted';
+            }
+
+            return in_array($entry['last_status'] ?? 0, self::SEND_NOT_STORED, true) ? 'refused' : 'attempted';
         }
 
         // This runtime sends on the calling thread and has no post flag, but the same
@@ -1651,9 +1699,10 @@ final class Runtime
         if (($entry['posting'] ?? false) === true) {
             return 'attempted';
         }
-        // working here, stopped in a Python home: both mean the proof of work never
-        // finished and nothing left. Only stopped fell through to the attempts count
-        // below, and attempts counts the call the work runs inside.
+        // working, or stopped: the proof of work never finished, or this machine
+        // decided not to send at all. Both mean nothing left. Only stopped fell
+        // through to the attempts count below, and attempts counts the call the work
+        // runs inside.
         if (in_array($status, ['working', 'stopped'], true)) {
             return 'never_sent';
         }
@@ -1767,11 +1816,32 @@ final class Runtime
 
             return [['text' => $raw], ['signed' => true, 'encrypted' => false, 'format' => 'json']];
         }
+        // Three things, and they used to share one catch: opening the envelope,
+        // reading the bytes as text, and the text happening to be JSON. Only the first
+        // two say anything about whether the message can be read. `for your eyes`,
+        // encrypted and signed, opened correctly and came back as text: null, format:
+        // unreadable, with the cursor moved past it -- a message that had arrived
+        // intact, reported as one nobody could read, and then dropped.
+        //
+        // The plain branch above has always handed over text that is not JSON. This is
+        // the same message with a lid on it.
         try {
             $plaintext = $this->keys->open((string) $message['from'], $raw);
-            $parsed = json_decode($plaintext, true, 512, JSON_THROW_ON_ERROR);
         } catch (\Throwable $error) {
             return [['text' => null], ['signed' => true, 'encrypted' => true, 'format' => 'unreadable', 'error' => (new \ReflectionClass($error))->getShortName()]];
+        }
+
+        // PCRE rather than mbstring: this package has never needed an extension
+        // beyond sodium, and the portable PHP the gate runs on has no mbstring.
+        // preg_match with the u modifier is false on bytes that are not UTF-8.
+        if (preg_match('//u', $plaintext) !== 1) {
+            return [['text' => null], ['signed' => true, 'encrypted' => true, 'format' => 'unreadable', 'error' => 'NotUtf8']];
+        }
+
+        $parsed = json_decode($plaintext, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            return [['text' => $plaintext], ['signed' => true, 'encrypted' => true, 'format' => 'text']];
         }
         if (is_array($parsed) && !array_is_list($parsed)) {
             [$content, $extra] = self::canonical($parsed);

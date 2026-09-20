@@ -191,3 +191,114 @@ $cliOut = [];
 @exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(dirname(__DIR__) . '/bin/aamio') . ' --help 2>&1', $cliOut, $cliStatus);
 $cliHelp = implode(' ', $cliOut);
 $check(str_contains($cliHelp, '--limit') && str_contains($cliHelp, '--max-bytes'), 'the command line offers the two options its README says it takes', $cliHelp === '' ? 'no help output' : 'neither is in the help');
+
+// Codex, 20 September 2026. A 500 set the status to refused beside a note saying
+// the message may have been stored, and refused is not a status outboxPending
+// shows: the one kind of message that most needs a decision was the one kind that
+// did not appear on the list. And a 410 after an attempt that got no answer was
+// reported as not stored, which this side cannot know.
+$outcomeOf = static fn ( array $e ): string => \Aamio\Runtime::outboxOutcome($e);
+
+$settled = [
+    'a delivery settles it' => [['status' => 'delivered', 'last_status' => 201], 'delivered'],
+    'a refusal the service will repeat settles it' => [['status' => 'refused', 'last_status' => 403], 'refused'],
+    'a rate window settles it as not stored' => [['status' => 'refused', 'last_status' => 429], 'refused'],
+    'a server error settles nothing' => [['status' => 'attempted', 'last_status' => 500], 'attempted'],
+    'and neither does a gateway that gave up' => [['status' => 'attempted', 'last_status' => 503], 'attempted'],
+    'silence settles nothing' => [['status' => 'unknown', 'last_status' => 0], 'unknown'],
+    'a refusal after an open attempt settles nothing' => [['status' => 'refused', 'last_status' => 410, 'ever_open' => true], 'attempted'],
+];
+
+$wrongOutcome = [];
+
+foreach ($settled as $what => $pair) {
+    [$fields, $want] = $pair;
+    $got = $outcomeOf($fields + ['id' => 'x', 'attempts' => 1]);
+
+    if ($got !== $want) {
+        $wrongOutcome[] = $what . ': ' . $got . ' where ' . $want . ' was right';
+    }
+}
+
+$check($wrongOutcome === [], 'every answer is worth exactly what it proves', implode('; ', $wrongOutcome));
+
+// And the list of what is not settled holds all of them and none of the others.
+$pendingRuntime = $a;
+$keptOutbox = $pendingRuntime->outbox;
+$pendingRuntime->outbox = [
+    'm-500' => ['id' => 'm-500', 'status' => 'attempted', 'last_status' => 500, 'attempts' => 1, 'w' => 'w'],
+    'm-0' => ['id' => 'm-0', 'status' => 'unknown', 'last_status' => 0, 'attempts' => 1, 'w' => 'w'],
+    'm-403' => ['id' => 'm-403', 'status' => 'refused', 'last_status' => 403, 'attempts' => 1, 'w' => 'w'],
+    'm-201' => ['id' => 'm-201', 'status' => 'delivered', 'last_status' => 201, 'attempts' => 1, 'w' => 'w'],
+];
+$pendingIds = array_column($pendingRuntime->outboxPending(), 'id');
+sort($pendingIds);
+$pendingRuntime->outbox = $keptOutbox;
+$check($pendingIds === ['m-0', 'm-500'], 'a message whose fate is open is on the list of open ones, and a settled one is not', implode(', ', $pendingIds));
+
+// Driven through deliver(), because that is where the classification lives. Built
+// by hand these say nothing: putting the fault back left them green.
+$brokeW = Address::w(Address::newId());
+$fake->threads[$brokeW] = ['id' => 'broke-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => []];
+$fake->breaks = true;
+$brokeId = null;
+
+try {
+    $a->send('Bea', 'to a service that breaks');
+} catch (\Aamio\SendFailed $stopped) {
+    $brokeId = $stopped->messageId;
+}
+
+$fake->breaks = false;
+$brokeEntry = $brokeId === null ? null : ($a->outbox[$brokeId] ?? null);
+$check($brokeEntry !== null && ($brokeEntry['status'] ?? '') !== 'refused', 'a service that broke is not the service saying no', $brokeEntry === null ? 'no entry' : (string) ($brokeEntry['status'] ?? '?'));
+$check($brokeEntry !== null && \Aamio\Runtime::outboxOutcome($brokeEntry) === 'attempted', 'and its outcome says the attempt left and settles nothing', $brokeEntry === null ? 'no entry' : \Aamio\Runtime::outboxOutcome($brokeEntry));
+$check($brokeId !== null && in_array($brokeId, array_column($a->outboxPending(), 'id'), true), 'and it is on the list of what has no settled outcome', implode(', ', array_column($a->outboxPending(), 'id')));
+
+// And the one the service really did turn away, which must not join it there.
+$fake->refuse = true;
+$saidNoId = null;
+
+try {
+    $a->send('Bea', 'to a service that says no');
+} catch (\Aamio\SendFailed $stopped) {
+    $saidNoId = $stopped->messageId;
+}
+
+$fake->refuse = false;
+$saidNo = $saidNoId === null ? null : ($a->outbox[$saidNoId] ?? null);
+$check($saidNo !== null && \Aamio\Runtime::outboxOutcome($saidNo) === 'refused', 'a refusal is still a refusal', $saidNo === null ? 'no entry' : \Aamio\Runtime::outboxOutcome($saidNo));
+$check($saidNoId !== null && !in_array($saidNoId, array_column($a->outboxPending(), 'id'), true), 'and a settled one stays off the list');
+
+// Codex, 20 September 2026. Encrypt and sign `for your eyes` without wrapping it
+// as JSON: the envelope opened, the bytes were exactly those words, and json_decode
+// then failed -- inside the same catch, so the answer was text: null, unreadable,
+// and the cursor moved on. Three cases, because they are three.
+if (!function_exists(chr(115) . chr(111) . chr(100) . chr(105) . chr(117) . chr(109) . chr(95) . chr(98) . chr(105) . chr(110) . chr(50) . chr(104) . chr(101) . chr(120))) {
+    $skip('encrypted plain text survives: needs sodium');
+} else {
+    $eyesKeys = $a->keys;
+    $eyesFrom = \Aamio\Keys::fromSeed(str_repeat(chr(4), 32));
+    $opener = static function (string $plain) use ($a, $eyesKeys, $eyesFrom): array {
+        return $a->open([
+            'body' => $eyesFrom->seal($eyesKeys->public, $plain),
+            'verified' => true,
+            'from' => $eyesFrom->public,
+        ]);
+    };
+
+    [$eyesBody, $eyesMeta] = $opener('for your eyes');
+    $check(($eyesBody['text'] ?? null) === 'for your eyes', 'encrypted plain text comes back as the text', json_encode([$eyesBody, $eyesMeta]));
+    $check(($eyesMeta['format'] ?? '') === 'text' && ($eyesMeta['encrypted'] ?? false) === true, 'and it is marked encrypted text, not unreadable', json_encode($eyesMeta));
+
+    [$jsonBody, $jsonMeta] = $opener((string) json_encode(['text' => 'hello']));
+    $check(($jsonBody['text'] ?? null) === 'hello' && ($jsonMeta['format'] ?? '') === 'json', 'encrypted JSON still comes back as its fields', json_encode([$jsonBody, $jsonMeta]));
+
+    $strangerKeys = \Aamio\Keys::fromSeed(str_repeat(chr(9), 32));
+    [$shutBody, $shutMeta] = $a->open([
+        'body' => $eyesFrom->seal($strangerKeys->public, 'not for us'),
+        'verified' => true,
+        'from' => $eyesFrom->public,
+    ]);
+    $check(array_key_exists('text', $shutBody) && $shutBody['text'] === null && ($shutMeta['format'] ?? '') === 'unreadable', 'an envelope that will not open is still unreadable', json_encode([$shutBody, $shutMeta]));
+}

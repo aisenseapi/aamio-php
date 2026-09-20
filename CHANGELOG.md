@@ -4,6 +4,24 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.0 - 2026-09-20
+
+The minor moves because a returned field changed name. `Receipt::verify` answered
+`local_root_matches` and compared only the content hashes: a receipt with the same
+hashes and different times and senders matched, while the whole local root --
+which covers seq, at, sha256 and from -- was different. It is `local_hashes_match`
+now. `Runtime::receipt` keeps `local_root_matches`, because that one recomputes the
+root and compares it.
+
+- `refused` meant two things, and a 500 fell off `outboxPending`. The last answer
+  now settles nothing on its own, and an earlier attempt left open is not undone by
+  a later refusal.
+- A message the service broke on can be sent again: `outboxRetry` and
+  `outboxPending` ask the same question in one place.
+- Encrypted plain text survives. Decryption failing and the content not being JSON
+  were in one catch; they are two different things.
+- A gate this client will not meet is `never_sent`, not a possible delivery.
+
 ## 0.2.15 - 2026-09-20
 
 A corrective release. 0.2.14 shipped with both of these.
