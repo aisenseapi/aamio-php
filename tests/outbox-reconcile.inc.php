@@ -81,3 +81,29 @@ $check(($dropped['structuredContent']['forgotten'] ?? null) === true, 'forget dr
 $check(($again['structuredContent']['forgotten'] ?? null) === false, 'and says the second call found nothing, rather than claiming it dropped it again');
 $check(!isset($a->outbox[$hangingId]), 'what forget dropped is gone from the outbox');
 $check(!in_array($hangingId, array_column($a->outboxPending(), 'id'), true), 'and gone from pending');
+
+
+// The tool text promises already_sending, and the answer has to carry it.
+//
+// Found in a second review, 20 September 2026. The description was copied from the
+// Python surface so both runtimes say the same thing to a model; outboxForget was
+// not, so a model was told to read a field that was never there. This runtime sends
+// on the calling thread, so the signal is the status: unknown means a post went out.
+$hangingTwo = $b->boardPost('offer', 'Contract check', 'A send with no answer.', ['coldchain'], 900, 'en');
+$fake->silent = true;
+$stuck = null;
+
+try {
+    $a->boardAnswer($hangingTwo['id'], 'no answer for this one');
+} catch (\Throwable $error) {
+    $stuck = $error;
+}
+
+$fake->silent = false;
+$stuckId = $stuck instanceof \Aamio\SendFailed ? $stuck->messageId : '';
+$check(($a->outbox[$stuckId]['status'] ?? null) === 'unknown', 'a send with no answer waits as unknown');
+
+$told = $mcp->dispatch('aamio_outbox_forget', ['id' => $stuckId])['structuredContent'] ?? [];
+$check(array_key_exists('already_sending', $told), 'forget returns the field its own description promises', json_encode($told));
+$check(($told['already_sending'] ?? null) === true, 'and says true for a message that was posted, so nobody composes a replacement');
+$check(str_contains(strtolower($told['note'] ?? ''), 'unknown'), 'with a note that says the outcome stays unknown', (string) ($told['note'] ?? ''));

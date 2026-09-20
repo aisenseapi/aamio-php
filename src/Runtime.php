@@ -1533,13 +1533,29 @@ final class Runtime
         return $out;
     }
 
+    /**
+     * Drops an entry once its fate no longer matters, and says whether it stopped anything.
+     *
+     * A send that is already away cannot be recalled. This runtime sends on the calling
+     * thread, so the status is the signal: unknown means a post went out and no answer
+     * came back. The tool description promised already_sending before this returned it,
+     * which told a model to read a field that was not there.
+     */
     public function outboxForget(string $messageId): array
     {
-        $had = isset($this->outbox[$messageId]);
+        $entry = $this->outbox[$messageId] ?? null;
+        $already = $entry !== null && in_array($entry['status'] ?? '', ['sending', 'unknown'], true);
         unset($this->outbox[$messageId]);
         $this->saveOutbox();
 
-        return ['id' => $messageId, 'forgotten' => $had];
+        return [
+            'id' => $messageId,
+            'forgotten' => $entry !== null,
+            'already_sending' => $already,
+            'note' => $already
+                ? 'a send was already away when this was dropped, so its outcome stays unknown and nothing here can recall it'
+                : 'nothing had left this machine for it, and nothing will now',
+        ];
     }
 
     /** (retryable, fix) for one send outcome. retryable is about the same stored bytes, never a permission to repeat automatically. */
