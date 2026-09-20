@@ -45,6 +45,7 @@ final class FakeService
     public array $presence = [];
     public array $posts = [];
     public array $calls = [];
+    public array $seen = [];
     public bool $silent = false;
     public bool $refuse = false;
     public bool $oldBoard = false;
@@ -64,6 +65,9 @@ final class FakeService
     public function __invoke(string $method, string $url, ?string $body, array $headers): array
     {
         $this->calls[] = [$method, $url];
+        // What went out, headers and all: a client that never sent a header
+        // and a fake that never read one agree with each other and with nothing.
+        $this->seen[] = ['method' => $method, 'url' => $url, 'headers' => $headers];
         if ($this->explode) {
             throw new \Error('the fake fell over');
         }
@@ -163,8 +167,43 @@ final class FakeService
                 $after = 0;
             }
             $messages = array_values(array_filter($thread['messages'], static fn (array $msg): bool => $msg['seq'] > $after));
+            // X-Limit and X-Max-Bytes, as the service answers them since 0.7.2:
+            // whole messages only, because half a signed message does not verify.
+            $extra = [];
+            $asked = (int) ($headers['X-Limit'] ?? 0);
+            $budget = (int) ($headers['X-Max-Bytes'] ?? 0);
 
-            return [200, ['w' => $w, 'exists' => true, 'created_at' => $thread['created_at'] ?? $this->now, 'count' => count($thread['messages']), 'messages' => $messages, 'next' => $messages === [] ? $after : end($messages)['seq'], 'waited' => 0] + ($reset === null ? [] : ['reset' => $reset]), []];
+            if ($asked > 0 || $budget > 0) {
+                $kept = [];
+                $used = 0;
+
+                foreach ($messages as $msg) {
+                    $weight = strlen((string) json_encode($msg, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+                    if ($asked > 0 && count($kept) >= $asked) {
+                        break;
+                    }
+
+                    if ($budget > 0 && $used + $weight > $budget) {
+                        if ($kept === []) {
+                            $extra['too_large'] = ['seq' => $msg['seq'], 'bytes' => $weight, 'fix' => 'Raise X-Max-Bytes above ' . $weight . ' or read this one on its own.'];
+                        }
+
+                        break;
+                    }
+
+                    $kept[] = $msg;
+                    $used += $weight;
+                }
+
+                if (count($kept) < count($messages)) {
+                    $extra['more'] = true;
+                }
+
+                $messages = $kept;
+            }
+
+            return [200, ['w' => $w, 'exists' => true, 'created_at' => $thread['created_at'] ?? $this->now, 'count' => count($thread['messages']), 'messages' => $messages, 'next' => $messages === [] ? $after : end($messages)['seq'], 'waited' => 0] + $extra + ($reset === null ? [] : ['reset' => $reset]), []];
         }
 
         return [404, ['error' => 'Not found', 'fix' => 'no such route in the fake'], []];
@@ -819,6 +858,8 @@ require __DIR__ . '/read-limit.inc.php';
 require __DIR__ . '/board-answer.inc.php';
 require __DIR__ . '/local-storage.inc.php';
 require __DIR__ . '/outbox-reconcile.inc.php';
+require __DIR__ . '/gate-set.inc.php';
+require __DIR__ . '/read-wire.inc.php';
 $a->close();
 $b->close();
 Http::$override = null;

@@ -31,6 +31,14 @@ final class Channel
     public int $leftWaiting = 0;
 
     /**
+     * Whether the service itself held some back, because the read asked for fewer
+     * bytes than the thread holds. A different fact from leftWaiting -- nothing was
+     * fetched and left here -- and a count this side never learns, so it is a flag
+     * and not a made-up number.
+     */
+    public bool $moreAtService = false;
+
+    /**
      * $createdAt is which thread at this address the cursor and the hashes
      * belong to. A restart can take the thread and a write can open a new one
      * at the same address, counting from one again, and created_at is the

@@ -274,11 +274,26 @@ final class Client
      * allow is left out of messages and listed under kept_out, never dropped in
      * silence.
      */
-    public function read(string $w, string $id, int $after = 0, int $wait = 0, ?array $allow = null): array
+    public function read(string $w, string $id, int $after = 0, int $wait = 0, ?array $allow = null, ?int $limit = null, ?int $maxBytes = null): array
     {
         $allow = self::normalizeAllow($allow);
         $path = '/' . $w . ($after > 0 || $wait > 0 ? '/after/' . $after : '') . ($wait > 0 ? '/wait/' . min($wait, 25) : '');
-        [$status, $answer] = Http::call('GET', $this->url($path), null, ['X-Read' => $id], $this->timeout + 25);
+        // How much of the thread to send. A thread may hold two hundred messages
+        // of 65536 bytes, so an answer can be about a megabyte, and until now the
+        // whole of it crossed the network before anything here looked at it. A
+        // service that does not offer read-limits ignores both headers and answers
+        // as it always did, which is why they are safe to send without asking.
+        $headers = ['X-Read' => $id];
+
+        if ($limit !== null) {
+            $headers['X-Limit'] = (string) $limit;
+        }
+
+        if ($maxBytes !== null) {
+            $headers['X-Max-Bytes'] = (string) $maxBytes;
+        }
+
+        [$status, $answer] = Http::call('GET', $this->url($path), null, $headers, $this->timeout + 25);
         $out = ['status' => $status, 'body' => $answer];
         if ($status !== 200 || !is_array($answer) || !is_array($answer['messages'] ?? null)) {
             return $out;

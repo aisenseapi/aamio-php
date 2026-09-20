@@ -111,7 +111,20 @@ final class McpServer
                     return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::map($a, 'data')));
                 case 'aamio_read':
                     $asked = self::number($a, 'limit');
-                    $messages = $r->read(self::number($a, 'wait'), $asked > 0 ? min($asked, 200) : 50);
+                    $budget = isset($a['max_bytes']) ? self::number($a, 'max_bytes') : null;
+
+                    // 512 is the floor because one message can be 65536 bytes and a
+                    // signed message cannot be cut in half and still verify. Under the
+                    // floor there is nothing sensible to do, so the refusal says so.
+                    if ($budget !== null && $budget < 512) {
+                        return self::resultOf([
+                            'error' => 'max_bytes must be a whole number of bytes, 512 or more',
+                            'fix' => 'One message can be 65536 bytes. A budget under that is answered with the message named in too_large rather than cut, since a signed message cannot be half sent.',
+                            'given' => $a['max_bytes'],
+                        ], true);
+                    }
+
+                    $messages = $r->read(self::number($a, 'wait'), $asked > 0 ? min($asked, 200) : 50, $budget);
                     $attention = $r->attentionTaken();
                     $result = ['messages' => $messages, 'count' => count($messages)];
 
@@ -119,7 +132,23 @@ final class McpServer
                 case 'aamio_receipt':
                     return self::resultOf($r->receipt(self::text($a, 'channel') ?: 'inbox', (bool) ($a['anchor'] ?? false)));
                 case 'aamio_open_channel':
-                    return self::resultOf($r->openChannel(self::text($a, 'label', true), self::number($a, 'ttl', 600), self::strings($a, 'allow')));
+                    // A wrong gate is worth a refusal rather than an inbox that is
+                    // already open: there is no changing it afterwards. The runtime
+                    // checks the shape and the service checks the rest, so the rule
+                    // is not written out twice.
+                    try {
+                        return self::resultOf($r->openChannel(self::text($a, 'label', true), self::number($a, 'ttl', 600), self::strings($a, 'allow'), self::map($a, 'gate')));
+                    } catch (\InvalidArgumentException $wrong) {
+                        if (!str_contains($wrong->getMessage(), 'gate')) {
+                            throw $wrong;
+                        }
+
+                        return self::resultOf([
+                            'error' => $wrong->getMessage(),
+                            'fix' => 'Send a gate with require, advise or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}, or leave gate out to take writes from anyone on the allowlist.',
+                            'given' => $a['gate'] ?? null,
+                        ], true);
+                    }
                 case 'aamio_channels':
                     return self::resultOf(['channels' => $r->channelList()]);
                 case 'aamio_close_channel':

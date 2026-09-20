@@ -194,7 +194,19 @@ try {
         case 'channel':
             $action = $args[1] ?? '';
             if ($action === 'open') {
-                out($runtime->openChannel((string) ($args[2] ?? fail('channel open LABEL')), (int) ($opts['ttl'] ?? 600), csv($opts['allow'] ?? null)));
+                // A shell eats quotes, so a gate that will not parse is named by the
+                // option the person typed, not by a decoder they cannot see.
+                $gate = null;
+
+                if (isset($opts['gate'])) {
+                    $gate = json_decode((string) $opts['gate'], true);
+
+                    if (!is_array($gate)) {
+                        fail('--gate is not JSON: ' . json_last_error_msg() . ". Quote it as one argument, as in --gate '{\"require\": {\"pow\": {\"bits\": 20}}}'");
+                    }
+                }
+
+                out($runtime->openChannel((string) ($args[2] ?? fail('channel open LABEL')), (int) ($opts['ttl'] ?? 600), csv($opts['allow'] ?? null), $gate));
             } elseif ($action === 'list') {
                 out($runtime->channelList());
             } elseif ($action === 'close') {

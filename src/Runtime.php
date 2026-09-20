@@ -841,7 +841,7 @@ final class Runtime
 
     // ----------------------------------------------------------- channels --
 
-    public function openChannel(string $label, int $ttl, ?array $allowNames = null): array
+    public function openChannel(string $label, int $ttl, ?array $allowNames = null, mixed $gate = null): array
     {
         if (isset($this->channels[$label]) || str_starts_with($label, 'inbox')) {
             throw new \InvalidArgumentException('channel exists or reserved: ' . $label);
@@ -854,7 +854,11 @@ final class Runtime
             }
             $keys[] = $partner['key'];
         }
-        $opened = $this->client->open($ttl, $keys !== [] ? $keys : null);
+        if ($gate !== null) {
+            $gate = self::checkGate($gate);
+        }
+
+        $opened = $this->client->open($ttl, $keys !== [] ? $keys : null, $gate);
         if ($opened['status'] !== 201) {
             throw new \RuntimeException('could not open channel: ' . $opened['status'] . ' ' . json_encode($opened['body']));
         }
@@ -862,7 +866,56 @@ final class Runtime
         $this->channels[$label] = $channel;
         $this->saveState();
 
-        return ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt, 'allow' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, $keys)];
+        // The gate is in the answer whether or not there is one, because a channel
+        // with no conditions answered exactly like one whose gate went nowhere. It
+        // is not kept here: the inbox holds it and GET /{w}/gate serves it, and a
+        // second copy on this machine could only disagree with the first.
+        return ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt, 'allow' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, $keys), 'gate' => $gate];
+    }
+
+    /**
+     * The shape of a gate, refused before the call rather than after it.
+     *
+     * Only the shape. What the numbers may be is the service's to decide, it decides
+     * that in one place, and its refusal carries the detail. The whole rule written
+     * twice would give an agent two answers that can drift, and the one it could
+     * reach without a network would be the wrong one.
+     *
+     * Worth catching here because a gate is set when the inbox is opened and never
+     * changes. A gate that quietly went nowhere leaves the inbox open for its whole
+     * life without the conditions its owner meant it to have.
+     */
+    public const GATE_SHAPE = 'A gate is an object with "require", "advise" or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}. require refuses a write that does not meet it; advise lets the write in and reports on it.';
+
+    public static function checkGate(mixed $gate): array
+    {
+        if (!is_array($gate)) {
+            throw new \InvalidArgumentException('a gate must be an object, not ' . get_debug_type($gate) . '. ' . self::GATE_SHAPE);
+        }
+
+        if ($gate !== [] && array_is_list($gate)) {
+            throw new \InvalidArgumentException('a gate must be an object, not a list. ' . self::GATE_SHAPE);
+        }
+
+        $unknown = array_values(array_diff(array_keys($gate), ['require', 'advise']));
+
+        if ($unknown !== []) {
+            sort($unknown);
+
+            throw new \InvalidArgumentException('a gate has no field ' . implode(', ', $unknown) . '. ' . self::GATE_SHAPE);
+        }
+
+        if ($gate === []) {
+            throw new \InvalidArgumentException('an empty gate asks for nothing; leave the gate out instead. ' . self::GATE_SHAPE);
+        }
+
+        foreach (['require', 'advise'] as $part) {
+            if (isset($gate[$part]) && (!is_array($gate[$part]) || ($gate[$part] !== [] && array_is_list($gate[$part])))) {
+                throw new \InvalidArgumentException('gate.' . $part . ' must be an object. ' . self::GATE_SHAPE);
+            }
+        }
+
+        return $gate;
     }
 
     public function closeChannel(string $label): array
@@ -1598,7 +1651,10 @@ final class Runtime
         if (($entry['posting'] ?? false) === true) {
             return 'attempted';
         }
-        if ($status === 'working') {
+        // working here, stopped in a Python home: both mean the proof of work never
+        // finished and nothing left. Only stopped fell through to the attempts count
+        // below, and attempts counts the call the work runs inside.
+        if (in_array($status, ['working', 'stopped'], true)) {
             return 'never_sent';
         }
 
@@ -1750,12 +1806,15 @@ final class Runtime
      * to be the caller that cut the list, after the cursor had moved past
      * everything: the messages over the limit were gone for good.
      */
-    public function poll(Channel $channel, int $wait = 0, ?int $limit = null): array
+    public function poll(Channel $channel, int $wait = 0, ?int $limit = null, ?int $maxBytes = null): array
     {
         $channel->leftWaiting = 0;
+        $channel->moreAtService = false;
         // The channel's own allowlist goes with the read: the client checks
         // every message itself and keeps out what the list does not allow.
-        $read = $this->client->read($channel->w, $channel->readKey, $channel->after, $wait, $channel->allow);
+        // The limit goes with it too, so the service sends what was asked for
+        // rather than everything, to be trimmed here after it arrived.
+        $read = $this->client->read($channel->w, $channel->readKey, $channel->after, $wait, $channel->allow, $limit, $maxBytes);
         if ($read['status'] === 410) {
             $this->note($channel, 'expired', 'the thread at this address has expired, so anything written to it before now is gone and nothing more will arrive here');
 
@@ -1798,13 +1857,34 @@ final class Runtime
             $this->note($channel, 'restarted', 'the thread at this address is a new one, opened at ' . $created . ' where this channel knew one opened at ' . $channel->createdAt . ', so it is read again from the start');
             $channel->forgetThread();
 
-            return $this->poll($channel, 0, $limit);
+            return $this->poll($channel, 0, $limit, $maxBytes);
         }
         if ($reset) {
             $this->note($channel, 'restarted', (is_array($reset) && is_string($reset['what'] ?? null)) ? $reset['what'] : 'the service read this thread from the start');
             $channel->observed = [];
         }
         $channel->createdAt = $created;
+
+        // What the budget kept out. The service answers a byte budget honestly:
+        // whole messages only, because a signed message cut in half does not
+        // verify. So a thread holding one message larger than the budget answers
+        // with no messages and too_large naming it -- and that read as an empty
+        // inbox for as long as nothing here looked at the field.
+        $tooLarge = $answer['too_large'] ?? null;
+
+        if (is_array($tooLarge)) {
+            $this->note(
+                $channel,
+                'too_large',
+                'message ' . ($tooLarge['seq'] ?? '?') . ' on this channel is ' . ($tooLarge['bytes'] ?? '?') . ' bytes and does not fit the byte budget this read asked for, so it was not sent. It is still there and every read at this budget will leave it. ' . (is_string($tooLarge['fix'] ?? null) ? $tooLarge['fix'] : 'Read again with a larger max_bytes, or without one.'),
+                isset($tooLarge['seq']) ? [(int) $tooLarge['seq']] : null
+            );
+        }
+
+        // And what it held back that does fit: more messages after the ones sent.
+        if (($answer['more'] ?? null) === true) {
+            $channel->moreAtService = true;
+        }
         // Where this poll stops, when the limit is reached before the end of
         // what the service returned: the seq of the last message handed over.
         // Whatever lies beyond it, handed over or kept out, has not been dealt
@@ -1926,7 +2006,7 @@ final class Runtime
     }
 
     /** New messages on the inbox and every open channel; the first channel waits, the rest are read at once. */
-    public function read(int $wait = 0, int $limit = 50): array
+    public function read(int $wait = 0, int $limit = 50, ?int $maxBytes = null): array
     {
         $this->ensureInbox();
         $this->publishPresence();
@@ -1946,7 +2026,10 @@ final class Runtime
                 continue;
             }
             try {
-                [$state, $entries] = $this->poll($channel, $waited ? 0 : $wait, $room);
+                // The whole budget goes to each channel in turn, as the count does:
+                // a budget divided between channels would refuse a message that fits,
+                // and the caller cannot know beforehand which channel holds the bytes.
+                [$state, $entries] = $this->poll($channel, $waited ? 0 : $wait, $room, $maxBytes);
             } catch (\Throwable $error) {
                 $this->note($channel, 'unread', 'this channel could not be read: ' . (new \ReflectionClass($error))->getShortName() . '. Messages from other channels are still returned.');
                 continue;

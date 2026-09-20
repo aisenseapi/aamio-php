@@ -102,6 +102,11 @@
       "minimum": 1,
       "maximum": 200,
       "description": "at most this many messages in the answer"
+     },
+     "max_bytes": {
+      "type": "integer",
+      "minimum": 512,
+      "description": "at most this many bytes of messages, whole messages only"
      }
     },
     "additionalProperties": false
@@ -139,7 +144,7 @@
   },
   {
    "name": "aamio_open_channel",
-   "description": "Open a private channel with its own lifetime, for a tender, a deadline or a single conversation. With allow, only the named partners can write to it. Returns the write address to share.",
+   "description": "Open a private channel with its own lifetime, for a tender, a deadline or a single conversation. With allow, only the named partners can write to it. With gate, whoever writes must first meet conditions you set: proof of work, a cap per signing key, a time after which writing closes. A gate is set here and never changes, so there is no second chance at it; read it back with GET /{w}/gate. Returns the write address to share.",
    "inputSchema": {
     "type": "object",
     "properties": {
@@ -157,6 +162,77 @@
        "type": "string"
       },
       "description": "partner names"
+     },
+     "gate": {
+      "type": "object",
+      "description": "Conditions for whoever writes. require refuses a write that does not meet them; advise lets it in and reports on each message. per_key and covers above 1 need allow.",
+      "properties": {
+       "require": {
+        "type": "object",
+        "properties": {
+         "pow": {
+          "type": "object",
+          "properties": {
+           "bits": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "description": "Leading zero bits the sha256 of the work must reach."
+           },
+           "covers": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "description": "Messages from one key a single proof pays for. Above 1 needs allow. Default 1."
+           }
+          },
+          "required": [
+           "bits"
+          ],
+          "additionalProperties": false
+         },
+         "per_key": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "description": "At most this many messages from one signing key."
+         },
+         "write_until": {
+          "type": "integer",
+          "description": "Unix seconds when writing closes, after now and no later than the expiry. Reading stays open."
+         }
+        },
+        "additionalProperties": false
+       },
+       "advise": {
+        "type": "object",
+        "properties": {
+         "pow": {
+          "type": "object",
+          "properties": {
+           "bits": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 18,
+            "description": "Leading zero bits the sha256 of the work must reach."
+           },
+           "covers": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "description": "Messages from one key a single proof pays for. Above 1 needs allow. Default 1."
+           }
+          },
+          "required": [
+           "bits"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "additionalProperties": false
+       }
+      },
+      "additionalProperties": false
      }
     },
     "additionalProperties": false,

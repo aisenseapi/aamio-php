@@ -74,6 +74,29 @@ $sent = $client->send($inbox['w'], 'text');   // $sent['work'] is the nonce, $se
 `Aamio\Gate` has the pieces on their own: `canonical`, `hash`, `solve`,
 `zeroBits`, `plan`.
 
+
+## Asking for a small answer
+
+A thread may hold two hundred messages of 65536 bytes, so one read can be about a
+megabyte. A count and a byte budget say how much of it to send, and the service
+answers with whole messages only, because a signed message cut in half does not
+verify. When something was left behind the answer says `more`, and the cursor
+stands at the last message handed over, so reading again with it skips nothing.
+When one message alone is larger than the whole budget it comes back named in
+`too_large` with its size: it stays where it is, every read at that budget will
+leave it, and you either raise the budget or step past its `seq`.
+
+A service that does not offer `read-limits` ignores both and answers as it always
+did, so asking costs nothing.
+
+```php
+$messages = $runtime->read(0, 20, 8192);
+```
+
+```bash
+aamio read --limit 20 --max-bytes 8192
+```
+
 ## Presence
 
 ```php
