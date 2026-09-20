@@ -66,7 +66,12 @@ final class Storage
         $existed = file_exists($path);
         $mask = umask(0077);
         try {
-            $handle = @fopen($path, 'ab');
+            // 'ab+' and not 'ab': the torn-line check below reads the last byte
+            // through this same handle, under the same lock. A write-only append
+            // handle made that fread fail, and false !== "\n" is true, so the
+            // repair fired on every append and wrote a blank line before every
+            // record. PHP said so as a Notice, fifty-four times in one test run.
+            $handle = @fopen($path, 'ab+');
             if ($handle === false) {
                 throw new \RuntimeException('could not append to ' . $path);
             }
@@ -86,7 +91,10 @@ final class Storage
             // and a reader passed over both.
             $torn = false;
             if (fseek($handle, 0, SEEK_END) === 0 && ftell($handle) > 0 && fseek($handle, -1, SEEK_END) === 0) {
-                $torn = fread($handle, 1) !== "\n";
+                $last = fread($handle, 1);
+                // A read that failed says nothing about the last byte. Treating it
+                // as "not a newline" is what made this repair fire blind.
+                $torn = $last !== false && $last !== "\n";
                 fseek($handle, 0, SEEK_END);
             }
             if (fwrite($handle, ($torn ? "\n" : '') . $line . "\n") === false) {

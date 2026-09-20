@@ -207,3 +207,29 @@ Http::$override = $fake;
 $check($thrown instanceof SendFailed && $thrown->outcome === 'refused' && ($runtime->outbox[$thrown->messageId]['status'] ?? null) === 'refused', 'a handover that was refused is a send that was refused, not a bare error', $thrown === null ? 'nothing was thrown' : get_class($thrown) . ': ' . $thrown->getMessage());
 $check(is_array($thrown->opened ?? null) && isset($runtime->channels[$thrown->opened['label']]), 'and the caller is told which channel is open, since it is: ' . json_encode($thrown->opened ?? null));
 $runtime->close();
+
+
+// A repair that never looked.
+//
+// appendPrivate opened the file with fopen($path, 'ab') and then read its last
+// byte from that same handle. An append handle is write-only, so fread gave
+// false, false !== "\n" is true, and the repair fired on every append: a blank
+// line before every record after the first, and a torn line 'repaired' by luck
+// rather than by looking. PHP said so fifty-four times a run, as a Notice
+// nobody read. aamio-python had it right: it opens a second handle to read.
+$plain = sys_get_temp_dir() . '/aamio-append-' . getmypid() . '.jsonl';
+@unlink($plain);
+
+foreach ([1, 2, 3] as $which) {
+    Storage::appendPrivate($plain, '{"n":' . $which . '}');
+}
+
+$written = (string) file_get_contents($plain);
+$check($written === '{"n":1}' . "\n" . '{"n":2}' . "\n" . '{"n":3}' . "\n", 'three appends to a whole file write three lines and nothing between them', str_replace("\n", '[LF]', $written));
+
+// And the repair still does its job where there is something to repair.
+file_put_contents($plain, '{"n":1}' . "\n" . '{"n":2');
+Storage::appendPrivate($plain, '{"n":3}');
+$repaired = (string) file_get_contents($plain);
+$check($repaired === '{"n":1}' . "\n" . '{"n":2' . "\n" . '{"n":3}' . "\n", 'a last line with no end costs that line only, and the next record starts on its own', str_replace("\n", '[LF]', $repaired));
+@unlink($plain);
