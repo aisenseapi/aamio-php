@@ -1544,18 +1544,59 @@ final class Runtime
     public function outboxForget(string $messageId): array
     {
         $entry = $this->outbox[$messageId] ?? null;
-        $already = $entry !== null && in_array($entry['status'] ?? '', ['sending', 'unknown'], true);
+        $outcome = self::outboxOutcome($entry);
         unset($this->outbox[$messageId]);
         $this->saveOutbox();
 
         return [
             'id' => $messageId,
             'forgotten' => $entry !== null,
-            'already_sending' => $already,
-            'note' => $already
-                ? 'a send was already away when this was dropped, so its outcome stays unknown and nothing here can recall it'
-                : 'nothing had left this machine for it, and nothing will now',
+            'already_sending' => !in_array($outcome, ['never_sent', 'not_found'], true),
+            'outcome' => $outcome,
+            'note' => self::OUTBOX_NOTES[$outcome],
         ];
+    }
+
+    public const OUTBOX_NOTES = [
+        'never_sent' => 'nothing had left this machine for it, and nothing will now',
+        'attempted' => 'a send was attempted and its answer does not prove the message is absent, so its outcome stays unknown and nothing here can recall it',
+        'delivered' => 'the service had already stored it when this was dropped; dropping the entry does not unsend it',
+        'refused' => 'the service answered that it refused this one, so it was not stored, but the attempt did leave this machine',
+        'unknown' => 'a send was already away when this was dropped, so its outcome stays unknown and nothing here can recall it',
+        'not_found' => 'this outbox has no message with that id, so nothing was dropped and nothing was sent',
+    ];
+
+    /**
+     * Which of five things happened to a send, for a caller deciding whether to replace it.
+     *
+     * Only a stop before the first POST may be called safely unsent. An attempt answered
+     * 500 does not prove the message is absent, and a delivered one is certainly not
+     * unsent: both were reported as never sent until 20 September.
+     */
+    public static function outboxOutcome(?array $entry): string
+    {
+        if ($entry === null) {
+            return 'not_found';
+        }
+        $status = $entry['status'] ?? '';
+        if (in_array($status, ['delivered', 'unknown'], true)) {
+            return $status;
+        }
+        if ($status === 'refused') {
+            // Only what the service said no to. Anything else it answered may have been
+            // stored before it failed, and SEND_DETERMINISTIC is the list of answers that
+            // mean the same bytes would be refused again.
+            return in_array($entry['last_status'] ?? 0, self::SEND_DETERMINISTIC, true) ? 'refused' : 'attempted';
+        }
+
+        // This runtime sends on the calling thread and has no post flag, but the same
+        // rule holds: a message still working on proof of work has an attempt counted
+        // and has sent nothing.
+        if ($status === 'working') {
+            return 'never_sent';
+        }
+
+        return ($entry['attempts'] ?? 0) > 0 ? 'attempted' : 'never_sent';
     }
 
     /** (retryable, fix) for one send outcome. retryable is about the same stored bytes, never a permission to repeat automatically. */

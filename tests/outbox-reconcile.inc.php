@@ -107,3 +107,38 @@ $told = $mcp->dispatch('aamio_outbox_forget', ['id' => $stuckId])['structuredCon
 $check(array_key_exists('already_sending', $told), 'forget returns the field its own description promises', json_encode($told));
 $check(($told['already_sending'] ?? null) === true, 'and says true for a message that was posted, so nobody composes a replacement');
 $check(str_contains(strtolower($told['note'] ?? ''), 'unknown'), 'with a note that says the outcome stays unknown', (string) ($told['note'] ?? ''));
+
+
+// Five outcomes, and the two that shipped wrong.
+//
+// Until 20 September a send answered 500 was reported as 'nothing had left this
+// machine', and so was one the service had already stored. Both invite a second copy.
+// v0.2.11 went to Packagist with this; only a stop before the first post may be called
+// safely unsent.
+$outcomes = [
+    ['working',   null, 1, 'never_sent'],
+    ['sending',   null, 0, 'never_sent'],
+    ['refused',    500, 1, 'attempted'],
+    ['refused',    503, 1, 'attempted'],
+    ['refused',    403, 1, 'refused'],
+    ['refused',    410, 1, 'refused'],
+    ['delivered',  201, 1, 'delivered'],
+    ['unknown',      0, 1, 'unknown'],
+];
+$outcomeWrong = [];
+
+foreach ($outcomes as [$status, $http, $tries, $want]) {
+    $id = 'm-outcome-' . $status . '-' . (string) $http;
+    $a->outbox[$id] = ['id' => $id, 'w' => str_repeat('w', 20), 'status' => $status,
+        'last_status' => $http, 'attempts' => $tries, 'envelope' => [], 'to_key' => null];
+    $said = $a->outboxForget($id);
+    $expectAlready = !in_array($want, ['never_sent', 'not_found'], true);
+
+    if (($said['outcome'] ?? '') !== $want || ($said['already_sending'] ?? null) !== $expectAlready) {
+        $outcomeWrong[] = sprintf('%s/%s gave %s', $status, (string) $http, $said['outcome'] ?? '?');
+    }
+}
+
+$check($outcomeWrong === [], 'forget tells five outcomes apart, so a server error is not called unsent', implode('; ', $outcomeWrong));
+$missing = $a->outboxForget('m-never-existed');
+$check(($missing['outcome'] ?? '') === 'not_found' && ($missing['forgotten'] ?? null) === false && ($missing['already_sending'] ?? null) === false, 'and an id this outbox never had is its own outcome');
