@@ -1597,11 +1597,10 @@ final class Runtime
             if ($messageId !== null && $id !== $messageId) {
                 continue;
             }
-            // The same question outboxPending asks, asked once. A message whose
-            // outcome is open is exactly the message a second attempt is for; one
-            // the service will refuse again, or has already stored, is not. The two
-            // used to answer differently about the same entry in the same second.
-            if (!self::outboxOpen($entry)) {
+            // Worth sending again, which is not the same as unsettled: a rate window
+            // is settled and is exactly what a second attempt is for. One the service
+            // will refuse again, or has already stored, is not.
+            if (!self::outboxRetryable($entry)) {
                 continue;
             }
             try {
@@ -1663,6 +1662,27 @@ final class Runtime
     public static function outboxOpen(?array $entry): bool
     {
         return in_array(self::outboxOutcome($entry), ['attempted', 'unknown'], true);
+    }
+
+    /**
+     * Whether sending these same bytes again is the right next move. Not the same
+     * question as outboxOpen, and retry was asking that one: a rate window is
+     * settled -- the service turned the request away without reading the body -- and
+     * it is also the one refusal whose advice is do not change the content, wait,
+     * send it again. Retry refused to do the thing its own advice asked for.
+     */
+    public static function outboxRetryable(?array $entry): bool
+    {
+        if ($entry === null) {
+            return false;
+        }
+
+        if (self::outboxOpen($entry)) {
+            return true;
+        }
+
+        return self::outboxOutcome($entry) === 'refused'
+            && in_array($entry['last_status'] ?? 0, self::SEND_TRY_LATER, true);
     }
 
     public static function outboxOutcome(?array $entry): string

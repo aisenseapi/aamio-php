@@ -4,6 +4,13 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.1 - 2026-09-20
+
+- A rate window lets the same bytes through later. 429 answered retryable: true,
+  "do not change the content", and `outboxRetry` refused to send those same bytes.
+  Unsettled and worth sending again are two questions, and retry was asking the
+  first.
+
 ## 0.3.0 - 2026-09-20
 
 The minor moves because a returned field changed name. `Receipt::verify` answered
