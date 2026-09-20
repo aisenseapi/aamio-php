@@ -110,7 +110,8 @@ final class McpServer
                 case 'aamio_send':
                     return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::map($a, 'data')));
                 case 'aamio_read':
-                    $messages = $r->read(self::number($a, 'wait'));
+                    $asked = self::number($a, 'limit');
+                    $messages = $r->read(self::number($a, 'wait'), $asked > 0 ? min($asked, 200) : 50);
                     $attention = $r->attentionTaken();
                     $result = ['messages' => $messages, 'count' => count($messages)];
 
