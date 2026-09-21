@@ -92,6 +92,76 @@ $check(Storage::windowsAclFindings([$me . '|FullControl|Allow'], $me) === [], 'a
 $own = Storage::check($root);
 $check(in_array($own['private'], [true, false, null], true) && is_string($own['how']) && ($own['private'] === false) === ($own['findings'] !== []), 'the check never calls something private that it could not check');
 
+// The Windows check, with a shell that answers from a script.
+//
+// From the deep health check of 21 September 2026 (F7). windowsRules wrote the
+// identity before Get-Acl ran, merged stderr into stdout, took any output with
+// me| in it as a read, skipped every line it could not parse as an unreadable
+// rule, and an empty list of findings became private: true. On a machine where
+// Get-Acl failed to load its module, the doctor said the key folder was
+// private. It had read nothing. Each case below is driven through the same
+// windowsCheck the doctor uses, on any platform, with the shell replaced.
+$ran = null;
+$scripted = static function (int $status, string $out, string $err = '') use (&$ran): void {
+    Storage::$shell = static function (array $command) use ($status, $out, $err, &$ran): array {
+        $ran = $command;
+
+        return [$status, $out, $err];
+    };
+};
+$notPrivate = static fn (array $found): bool => $found['private'] === null && $found['findings'] === [] && str_starts_with((string) $found['how'], 'not checked') && str_contains((string) ($found['fix'] ?? ''), 'icacls');
+$whole = "me|$me\r\nrule|$me|FullControl|Allow\r\nrule|S-1-5-18|FullControl|Allow\r\nrule|S-1-5-32-544|FullControl|Allow\r\nend|3\r\n";
+
+$scripted(0, $whole);
+$found = Storage::windowsCheck($root);
+$check($found['private'] === true && $found['findings'] === [] && !isset($found['fix']), 'a list read to the end with only you, SYSTEM and Administrators on it is private');
+$script = implode(' ', is_array($ran) ? $ran : []);
+$check(is_array($ran) && $ran[0] === 'powershell' && in_array('-NonInteractive', $ran, true) && str_contains($script, 'Get-Acl') && str_contains($script, "\$ErrorActionPreference = 'Stop'"), 'through PowerShell without a profile or a prompt, with every error terminating');
+$check(preg_match('/Set-Acl|icacls|\/grant|\/inheritance|Remove-|Add-/i', $script) !== 1, 'and the script only reads: a diagnostic never changes an access list');
+
+$scripted(0, "me|$me\r\nrule|$me|FullControl|Allow\r\nrule|S-1-5-32-545|ReadAndExecute, Synchronize|Allow\r\nend|2\r\n");
+$found = Storage::windowsCheck($root);
+$check($found['private'] === false && array_column($found['findings'], 'who') === ['Users'] && str_contains((string) $found['fix'], '/inheritance:r'), 'a list with Users on it is not private, and names them');
+
+$scripted(3, "me|$me\r\nerror|Get-Acl : The 'Get-Acl' command was found in the module 'Microsoft.PowerShell.Security', but the module could not be loaded.\r\n");
+$found = Storage::windowsCheck($root);
+$check($notPrivate($found) && str_contains((string) $found['how'], 'could not be loaded'), 'the identity written and then Get-Acl failing is not private, and the error is quoted', (string) $found['how']);
+
+$scripted(3, "error|Get-Acl : Attempted to perform an unauthorized operation.\r\n");
+$found = Storage::windowsCheck($root);
+$check($notPrivate($found) && str_contains((string) $found['how'], 'unauthorized'), 'access denied is not private');
+
+$scripted(1, '', "The term 'powershell' is not recognized\r\n");
+$found = Storage::windowsCheck($root);
+$check($notPrivate($found) && str_contains((string) $found['how'], 'status 1') && str_contains((string) $found['how'], 'not recognized'), 'a shell that ended badly with nothing on stdout is not private, with what stderr said');
+
+$scripted(0, "me|$me\r\n");
+$check($notPrivate(Storage::windowsCheck($root)), 'the identity alone, with no end to the list, is not private: this is exactly what the old script left behind when Get-Acl failed');
+
+$scripted(0, "me|$me\r\nGet-Acl : Could not load file or assembly\r\n+ CategoryInfo : NotSpecified\r\nend|0\r\n");
+$check($notPrivate(Storage::windowsCheck($root)), 'error text among the rules is not skipped as an unreadable rule: it makes the whole read untrusted');
+
+$scripted(0, "me|$me\r\nrule|$me|FullControl|Allow\r\nend|2\r\n");
+$check($notPrivate(Storage::windowsCheck($root)), 'a count that does not add up is not private');
+
+$scripted(0, "me|$me\r\nrule|$me|FullControl|Allow\r\nend|1\r\nrule|S-1-1-0|FullControl|Allow\r\n");
+$check($notPrivate(Storage::windowsCheck($root)), 'nor is a list that goes on after its end');
+
+$scripted(0, "me|\r\nrule|S-1-5-18|FullControl|Allow\r\nend|1\r\n");
+$check($notPrivate(Storage::windowsCheck($root)), 'nor an empty identity');
+
+$scripted(0, "me|$me\r\nend|0\r\n");
+$found = Storage::windowsCheck($root);
+$check($notPrivate($found) && str_contains((string) $found['how'], 'empty'), 'an empty access list is not private either: it is nobody, or with no list at all everybody, and the check says it cannot tell');
+
+$scripted(0, "rule|$me|FullControl|Allow\r\nend|1\r\n");
+$check($notPrivate(Storage::windowsCheck($root)), 'and no identity at all is not private');
+
+$scripted(0, "me|$me\r\nerror|Something went wrong after all\r\n");
+$check($notPrivate(Storage::windowsCheck($root)), 'an error line is refused whatever the exit status says');
+
+Storage::$shell = null;
+
 // The runtime writes privately, prunes what it should, and stops writing when it is closed.
 $privateHome = $root . '/private-home';
 $runtime = new Runtime($privateHome, 'https://fake.test', null, null, $quiet);

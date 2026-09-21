@@ -480,7 +480,17 @@ final class Runtime
         return ['key' => $this->keys->public, 'hash' => $this->keys->hash, 'hash_prefix' => $this->keys->hashPrefix, 'inbox' => $inbox?->w, 'inbox_expires_at' => $inbox?->expireAt, 'host' => $this->host, 'tags' => $this->tags];
     }
 
-    public function partnerAdd(string $name, string $key): void
+    /**
+     * A partner into the address book, and into the inbox at once.
+     *
+     * The address book and the inbox used to drift apart: this wrote
+     * partners.json and nothing else, the inbox kept the list it was opened
+     * with for up to 57 minutes, and the partner just added was refused with
+     * 403 at the address presence pointed to, which the owner never saw. Now
+     * an inbox that does not name the key is replaced by one that does, and
+     * the answer says which address the partner can write to.
+     */
+    public function partnerAdd(string $name, string $key): array
     {
         if (!Codec::isKey($key)) {
             throw new \InvalidArgumentException('not a base64url Ed25519 public key of 32 bytes');
@@ -488,12 +498,48 @@ final class Runtime
         $this->partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $name && $p['key'] !== $key));
         $this->partners[] = ['name' => $name, 'key' => $key];
         $this->saveJson('partners.json', $this->partners);
+
+        return $this->inboxAfterChange('partner ' . $name . ' was added', ['partner' => $name, 'key' => $key]);
     }
 
-    public function partnerRemove(string $name): void
+    /**
+     * A partner out of the address book, and out of the inbox at once.
+     *
+     * Forgetting the name is not a revocation: the service takes the removed
+     * key's writes to the old address until that thread expires. So the old
+     * inbox is muted, read no more, and a new one is opened without the key.
+     * Once the last partner is gone the new inbox takes signed writes from any
+     * key, each shown as an unknown one, rather than unsigned writes from
+     * anyone at an address the partners were given.
+     */
+    public function partnerRemove(string $name): array
     {
+        $known = $this->partnerByName($name);
         $this->partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $name));
         $this->saveJson('partners.json', $this->partners);
+        if ($known === null) {
+            $inbox = $this->channels['inbox'] ?? null;
+
+            return ['partner' => $name, 'known' => false, 'inbox' => $inbox?->w];
+        }
+
+        return $this->inboxAfterChange('partner ' . $name . ' was removed', ['partner' => $name, 'known' => true]);
+    }
+
+    /** Whether the inbox still matches the address book, and a new one if not. */
+    private function inboxAfterChange(string $reason, array $outcome): array
+    {
+        $inbox = $this->channels['inbox'] ?? null;
+        if ($inbox === null) {
+            // Registration before the first read: the inbox opens with this
+            // list when it opens, and there is no address to hand out yet.
+            return $outcome + ['inbox' => null, 'rotated' => false];
+        }
+        if ($this->inboxMatches($inbox, $this->wantedAllow())) {
+            return $outcome + ['inbox' => $inbox->w, 'rotated' => false, 'expire_at' => $inbox->expireAt];
+        }
+
+        return $outcome + $this->rotateInbox($reason);
     }
 
     public function partnerList(): array
@@ -800,6 +846,87 @@ final class Runtime
         $this->channels[$label] = $channel;
     }
 
+    /**
+     * The list the inbox should carry now: the partners' keys, or none while
+     * there are no partners, since a first contact has nobody to name.
+     */
+    private function wantedAllow(): ?array
+    {
+        return $this->partners !== [] ? array_map(static fn (array $p): string => $p['key'], $this->partners) : null;
+    }
+
+    private function inboxMatches(Channel $inbox, ?array $wanted): bool
+    {
+        $have = array_values($inbox->allow);
+        // No partners: an inbox open to anyone matches, and so does one that
+        // takes any signed key, which is what the last removal leaves behind.
+        if ($wanted === null) {
+            return $have === [] || $have === ['*'];
+        }
+        $wanted = array_values($wanted);
+        sort($have);
+        sort($wanted);
+
+        return $have === $wanted;
+    }
+
+    /**
+     * A new inbox with the list as it is now; the old one is dealt with by
+     * what changed.
+     *
+     * Keys only added, or an old inbox open to anyone: the old one is still
+     * read until it expires, since whoever was told the address may still
+     * write there, and an open one is said to be open until then. A key
+     * removed: the old one is muted, kept for its records and its receipt but
+     * read no more, so nothing from the removed key arrives through the
+     * address it was given. That is this runtime's delivery stopping, not a
+     * revocation: the service takes the write until the thread expires.
+     *
+     * A rotation that fails leaves the old inbox in use, and says so.
+     */
+    private function rotateInbox(string $reason): array
+    {
+        $old = $this->channels['inbox'] ?? null;
+        $wanted = $this->wantedAllow();
+        if ($wanted === null && $old !== null && $old->allow !== []) {
+            // The last partner is gone. An inbox open to anyone would take
+            // unsigned writes at an address the partners had: signed only, and
+            // every message shown as an unknown key.
+            $wanted = ['*'];
+        }
+        $opened = $this->client->open(self::INBOX_TTL, $wanted);
+        if ($opened['status'] !== 201) {
+            $what = 'the inbox could not be opened again after ' . $reason . ': ' . $opened['status'] . ' ' . json_encode($opened['body']) . '. The old inbox stays in use with its old list.';
+            $this->noteTrouble('inbox', 'rotation_failed', $what, $old?->w);
+
+            return ['rotated' => false, 'inbox' => $old?->w, 'allow' => $this->allowNames($old?->allow ?? []), 'error' => $what];
+        }
+        $fresh = new Channel('inbox', $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], $wanted ?? []);
+        $outcome = ['rotated' => true, 'inbox' => $fresh->w, 'allow' => $this->allowNames($fresh->allow), 'expire_at' => $fresh->expireAt];
+        if ($old !== null) {
+            $removed = array_values(array_filter($old->allow, static fn (string $k): bool => $k !== '*' && !in_array($k, $fresh->allow, true)));
+            if ($removed !== []) {
+                $old->muted = true;
+                $this->note($old, 'muted', sprintf('inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered', $old->w, $reason, count($removed), $old->expireAt));
+            } elseif ($old->allow === []) {
+                $this->note($old, 'open', sprintf('inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)', $old->w, $old->expireAt, $reason, $fresh->w, count($fresh->allow)));
+            }
+            $outcome['old_inbox'] = ['w' => $old->w, 'muted' => $old->muted, 'until' => $old->expireAt];
+            $this->retireChannel($old);
+        }
+        $this->channels['inbox'] = $fresh;
+        $this->saveState();
+        ($this->log)(sprintf('inbox %s until %d, %s%s', $fresh->w, $fresh->expireAt, $reason, $fresh->allow !== [] ? ' (allowlist ' . count($fresh->allow) . ' keys)' : ''));
+        $outcome['presence'] = $this->publishPresence(true);
+
+        return $outcome;
+    }
+
+    private function allowNames(array $allow): array
+    {
+        return array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, array_values($allow));
+    }
+
     public function ensureInbox(): Channel
     {
         $inbox = $this->channels['inbox'] ?? null;
@@ -807,25 +934,24 @@ final class Runtime
         // opens a thread there with none of this inbox's allowlist, so the
         // partners are pointed at a new one that has it. The old address is
         // still read until its time runs out, for whoever writes there anyway.
-        if ($inbox !== null && $inbox->expireAt - time() > self::RENEW_BEFORE && !$inbox->gone) {
+        // So is an inbox whose list no longer matches the address book: a
+        // partner added or removed while this process was not running, or by
+        // an older version that changed partners.json and nothing else.
+        $usable = $inbox !== null && $inbox->expireAt - time() > self::RENEW_BEFORE && !$inbox->gone;
+        if ($usable && $this->inboxMatches($inbox, $this->wantedAllow())) {
             return $inbox;
         }
-        $allow = $this->partners !== [] ? array_map(static fn (array $p): string => $p['key'], $this->partners) : null;
-        $opened = $this->client->open(self::INBOX_TTL, $allow);
-        if ($opened['status'] !== 201) {
-            throw new \RuntimeException('could not open inbox: ' . $opened['status'] . ' ' . json_encode($opened['body']));
+        $reason = $usable ? 'the address book changed' : ($inbox !== null && $inbox->gone ? 'the inbox was gone' : 'renewal');
+        $outcome = $this->rotateInbox($reason);
+        if ($outcome['rotated']) {
+            return $this->channels['inbox'];
         }
-        $fresh = new Channel('inbox', $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], $allow ?? []);
-        if ($inbox !== null) {
-            // Keep reading the old one until it dies; partners may still write there.
-            $this->retireChannel($inbox);
+        if ($inbox === null || $inbox->gone || $inbox->expireAt <= time()) {
+            throw new \RuntimeException('could not open inbox: ' . $outcome['error']);
         }
-        $this->channels['inbox'] = $fresh;
-        $this->saveState();
-        ($this->log)(sprintf('inbox %s until %d%s', $fresh->w, $fresh->expireAt, $allow ? ' (allowlist ' . count($allow) . ' keys)' : ''));
-        $this->publishPresence(true);
 
-        return $fresh;
+        // The old one still holds; it is read on, and attention says why.
+        return $inbox;
     }
 
     public function publishPresence(bool $force = false): ?bool
@@ -945,7 +1071,7 @@ final class Runtime
 
         // expired, since a channel past its time was listed like any other
         // until a read took it away.
-        return array_values(array_map(fn (Channel $c): array => ['label' => $c->label, 'w' => $c->w, 'expire_at' => $c->expireAt, 'seconds_left' => $c->secondsLeft($now), 'expired' => $c->expireAt <= $now, 'allow' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, $c->allow), 'received' => count($c->received), 'after' => $c->after], $this->channels));
+        return array_values(array_map(fn (Channel $c): array => ['label' => $c->label, 'w' => $c->w, 'expire_at' => $c->expireAt, 'seconds_left' => $c->secondsLeft($now), 'expired' => $c->expireAt <= $now, 'allow' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, $c->allow), 'received' => count($c->received), 'after' => $c->after, 'muted' => $c->muted], $this->channels));
     }
 
     // -------------------------------------------------------------- board --
@@ -2106,6 +2232,9 @@ final class Runtime
         $heldBack = [];
         $notAsked = [];
         foreach (array_values($this->channels) as $channel) {
+            if ($channel->muted) {
+                continue;
+            }
             // A channel is only asked for what this call still has room for.
             // poll() moves the cursor and saves it before the caller sees a
             // message, so whatever was fetched beyond the limit and cut off

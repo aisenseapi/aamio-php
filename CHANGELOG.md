@@ -4,6 +4,42 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.2 - 2026-09-21
+
+- The inbox follows the address book. `partner add` used to write
+  partners.json and nothing else: the inbox kept the list it was opened with
+  for up to 57 minutes, and the partner just added was refused with 403 at the
+  address presence pointed to, which the owner never saw. Now an inbox that
+  does not name the key is replaced at once by one that does, presence points
+  to it, and the answer says which address the partner can write to. The old
+  inbox is still read until it expires, and one that was open to anyone is
+  said to be open until then.
+- `partner remove` stops delivery from the removed key. Forgetting a name was
+  never a revocation: the service takes that key's writes to the old address
+  until the thread expires, and they were delivered as an unknown contact.
+  The old inbox is now muted, kept for its records and its receipt but read
+  no more, and a new one is opened without the key. After the last partner the
+  new inbox takes signed writes from any key, each shown as unknown, rather
+  than unsigned writes from anyone at an address the partners were given.
+- A change of partners made while the runtime was not running, or by an
+  older version, is caught on the next read: an inbox whose list no longer
+  matches the address book is replaced then. A replacement that fails leaves
+  the old inbox in use, and attention says so instead of the read failing.
+  Found in the field by two runtimes talking, 21 September. The test fake now
+  refuses a signed write from a key the thread does not name, as the service
+  does; it used to take any signed write, which is why no test saw this.
+- `aamio doctor` on Windows no longer calls the key folder private when it read
+  nothing. The access list is read by a script whose every error is terminating,
+  that names the caller only once Get-Acl has answered and closes the list with a
+  count, through a process whose exit status and error output are read apart.
+  Output that is not exactly that, an identity followed by an error, access
+  denied, a list without its end, a count that does not add up, a line that is
+  not a rule, or an empty list, gives `private: null` with the reason in `how`
+  and the `icacls` line to look for yourself. Found by the deep health check of
+  21 September 2026, on a machine where Get-Acl failed to load its module and the
+  doctor said `private: true` with no findings. The check still changes nothing:
+  it reads.
+
 ## 0.3.1 - 2026-09-20
 
 - A rate window lets the same bytes through later. 429 answered retryable: true,

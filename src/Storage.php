@@ -190,27 +190,173 @@ final class Storage
         return $findings;
     }
 
+    /**
+     * How the Windows check runs PowerShell, so a test can answer in its
+     * place. Takes the command as a list of arguments and returns exit
+     * status, standard output and standard error. Null runs the real thing.
+     *
+     * @var null|\Closure(string[]): array{0: int, 1: string, 2: string}
+     */
+    public static ?\Closure $shell = null;
+
+    /**
+     * The PowerShell that reads the access list. It reads and nothing else:
+     * Get-Acl and the caller's identity, never Set-Acl or icacls. A diagnostic
+     * that changes what it measures has stopped being one.
+     *
+     * Every error is terminating and ends the script with an error| line and
+     * exit 3; the identity is written only once Get-Acl has answered; and
+     * end| with the count closes the list. Each of those is a trace the
+     * parser refuses. The script this replaces wrote me| first and let errors
+     * fall through, so a Get-Acl that failed to load its module left an
+     * output with me| in it and no rules, which read as a private folder.
+     */
+    private static function windowsScript(string $path): string
+    {
+        $quoted = str_replace("'", "''", $path);
+
+        return '$ErrorActionPreference = \'Stop\'; try { '
+            . '$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; '
+            . '$rules = @((Get-Acl -LiteralPath \'' . $quoted . '\').Access); '
+            . '\'me|\' + $me; '
+            . 'foreach ($rule in $rules) { '
+            . '$sid = try { $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $rule.IdentityReference.Value }; '
+            . '\'rule|{0}|{1}|{2}\' -f $sid, $rule.FileSystemRights, $rule.AccessControlType '
+            . '}; \'end|\' + $rules.Count '
+            . '} catch { \'error|\' + $_.ToString(); exit 3 }';
+    }
+
+    /**
+     * Runs the command with its output and its errors apart, and says how it
+     * ended. shell_exec with 2>&1 gave one string and no exit status, so an
+     * error message was a line like any other and a failure looked like a
+     * short answer.
+     *
+     * @param string[] $command
+     * @return array{0: int, 1: string, 2: string}
+     */
+    private static function run(array $command): array
+    {
+        if (self::$shell !== null) {
+            return (self::$shell)($command);
+        }
+        $pipes = [];
+        $process = @proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        if (!is_resource($process)) {
+            return [-1, '', 'powershell could not be started'];
+        }
+        fclose($pipes[0]);
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        return [proc_close($process), $out, $err];
+    }
+
+    private static function firstLine(string $text): string
+    {
+        $line = trim((string) strtok(trim($text), "\r\n"));
+
+        return strlen($line) > 200 ? substr($line, 0, 200) . '...' : $line;
+    }
+
+    /**
+     * The identity and the rules from what the script wrote, or the reason
+     * none of it can be trusted: an error line, an exit status that is not
+     * zero, no identity, a list that end| never closed, a count that does
+     * not add up, or a line that is none of these. Nothing is skipped: a line
+     * this cannot read is a read this cannot vouch for.
+     *
+     * An empty list is refused too. It is either nobody, or, when the folder
+     * has no list at all, everybody, and this check cannot tell which.
+     *
+     * @return array{0: string, 1: string[]} the current user's SID, and one sid|rights|type line per access rule
+     */
+    public static function windowsParse(int $status, string $out, string $err = ''): array
+    {
+        $lines = array_values(array_filter(array_map('trim', preg_split('/\r?\n/', $out) ?: []), static fn (string $line): bool => $line !== ''));
+        foreach ($lines as $line) {
+            if (str_starts_with($line, 'error|')) {
+                throw new \RuntimeException('Get-Acl failed: ' . self::firstLine(substr($line, 6)));
+            }
+        }
+        if ($status !== 0) {
+            $said = self::firstLine($err);
+
+            throw new \RuntimeException('powershell ended with status ' . $status . ($said !== '' ? ': ' . $said : ''));
+        }
+        $me = null;
+        $count = null;
+        $rules = [];
+        foreach ($lines as $index => $line) {
+            if (str_starts_with($line, 'me|')) {
+                if ($me !== null) {
+                    throw new \RuntimeException('the identity was written twice');
+                }
+                $me = trim(substr($line, 3));
+                continue;
+            }
+            if (str_starts_with($line, 'end|')) {
+                if ($index !== count($lines) - 1 || preg_match('/^end\|(\d+)$/D', $line, $found) !== 1) {
+                    throw new \RuntimeException('the access list was not read to the end');
+                }
+                $count = (int) $found[1];
+                continue;
+            }
+            $parts = array_map('trim', explode('|', $line));
+            if (count($parts) !== 4 || $parts[0] !== 'rule' || $parts[1] === '' || $parts[3] === '') {
+                throw new \RuntimeException('a line that is not an access rule: ' . self::firstLine($line));
+            }
+            $rules[] = $parts[1] . '|' . $parts[2] . '|' . $parts[3];
+        }
+        if ($me === null || $me === '') {
+            throw new \RuntimeException('no identity was read');
+        }
+        if ($count === null) {
+            throw new \RuntimeException('the access list was not read to the end');
+        }
+        if ($count !== count($rules)) {
+            throw new \RuntimeException('the access list says ' . $count . ' rules and ' . count($rules) . ' were read');
+        }
+        if ($rules === []) {
+            throw new \RuntimeException('the access list came back empty, which is nobody or, with no list at all, everybody, and this check cannot tell which');
+        }
+
+        return [$me, $rules];
+    }
+
     /** @return array{0: string, 1: string[]} the current user's SID, and one line per access rule */
     private static function windowsRules(string $path): array
     {
-        $quoted = str_replace("'", "''", $path);
-        $script = '$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; ' . "'me|' + " . '$me; '
-            . "(Get-Acl -LiteralPath '" . $quoted . "').Access | ForEach-Object { "
-            . '$sid = try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $_.IdentityReference.Value }; '
-            . "'{0}|{1}|{2}' -f " . '$sid, $_.FileSystemRights, $_.AccessControlType }';
-        $out = @shell_exec('powershell -NoProfile -NonInteractive -Command ' . escapeshellarg($script) . ' 2>&1');
-        if (!is_string($out) || !str_contains($out, 'me|')) {
-            throw new \RuntimeException('the access control list could not be read');
+        [$status, $out, $err] = self::run(['powershell', '-NoProfile', '-NonInteractive', '-Command', self::windowsScript($path)]);
+
+        return self::windowsParse($status, $out, $err);
+    }
+
+    /**
+     * The Windows half of check, on its own so a test can drive it through
+     * a scripted shell on any platform. private is null, with the reason in
+     * how, whenever the list could not be read; it is never true by default.
+     */
+    public static function windowsCheck(string $home): array
+    {
+        $result = ['home' => $home, 'private' => null, 'how' => "the folder's access control list, read with Get-Acl. Mode bits say nothing on Windows.", 'findings' => []];
+        try {
+            [$me, $rules] = self::windowsRules($home);
+        } catch (\Throwable $error) {
+            $result['how'] = 'not checked: the access control list could not be read (' . $error->getMessage() . ')';
+            $result['fix'] = 'Run `icacls "' . $home . '"` and see that only you, SYSTEM and Administrators are listed.';
+
+            return $result;
         }
-        $lines = array_values(array_filter(array_map('trim', explode("\n", $out)), static fn (string $line): bool => $line !== ''));
-        $me = '';
-        foreach ($lines as $line) {
-            if (str_starts_with($line, 'me|')) {
-                $me = trim(substr($line, 3));
-            }
+        $result['findings'] = self::windowsAclFindings($rules, $me);
+        $result['private'] = $result['findings'] === [];
+        if ($result['findings'] !== []) {
+            $result['fix'] = 'Remove the inherited access and keep your own: icacls "' . $home . '" /inheritance:r /grant:r "%USERNAME%":(OI)(CI)F';
         }
 
-        return [$me, array_values(array_filter($lines, static fn (string $line): bool => !str_starts_with($line, 'me|')))];
+        return $result;
     }
 
     /**
@@ -228,22 +374,7 @@ final class Storage
             return $result;
         }
         if (self::isWindows()) {
-            $result['how'] = "the folder's access control list, read with Get-Acl. Mode bits say nothing on Windows.";
-            try {
-                [$me, $rules] = self::windowsRules($home);
-            } catch (\Throwable) {
-                $result['how'] = 'not checked: the access control list could not be read';
-                $result['fix'] = 'Run `icacls "' . $home . '"` and see that only you, SYSTEM and Administrators are listed.';
-
-                return $result;
-            }
-            $result['findings'] = self::windowsAclFindings($rules, $me);
-            $result['private'] = $result['findings'] === [];
-            if ($result['findings'] !== []) {
-                $result['fix'] = 'Remove the inherited access and keep your own: icacls "' . $home . '" /inheritance:r /grant:r "%USERNAME%":(OI)(CI)F';
-            }
-
-            return $result;
+            return self::windowsCheck($home);
         }
         $result['how'] = 'owner and mode bits of the folder and every file in it';
         $me = function_exists('posix_geteuid') ? posix_geteuid() : null;

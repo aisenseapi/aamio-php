@@ -259,7 +259,7 @@ had arrived while answers lay there.
 
 ```
 aamio --home ~/.aamio --tags coldchain.qa init
-aamio partner add Bea <key>
+aamio partner add Bea <key>      # the inbox follows: a new one that names Bea, presence pointed at it
 aamio lookup Bea
 aamio send Bea "hei" --data '{"n": 1}'
 aamio read --wait 25

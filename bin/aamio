@@ -164,14 +164,17 @@ try {
             break;
         case 'partner':
             $action = $args[1] ?? '';
+            // What the change did to the inbox is in the answer: the address a
+            // partner can write to now, or that the old one stays because the
+            // new one could not be opened.
             if ($action === 'add') {
-                $runtime->partnerAdd((string) ($args[2] ?? fail('partner add NAME KEY')), (string) ($args[3] ?? fail('partner add NAME KEY')));
-                out($runtime->partnerList());
+                $changed = $runtime->partnerAdd((string) ($args[2] ?? fail('partner add NAME KEY')), (string) ($args[3] ?? fail('partner add NAME KEY')));
+                out($changed + ['partners' => $runtime->partnerList()]);
             } elseif ($action === 'list') {
                 out($runtime->partnerList());
             } elseif ($action === 'remove') {
-                $runtime->partnerRemove((string) ($args[2] ?? fail('partner remove NAME')));
-                out($runtime->partnerList());
+                $changed = $runtime->partnerRemove((string) ($args[2] ?? fail('partner remove NAME')));
+                out($changed + ['partners' => $runtime->partnerList()]);
             } else {
                 fail('partner add|list|remove');
             }

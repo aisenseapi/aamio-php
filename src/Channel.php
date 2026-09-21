@@ -22,6 +22,13 @@ final class Channel
     public bool $closed = false;
     /** Told already that the thread at this address is gone, so it is said once. */
     public bool $gone = false;
+    /**
+     * Read no more, kept for its records and its receipt until it expires. An
+     * inbox is muted when a partner is removed: the removed key can still
+     * write to the address it was given until the thread expires, and
+     * nothing from there is delivered.
+     */
+    public bool $muted = false;
 
     /**
      * How many messages the last poll had fetched and left for the next one,
@@ -80,7 +87,7 @@ final class Channel
         $seen = array_values(array_filter(array_keys($this->seen), static fn ($hash): bool => is_string($hash) && preg_match('/^[0-9a-f]{64}$/D', $hash) === 1));
         sort($seen);
 
-        return ['label' => $this->label, 'read_key' => $this->readKey, 'w' => $this->w, 'expire_at' => $this->expireAt, 'allow' => array_values($this->allow), 'after' => $this->after, 'created_at' => $this->createdAt, 'gone' => $this->gone, 'seen' => $seen];
+        return ['label' => $this->label, 'read_key' => $this->readKey, 'w' => $this->w, 'expire_at' => $this->expireAt, 'allow' => array_values($this->allow), 'after' => $this->after, 'created_at' => $this->createdAt, 'gone' => $this->gone, 'muted' => $this->muted, 'seen' => $seen];
     }
 
     public static function fromState(array $item): self
@@ -90,6 +97,7 @@ final class Channel
             if (is_string($hash) && preg_match('/^[0-9a-f]{64}$/D', $hash) === 1) { $channel->seen[$hash] = true; }
         }
         $channel->gone = ($item['gone'] ?? null) === true;
+        $channel->muted = ($item['muted'] ?? null) === true;
 
         return $channel;
     }

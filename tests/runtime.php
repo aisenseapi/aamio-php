@@ -110,7 +110,7 @@ final class FakeService
             $w = $m[1];
             $sub = $m[2] ?? '';
             if ($method === 'PUT') {
-                $this->threads[$w] = ['id' => $headers['X-Read'], 'created_at' => $this->now, 'expire_at' => $this->now + (int) ($headers['X-TTL'] ?? 600), 'allow' => isset($headers['X-Allow']) ? explode(',', $headers['X-Allow']) : [], 'messages' => [], 'gate' => $json['gate'] ?? []];
+                $this->threads[$w] = ['id' => $headers['X-Read'], 'created_at' => $this->now, 'expire_at' => $this->now + (int) ($headers['X-TTL'] ?? 600), 'allow' => isset($headers['X-Allow']) && $headers['X-Allow'] !== '' ? explode(',', $headers['X-Allow']) : [], 'messages' => [], 'gate' => $json['gate'] ?? []];
 
                 return [201, ['w' => $w, 'created_at' => $this->now, 'expire_at' => $this->threads[$w]['expire_at'], 'ttl' => (int) ($headers['X-TTL'] ?? 600), 'count' => 0, 'bytes' => 0, 'allow' => $this->threads[$w]['allow']], []];
             }
@@ -134,6 +134,12 @@ final class FakeService
                 }
                 if ($thread['allow'] !== [] && !isset($headers['X-Key'])) {
                     return [403, ['error' => 'signed only', 'fix' => 'sign it'], []];
+                }
+                // Membership, as the service checks it. The fake used to take any
+                // signed write to a thread with a list, so a test could not see a
+                // partner refused at an inbox that did not name the key.
+                if ($thread['allow'] !== [] && $thread['allow'] !== ['*'] && !in_array($headers['X-Key'], $thread['allow'], true)) {
+                    return [403, ['error' => 'not among the allowed keys', 'fix' => 'ask for the address the owner names you on'], []];
                 }
                 $seq = count($thread['messages']) + 1;
                 $message = ['seq' => $seq, 'at' => $this->now + $seq, 'type' => is_array($json) ? 'json' : 'text', 'body' => (string) $body, 'sha256' => hash('sha256', (string) $body), 'from' => $headers['X-Key'] ?? null, 'sig' => $headers['X-Sig'] ?? null, 'verified' => isset($headers['X-Key']), 'sealed' => Keys::isEnvelope((string) $body)];
@@ -296,9 +302,13 @@ $who = $a->whoami();
 $check($who['inbox'] === $inbox->w && $who['hash_prefix'] === $a->keys->hashPrefix, 'whoami names the inbox');
 
 echo "partners and lookup\n";
-$a->partnerAdd('Bea', $b->keys->public);
+$added = $a->partnerAdd('Bea', $b->keys->public);
 $b->partnerAdd('Al', $a->keys->public);
 $check($a->partnerList()[0]['name'] === 'Bea' && $a->nameForKey($b->keys->public) === 'Bea', 'a partner is known by name and key');
+// The inbox follows the address book: the one open to anyone is replaced by
+// one that names Bea, and stays read until it expires, which attention says.
+$check($added['rotated'] === true && $a->channels['inbox']->w !== $inbox->w && $fake->threads[$a->channels['inbox']->w]['allow'] === [$b->keys->public] && array_column($a->attentionTaken(), 'state') === ['open'], 'the first partner replaces the open inbox with one that names her, and attention says the old one is open until it expires', json_encode($added));
+$inbox = $a->channels['inbox'];
 $b->ensureInbox();
 $found = $a->lookup(['Bea']);
 $check(count($found['online']) === 1 && $found['online'][0]['w'] === $b->channels['inbox']->w && $found['offline'] === [], 'lookup finds the partner online at her inbox');
@@ -630,15 +640,25 @@ try {
 $check($threw, 'a scope held to post only does not read');
 $a->scopeNew('second');
 $secondKey = $a->scopeKey('second')['key'];
-$b->partnerRemove('Al');
+$b->channels['inbox']->after = 0;
+$again = array_values(array_filter($b->read(), static fn (array $m): bool => isset($m['body']['data']['aamio_scope'])));
+$check(count($again) === 1 && $again[0]['replay'] === true && $again[0]['body']['data']['aamio_scope']['kept'] === false && !str_contains((string) json_encode($again), $teamKey), 'a share read again is a replay and not kept again');
+$removedAl = $b->partnerRemove('Al');
+$check($removedAl['rotated'] === true && $removedAl['old_inbox']['muted'] === true && $fake->threads[$b->channels['inbox']->w]['allow'] === ['*'], 'removing the only partner mutes the inbox he was given and opens a signed-only one', json_encode($removedAl));
 $a->scopeShare('second', 'Bea', 'read');
 $fromStranger = $b->read();
 $b->partnerAdd('Al', $a->keys->public);
 $check(($fromStranger[0]['body']['data']['aamio_scope']['kept'] ?? null) === false && !str_contains((string) json_encode($fromStranger), $secondKey) && array_column($b->scopeList(), 'name') === ['Al.chapter-review', 'drop'], 'from a key not in the address book a scope is not kept, and the key is taken out all the same');
 $b->scopeRemove('Al.chapter-review');
-$b->channels['inbox']->after = 0;
+foreach ($b->channels as $channel) {
+    if (!$channel->muted) {
+        $channel->after = 0;
+    }
+}
 $replayed = array_values(array_filter($b->read(), static fn (array $m): bool => isset($m['body']['data']['aamio_scope'])));
-$check(count($replayed) === 2 && array_filter($replayed, static fn (array $m): bool => $m['replay'] !== true || $m['body']['data']['aamio_scope']['kept'] !== false) === [] && !in_array('Al.chapter-review', array_column($b->scopeList(), 'name'), true) && !str_contains((string) json_encode($replayed), $teamKey), 'a share read again is a replay and not kept again, so a removed scope stays removed');
+// One share comes again: the stranger's, from the signed-only inbox. The
+// first share sits in the inbox Al was given, which is muted and read no more.
+$check(count($replayed) === 1 && $replayed[0]['replay'] === true && $replayed[0]['body']['data']['aamio_scope']['kept'] === false && !in_array('Al.chapter-review', array_column($b->scopeList(), 'name'), true) && !str_contains((string) json_encode($replayed), $teamKey) && !str_contains((string) json_encode($replayed), $secondKey), 'a share read again is a replay and not kept again, so a removed scope stays removed, and a muted inbox is read no more');
 $take = static function (Runtime $runtime, array $entry): array {
     (function () use (&$entry): void {
         $this->takeScopeShare($entry);
@@ -862,6 +882,7 @@ $check(array_column($both, 'seq') === [1, 2] && array_column($both, 'replay') ==
 require __DIR__ . '/resilience.inc.php';
 require __DIR__ . '/read-limit.inc.php';
 require __DIR__ . '/board-answer.inc.php';
+require __DIR__ . '/partners-inbox.inc.php';
 require __DIR__ . '/local-storage.inc.php';
 require __DIR__ . '/outbox-reconcile.inc.php';
 require __DIR__ . '/gate-set.inc.php';
