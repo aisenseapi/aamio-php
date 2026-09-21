@@ -93,6 +93,17 @@ final class Runtime
      */
     public array $attention = [];
     private float $presenceAt = 0.0;
+    /**
+     * The last attempt and the last success are two different times: a failed
+     * publish used to count as a fresh one, and the new address went
+     * unpublished for a minute while the old one was still announced.
+     */
+    private float $presenceOkAt = 0.0;
+    private bool $presenceFailed = false;
+    private float $presenceRetryAt = 0.0;
+    private float $presenceBackoff = 0.0;
+    /** Whether the older inbox generations have been judged against the address book in this process. */
+    private bool $generationsJudged = false;
     /** @var array<string, array> */
     private array $gates = [];
     /** @var array<string, true> */
@@ -904,17 +915,23 @@ final class Runtime
         $fresh = new Channel('inbox', $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], $wanted ?? []);
         $outcome = ['rotated' => true, 'inbox' => $fresh->w, 'allow' => $this->allowNames($fresh->allow), 'expire_at' => $fresh->expireAt];
         if ($old !== null) {
-            $removed = array_values(array_filter($old->allow, static fn (string $k): bool => $k !== '*' && !in_array($k, $fresh->allow, true)));
-            if ($removed !== []) {
-                $old->muted = true;
-                $this->note($old, 'muted', sprintf('inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered', $old->w, $reason, count($removed), $old->expireAt));
-            } elseif ($old->allow === []) {
-                $this->note($old, 'open', sprintf('inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)', $old->w, $old->expireAt, $reason, $fresh->w, count($fresh->allow)));
-            }
-            $outcome['old_inbox'] = ['w' => $old->w, 'muted' => $old->muted, 'until' => $old->expireAt];
             $this->retireChannel($old);
         }
         $this->channels['inbox'] = $fresh;
+        // Every generation is judged, not only the one just retired: an inbox
+        // from two rotations ago that still named the removed key was read on
+        // until it expired, and delivered that key's messages as an unknown
+        // contact.
+        $muted = $this->muteGenerations($reason);
+        if ($old !== null) {
+            if (!$old->muted && $old->allow === []) {
+                $this->note($old, 'open', sprintf('inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)', $old->w, $old->expireAt, $reason, $fresh->w, count($fresh->allow)));
+            }
+            $outcome['old_inbox'] = ['w' => $old->w, 'muted' => $old->muted, 'until' => $old->expireAt];
+        }
+        if ($muted !== []) {
+            $outcome['muted'] = $muted;
+        }
         $this->saveState();
         ($this->log)(sprintf('inbox %s until %d, %s%s', $fresh->w, $fresh->expireAt, $reason, $fresh->allow !== [] ? ' (allowlist ' . count($fresh->allow) . ' keys)' : ''));
         $outcome['presence'] = $this->publishPresence(true);
@@ -927,8 +944,44 @@ final class Runtime
         return array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, array_values($allow));
     }
 
+    /**
+     * Every inbox generation that names a key no longer in the address book is
+     * muted. Muted means read no more: nothing handed over, the record and the
+     * receipt kept until the address expires. It is this runtime's delivery
+     * stopping, not a revocation; the service takes the removed key's writes
+     * until the thread expires. An open generation, or one that takes any
+     * signed key, names nobody and is left as it is.
+     */
+    private function muteGenerations(string $reason): array
+    {
+        $partners = array_map(static fn (array $p): string => $p['key'], $this->partners);
+        $current = $this->channels['inbox'] ?? null;
+        $muted = [];
+        foreach ($this->channels as $channel) {
+            if ($channel === $current || $channel->muted || !str_starts_with($channel->label, 'inbox')) {
+                continue;
+            }
+            $gone = array_values(array_filter($channel->allow, static fn (string $k): bool => $k !== '*' && !in_array($k, $partners, true)));
+            if ($gone === []) {
+                continue;
+            }
+            $channel->muted = true;
+            $muted[] = $channel->w;
+            $this->note($channel, 'muted', sprintf('inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered', $channel->w, $reason, count($gone), $channel->expireAt));
+        }
+
+        return $muted;
+    }
+
     public function ensureInbox(): Channel
     {
+        // Partners may have changed while this process was not running. The
+        // older generations are judged once, here, so a key removed while the
+        // runtime was down is read no more from any address it was given.
+        if (!$this->generationsJudged) {
+            $this->generationsJudged = true;
+            $this->muteGenerations('a restart');
+        }
         $inbox = $this->channels['inbox'] ?? null;
         // A gone inbox is opened again at once. A write to the old address
         // opens a thread there with none of this inbox's allowlist, so the
@@ -954,22 +1007,47 @@ final class Runtime
         return $inbox;
     }
 
+    /**
+     * Where this runtime can be reached, published; a failure said, and tried
+     * again soon.
+     *
+     * A failed publish used to be silent and to count as a fresh one, so the
+     * new inbox went unpublished for a minute while the record from before
+     * still pointed partners at the old address, which refused the one just
+     * added. Now attention says so, and the next try comes after a short wait
+     * that doubles up to the normal interval, so a service in trouble is not
+     * asked every few seconds.
+     */
     public function publishPresence(bool $force = false): ?bool
     {
-        if (!$force && microtime(true) - $this->presenceAt < self::PRESENCE_REFRESH) {
-            return null;
+        $now = microtime(true);
+        if (!$force) {
+            $fresh = $now - $this->presenceAt < self::PRESENCE_REFRESH;
+            $retry = $this->presenceFailed && $now >= $this->presenceRetryAt;
+            if ($fresh && !$retry) {
+                return null;
+            }
         }
         $inbox = $this->channels['inbox'] ?? null;
         if ($inbox === null) {
             return null;
         }
         $result = $this->client->presencePublish($inbox->w, array_slice($this->tags, 0, 8), self::PRESENCE_TTL);
-        $this->presenceAt = microtime(true);
+        $this->presenceAt = $now;
         if ($result['status'] !== 200) {
-            ($this->log)('presence failed: ' . $result['status'] . ' ' . json_encode($result['body']));
-        }
+            $backoff = min((float) self::PRESENCE_REFRESH, max(2.0, 2 * $this->presenceBackoff));
+            $this->presenceBackoff = $backoff;
+            $this->presenceRetryAt = $now + $backoff;
+            $this->presenceFailed = true;
+            $this->noteTrouble('presence', 'presence_failed', sprintf('presence for inbox %s could not be published: %s %s. A partner who looks you up is sent to the address published before, while that record lives, and may be refused there. The next try is in %d seconds.', $inbox->w, $result['status'], json_encode($result['body']), (int) $backoff), $inbox->w);
 
-        return $result['status'] === 200;
+            return false;
+        }
+        $this->presenceOkAt = $now;
+        $this->presenceFailed = false;
+        $this->presenceBackoff = 0.0;
+
+        return true;
     }
 
     // ----------------------------------------------------------- channels --
@@ -2006,10 +2084,10 @@ final class Runtime
             $known = $this->nameForKey($from);
             [$body, $meta] = $this->open($message);
             $digest = $message['sha256'] ?? null;
-            return ['channel' => $channel->label, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => $message['verified'], 'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'), 'sha256' => $digest, 'replay' => is_string($digest) && isset($channel->seen[$digest]), 'body' => $body, 'unverified_because' => $message['unverified_because'] ?? null] + $meta;
+            return ['channel' => $channel->label, 'w' => $channel->w, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => $message['verified'], 'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'), 'sha256' => $digest, 'replay' => is_string($digest) && isset($channel->seen[$digest]), 'body' => $body, 'unverified_because' => $message['unverified_because'] ?? null] + $meta;
         } catch (\Throwable $error) {
             $why = 'the message could not be checked here: ' . (new \ReflectionClass($error))->getShortName();
-            return ['channel' => $channel->label, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => false, 'from_key' => null, 'known_contact' => false, 'sender' => 'unsigned', 'sha256' => null, 'replay' => false, 'body' => ['text' => $message['body'] ?? null], 'signed' => false, 'encrypted' => false, 'format' => 'unreadable', 'error' => $why, 'unverified_because' => $why];
+            return ['channel' => $channel->label, 'w' => $channel->w, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => false, 'from_key' => null, 'known_contact' => false, 'sender' => 'unsigned', 'sha256' => null, 'replay' => false, 'body' => ['text' => $message['body'] ?? null], 'signed' => false, 'encrypted' => false, 'format' => 'unreadable', 'error' => $why, 'unverified_because' => $why];
         }
     }
 
@@ -2026,6 +2104,12 @@ final class Runtime
     {
         $channel->leftWaiting = 0;
         $channel->moreAtService = false;
+        // A muted channel is read no more, whoever calls: read() skips it, and
+        // a library caller that asks straight out gets the same answer instead
+        // of the removed partner's messages.
+        if ($channel->muted) {
+            return ['muted', []];
+        }
         // The channel's own allowlist goes with the read: the client checks
         // every message itself and keeps out what the list does not allow.
         // The limit goes with it too, so the service sends what was asked for
@@ -2134,8 +2218,16 @@ final class Runtime
             // Before the message is kept, archived or shown: a scope key in it
             // goes to scopes.json or nowhere, never to the reader.
             $this->takeScopeShare($entry);
-            if (is_array($body) && is_string($body['reply_to'] ?? null) && $from) {
-                $this->peers[$body['reply_to']] = $from;
+            // A verified message that carries an address binds the sender's key
+            // to it: reply_to, as always, and channel, which a handoff carries.
+            // A handoff used to leave the new address without a key, so the
+            // first send to it failed with no key known for the address.
+            if (is_array($body) && $from) {
+                foreach (['reply_to', 'channel'] as $field) {
+                    if (is_string($body[$field] ?? null) && $body[$field] !== '') {
+                        $this->peers[$body[$field]] = $from;
+                    }
+                }
             }
             $channel->received[] = $entry;
             // Received, readable, archived and handled are four different things.

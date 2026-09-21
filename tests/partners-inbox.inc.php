@@ -145,6 +145,88 @@ $before = $q->channels['inbox'];
 $after = $q->ensureInbox();
 $check($after !== $before && $fake->threads[$after->w]['allow'] === [$R] && $before->muted === true, 'a partner removed while the runtime was down mutes the old inbox on the next read');
 
+// Every generation that names a removed key is muted, not only the last one.
+echo "every generation is judged\n";
+mkdir($root . DIRECTORY_SEPARATOR . 'g', 0700, true);
+$homeG = $root . DIRECTORY_SEPARATOR . 'g';
+$g = new Runtime($homeG, 'https://fake.test', ['g'], false, $quiet);
+$g->partnerAdd('Q', $Q);
+$gen1 = $g->ensureInbox();
+$g->partnerAdd('R', $R);
+$gen2 = $g->channels['inbox'];
+$check($gen1->muted === false && $gen2 !== $gen1, 'a key added: the first generation is read on');
+$out = $g->partnerRemove('Q');
+$gen3 = $g->channels['inbox'];
+$check($fake->threads[$gen3->w]['allow'] === [$R] && $gen1->muted === true && $gen2->muted === true, 'removing Q mutes both generations that named her, not only the one just retired', json_encode($out));
+$muted = $out['muted'] ?? [];
+sort($muted);
+$expected = [$gen1->w, $gen2->w];
+sort($expected);
+$check($muted === $expected, 'and the answer lists both');
+$check($write($gen1->w, $Q) === 201 && $g->poll($gen1) === ['muted', []], 'the service still takes Q at the oldest address, and a direct poll of it reads nothing');
+$before = count($fake->calls);
+$g->read();
+$asked = array_filter(array_slice($fake->calls, $before), static fn (array $c): bool => $c[0] === 'GET' && (str_contains($c[1], $gen1->w) || str_contains($c[1], $gen2->w)));
+$check($asked === [], 'a read asks the service for neither muted generation');
+$check(array_column($g->attentionTaken(), 'state') === ['muted', 'muted'], 'attention says so once per generation');
+
+// A partner removed while the runtime was down: judged at the first read.
+$g->close();
+file_put_contents($homeG . '/partners.json', json_encode([]));
+$g = new Runtime($homeG, 'https://fake.test', null, false, $quiet);
+$loaded = [];
+foreach ($g->channels as $c) {
+    $loaded[$c->w] = $c->muted;
+}
+$check($loaded[$gen3->w] === false, 'loaded from disk, nothing is judged before the first read');
+$g->ensureInbox();
+$judged = [];
+foreach ($g->channels as $c) {
+    $judged[$c->w] = $c->muted;
+}
+$check(($judged[$gen3->w] ?? null) === true && $fake->threads[$g->channels['inbox']->w]['allow'] === ['*'], 'R removed while the runtime was down: her generation is muted at the first read, and the new inbox takes any signed key');
+
+// A presence publish that fails is said, and tried again soon.
+echo "presence that fails is said\n";
+$held = $g->channels['inbox'];
+Http::$override = static function (string $method, string $url, ?string $body, array $headers) use ($fake): array {
+    if ($method === 'PUT' && str_contains($url, '/p/')) {
+        return [500, ['error' => 'the fake fell over', 'fix' => 'later'], []];
+    }
+
+    return $fake($method, $url, $body, $headers);
+};
+$out = $g->partnerAdd('Q', $Q);
+$notes = array_values(array_filter($g->attentionTaken(), static fn (array $n): bool => $n['state'] === 'presence_failed'));
+$check($out['rotated'] === true && $out['presence'] === false && count($notes) === 1 && str_contains($notes[0]['what'], $g->channels['inbox']->w) && str_contains($notes[0]['what'], 'refused'), 'a failed publish after the rotation is said in attention, with the consequence', json_encode($notes));
+$peek = static fn (Runtime $runtime, string $field) => (function () use ($field) { return $this->$field; })->call($runtime);
+$poke = static function (Runtime $runtime, string $field, mixed $value): void { (function () use ($field, $value): void { $this->$field = $value; })->call($runtime); };
+$check($peek($g, 'presenceFailed') === true && $peek($g, 'presenceRetryAt') - microtime(true) <= 2.5, 'the next try comes in seconds, not in a minute');
+$attempts = count($fake->calls);
+$check($g->publishPresence() === null, 'not before the wait is over');
+$poke($g, 'presenceRetryAt', 0.0);
+$check($g->publishPresence() === false && $peek($g, 'presenceBackoff') === 4.0, 'tried again once the wait is over, without force, and the wait doubles');
+Http::$override = $fake;
+$poke($g, 'presenceRetryAt', 0.0);
+$check($g->publishPresence() === true && $peek($g, 'presenceFailed') === false && $fake->presence[$g->keys->public]['w'] === $g->channels['inbox']->w, 'once the service answers, the new address is published and the failure is over');
+$check($g->publishPresence() === null, 'and the normal interval holds again');
+
+// A verified handoff binds the sender's key to the new address.
+echo "a handoff binds the key\n";
+$q->partnerAdd('G', $g->keys->public);
+$g->partnerAdd('Q', $Q);
+$q->ensureInbox();
+$g->ensureInbox();
+$q->read();
+$handed = $g->openChannelWith($Q, 900, 'side', $q->channels['inbox']->w, 'come over');
+$got = $q->read();
+$invites = array_values(array_filter($got, static fn (array $m): bool => is_array($m['body']) && ($m['body']['channel'] ?? null) === $handed['w']));
+$check(count($invites) === 1 && $invites[0]['verified'] === true && $invites[0]['w'] === $q->channels['inbox']->w, 'the invitation arrives verified, and says which address it came in on', json_encode(array_column($got, 'body')));
+$check(($q->peers[$handed['w']] ?? null) === $g->keys->public, 'the handed-over address is bound to the key that signed the handoff');
+$sentBack = $q->send($handed['w'], 'on the side');
+$check($sentBack['w'] === $handed['w'] && $fake->threads[$handed['w']]['messages'] !== [], 'so the first send to it lands');
+
+$g->close();
 $p->close();
 $q->close();
 $r->close();

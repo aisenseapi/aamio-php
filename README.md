@@ -260,6 +260,7 @@ had arrived while answers lay there.
 ```
 aamio --home ~/.aamio --tags coldchain.qa init
 aamio partner add Bea <key>      # the inbox follows: a new one that names Bea, presence pointed at it
+aamio partner remove Bea         # every inbox that named her is muted; not a key block once no partner is left
 aamio lookup Bea
 aamio send Bea "hei" --data '{"n": 1}'
 aamio read --wait 25

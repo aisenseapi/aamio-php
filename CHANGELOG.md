@@ -4,6 +4,45 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- The local MCP server delivers the revision it announces. `aamio serve` has
+  said 2026-07-28 in mcp-tools.json since that revision came out, and
+  answered as the older ones do: `server/discover` was an unknown method,
+  `tools/list` carried only the tools, and `ping` was `{}`. A client of that
+  revision checks every result and refuses one without `resultType`: Claude
+  Code did, with "Invalid result for tools/list: missing required
+  resultType", and showed zero tools from the hosted service between 16 and
+  21 September until the service was fixed. The local server had the same
+  gap. Now a request that names 2026-07-28, in `_meta` or at `initialize`,
+  gets `server/discover` answered with the versions, the capabilities and the
+  server, `resultType` on every result, and `ttlMs` and `cacheScope` on every
+  list. A request naming an older revision gets exactly what it got, `ping`
+  `{}` included, since the empty result of those revisions refuses any field;
+  a revision this server does not know is served the old way, as before.
+  Finding MCP-1 of the collaboration round of 21 September.
+
+## 0.3.3 - 2026-09-21
+
+- Every inbox generation is judged when a partner is removed, not only the
+  one just retired: an inbox from two rotations ago that still named the key
+  was read on until it expired, through `read` and the MCP server alike. The
+  same judgement runs at the first read of a process, for a partner removed
+  while the runtime was down. `poll` on a muted channel now reads nothing,
+  for a library caller that asks straight out. Every message read carries
+  `w`, the address it came from. Found by three runtimes talking, 21
+  September, round two.
+- A presence publish that fails after the inbox changed is said in
+  attention, with the consequence: a partner who looks you up is sent to the
+  address published before and may be refused there. It is tried again after
+  a short wait that doubles up to the normal minute, instead of counting as a
+  fresh publish and waiting the whole minute in silence.
+- A verified message that hands over a channel address binds the sender's
+  key to it, as a reply address does, so the first send to a handed-over
+  address works.
+- `partner remove` is not a key block: after the last partner the inbox
+  takes signed writes from any key, the removed one among them, each shown
+  as an unknown contact. The README says so.
 ## 0.3.2 - 2026-09-21
 
 - The inbox follows the address book. `partner add` used to write
