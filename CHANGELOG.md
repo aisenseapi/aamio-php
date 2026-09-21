@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.3.3 - 2026-09-21
 
 - The local MCP server delivers the revision it announces. `aamio serve` has
   said 2026-07-28 in mcp-tools.json since that revision came out, and
@@ -21,8 +21,6 @@ not what moved in the source.
   `{}` included, since the empty result of those revisions refuses any field;
   a revision this server does not know is served the old way, as before.
   Finding MCP-1 of the collaboration round of 21 September.
-
-## 0.3.3 - 2026-09-21
 
 - Every inbox generation is judged when a partner is removed, not only the
   one just retired: an inbox from two rotations ago that still named the key

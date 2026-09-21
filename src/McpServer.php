@@ -12,9 +12,28 @@ namespace Aamio;
  */
 final class McpServer
 {
+    /**
+     * From 2026-07-28 there is no handshake: every request names its revision
+     * in params._meta, and every result carries resultType. Before it,
+     * initialize settles the revision, and the reference SDK's empty result
+     * is strict and refuses any field, so an older client must get the
+     * shapes it had.
+     */
+    private const MODERN = '2026-07-28';
+    /** What a client that never named a revision is taken to speak: the oldest, served the old way. */
+    private const UNSAID = '2025-03-26';
+    /**
+     * How long a client may keep the tools and the discovery answer, in
+     * milliseconds. An hour, as the hosted service says: nothing in them
+     * changes while the process runs.
+     */
+    private const CACHE_MS = 3600000;
+
     private array $tools;
     private string $instructions;
     private array $supported;
+    /** The revision initialize settled on, for every later request that names none itself. */
+    private ?string $negotiated = null;
 
     public function __construct(private readonly Runtime $runtime)
     {
@@ -213,6 +232,49 @@ final class McpServer
         }
     }
 
+    /** The revision a request speaks: named in params._meta, else the one initialize settled on, else UNSAID. */
+    private function versionOf(array $params): string
+    {
+        $named = is_array($params['_meta'] ?? null) ? ($params['_meta']['io.modelcontextprotocol/protocolVersion'] ?? null) : null;
+
+        return is_string($named) && $named !== '' ? $named : ($this->negotiated ?? self::UNSAID);
+    }
+
+    /**
+     * A result in the shape the requested revision wants.
+     *
+     * 2026-07-28 requires resultType on every result, and ttlMs and cacheScope
+     * beside the items of a list. Without them a client of that revision
+     * refuses the whole answer: Claude Code did, with "Invalid result for
+     * tools/list: missing required resultType", and connected to the hosted
+     * service with zero tools from 16 to 21 September 2026. This server
+     * announced the revision and had the same gap. An older client gets
+     * exactly what it got, since the reference SDK's empty result of those
+     * revisions refuses any field.
+     */
+    private static function shaped(array $result, bool $modern, bool $listing = false): array
+    {
+        if (!$modern) {
+            return $result;
+        }
+
+        return ['resultType' => 'complete'] + $result + ($listing ? ['ttlMs' => self::CACHE_MS, 'cacheScope' => 'public'] : []);
+    }
+
+    /** What server/discover answers: the revisions, the capabilities, who is speaking and the words, cacheable for an hour. */
+    private function discoverResult(): array
+    {
+        return [
+            'resultType' => 'complete',
+            'supportedVersions' => $this->supported,
+            'capabilities' => ['tools' => ['listChanged' => false]],
+            '_meta' => ['io.modelcontextprotocol/serverInfo' => ['name' => 'aamio', 'version' => Http::VERSION]],
+            'instructions' => $this->instructions,
+            'ttlMs' => self::CACHE_MS,
+            'cacheScope' => 'public',
+        ];
+    }
+
     public function handle(mixed $message): ?array
     {
         if (!is_array($message) || array_is_list($message) || ($message['jsonrpc'] ?? null) !== '2.0' || !is_string($message['method'] ?? null)) {
@@ -224,16 +286,25 @@ final class McpServer
             return null;
         }
         $id = $message['id'];
+        $modern = $this->versionOf($params) === self::MODERN;
         switch ($method) {
+            case 'server/discover':
+                // A 2026-07-28 method, so its answer has that revision's shape
+                // whoever asks; the hosted service answers a legacy client too.
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => $this->discoverResult()];
             case 'initialize':
                 $requested = $params['protocolVersion'] ?? null;
                 $version = in_array($requested, $this->supported, true) ? $requested : '2025-11-25';
+                // What the two sides settled on decides the shape of every
+                // later answer that names no revision itself.
+                $this->negotiated = $version;
 
-                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => ['protocolVersion' => $version, 'capabilities' => ['tools' => ['listChanged' => false]], 'serverInfo' => ['name' => 'aamio', 'version' => Http::VERSION], 'instructions' => $this->instructions]];
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(['protocolVersion' => $version, 'capabilities' => ['tools' => ['listChanged' => false]], 'serverInfo' => ['name' => 'aamio', 'version' => Http::VERSION], 'instructions' => $this->instructions], $version === self::MODERN)];
             case 'ping':
-                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => new \stdClass()];
+                // An older client's empty result refuses any field, so {} stays {} for it.
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => $modern ? ['resultType' => 'complete'] : new \stdClass()];
             case 'tools/list':
-                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => ['tools' => $this->tools]];
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(['tools' => $this->tools], $modern, true)];
             case 'tools/call':
                 $name = is_string($params['name'] ?? null) ? $params['name'] : '';
                 $arguments = is_array($params['arguments'] ?? null) ? $params['arguments'] : [];
@@ -242,16 +313,16 @@ final class McpServer
                     return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32602, 'message' => 'Unknown tool: ' . $name]];
                 }
 
-                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => $result];
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped($result, $modern)];
             case 'resources/list':
-                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => ['resources' => []]];
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(['resources' => []], $modern, true)];
             case 'prompts/list':
-                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => ['prompts' => []]];
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(['prompts' => []], $modern, true)];
             case 'resources/templates/list':
-                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => ['resourceTemplates' => []]];
+                return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(['resourceTemplates' => []], $modern, true)];
         }
 
-        return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32601, 'message' => 'Method not found: ' . $method]];
+        return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32601, 'message' => 'Method not found: ' . $method . '. This server answers server/discover, initialize, ping, tools/list and tools/call, and empty lists for resources and prompts.']];
     }
 
     /** handle, with anything it did not expect answered as an internal error instead of ending the server. */

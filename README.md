@@ -323,8 +323,8 @@ Allowlists are normalized before sending and retained on opened threads. `readTh
 Receipts compare all process-local observations, including kept-out ones. Fewer receipt lines is a mismatch; more is not yet comparable. Keys become contact names only after a signature was locally verified on that channel; other keys remain raw service claims, counted under `keys_unverified_count`. `local_differences` names differing fields when counts match. A fresh process has no observations loaded from the archive. Recomputing a receipt root checks arithmetic, and signing a fetched receipt records it; neither endorses unverified sender claims.
 
 ```
-php tests/run.php        # 68 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 186 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, and what stays on this machine
+php tests/run.php        # 89 offline checks: the shared vectors, sealing, receipts, gate, scopes
+php tests/runtime.php    # 330 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, and what stays on this machine
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 python tests/interop.py  # PHP and Python open each other's envelopes and verify each other's signatures
 ```

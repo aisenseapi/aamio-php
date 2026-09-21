@@ -208,6 +208,8 @@ $movedCheck = Receipt::verify(['messages' => $movedAbout, 'root' => Receipt::roo
 $check(($movedCheck['local_hashes_match'] ?? null) === true, 'the helper compares hashes, and says so in its name');
 $check(Receipt::root($sameHashes) !== Receipt::root($movedAbout), 'and the root it does not compare is a different number');
 
+require __DIR__ . '/mcp-revision.inc.php';
+
 echo "\n$passed passed, $failed failed\n";
 exit($failed === 0 ? 0 : 1);
 
