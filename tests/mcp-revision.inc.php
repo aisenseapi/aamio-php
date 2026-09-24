@@ -117,10 +117,16 @@ foreach (array_merge([null], $mcpOlder) as $mcpVersion) {
 }
 $check($mcpExact, 'an older client gets exactly the shapes it had: the items alone on a list, and content, structuredContent and isError on a call');
 
-// The hosted service refuses 2031-01-01. This server ignores what it does not
-// know and serves the old shapes, as it did before it read _meta at all.
-$mcpUnknown = $mcpAnswer($mcpServer, 'tools/list', [], '2031-01-01')['result'] ?? [];
-$check(count($mcpUnknown['tools'] ?? []) === 22 && array_keys($mcpUnknown) === ['tools'] && ($mcpAnswer($mcpServer, 'ping', [], '2031-01-01')['result'] ?? null) instanceof \stdClass && ($mcpAnswer($mcpServer, 'server/discover', [], '2031-01-01')['result']['supportedVersions'] ?? null) === $mcpSupported, 'a revision this server does not know falls back as before: the old shapes, and discover still names what it does speak');
+// The hosted service refuses 2031-01-01 with -32022, and so does this server
+// now: the shape such a client wants is unknown, and the older shape was a
+// guess. Finding N7 of the health check of 21 September 2026. An unknown tool
+// named in the same request would answer -32602 if dispatch came first.
+$mcpRefused = true;
+foreach (['ping' => [], 'tools/list' => [], 'server/discover' => [], 'tools/call' => ['name' => 'aamio_nope', 'arguments' => []]] as $mcpMethod => $mcpParams) {
+    $mcpReply = $mcpAnswer($mcpServer, $mcpMethod, $mcpParams, '2031-01-01');
+    $mcpRefused = $mcpRefused && !isset($mcpReply['result']) && ($mcpReply['error']['code'] ?? null) === -32022 && ($mcpReply['error']['data'] ?? null) === ['supported' => $mcpSupported, 'requested' => '2031-01-01'] && str_contains((string) ($mcpReply['error']['message'] ?? ''), '2026-07-28');
+}
+$check($mcpRefused, 'a revision this server does not know is refused with -32022 before anything is done, naming what is supported, as the hosted service refuses it');
 
 [$mcpOpened, $mcpInit] = $mcpOpenedAt('2026-07-28');
 $mcpListedAfter = $mcpAnswer($mcpOpened, 'tools/list', [], null)['result'] ?? [];

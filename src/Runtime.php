@@ -2221,12 +2221,11 @@ final class Runtime
             // A verified message that carries an address binds the sender's key
             // to it: reply_to, as always, and channel, which a handoff carries.
             // A handoff used to leave the new address without a key, so the
-            // first send to it failed with no key known for the address.
-            if (is_array($body) && $from) {
+            // first send to it failed with no key known for the address. And
+            // an address another key already holds is not rebound by a claim.
+            if (is_array($body) && $entry['verified'] === true && $from) {
                 foreach (['reply_to', 'channel'] as $field) {
-                    if (is_string($body[$field] ?? null) && $body[$field] !== '') {
-                        $this->peers[$body[$field]] = $from;
-                    }
+                    $this->bindClaimedAddress($channel, $entry, $field, $body[$field] ?? null, $from);
                 }
             }
             $channel->received[] = $entry;
@@ -2283,6 +2282,36 @@ final class Runtime
     }
 
     /** Something a caller has to hear about, even though the read returned no messages. */
+    /**
+     * A verified message that names an address binds its signer's key to it,
+     * once. The signature proves who made the claim, not that the claimant
+     * holds an address another key is already bound to: on 21 September 2026
+     * a stranger's signed message naming a partner's address in channel
+     * replaced that partner's key, and the next send there was sealed to the
+     * stranger. A first claim is learned, the same key again changes nothing,
+     * and a different key is a conflict: the binding stays, the message still
+     * arrives, and the conflict is on the entry and in attention. Whoever
+     * holds the address reaches this side through the partner list or a fresh
+     * handoff, not by claiming.
+     */
+    private function bindClaimedAddress(Channel $channel, array &$entry, string $field, mixed $address, string $key): void
+    {
+        if (!is_string($address) || !Address::isW($address)) {
+            return;
+        }
+        $bound = $this->peers[$address] ?? null;
+        if ($bound === null) {
+            $this->peers[$address] = $key;
+
+            return;
+        }
+        if ($bound === $key) {
+            return;
+        }
+        $entry['binding_conflicts'][] = ['field' => $field, 'address' => $address, 'claimed_by' => $key, 'bound_to' => $bound];
+        $this->note($channel, 'binding_conflict', 'message ' . $entry['seq'] . ' names ' . $address . ' as ' . $field . ', signed by ' . ($this->nameForKey($key) ?? $key) . ', and that address is already bound to ' . ($this->nameForKey($bound) ?? $bound) . '. The binding is kept: a signature proves who made the claim, not who holds the address. Reach the claimant through the partner list or a fresh handoff.', [(int) $entry['seq']]);
+    }
+
     private function note(Channel $channel, string $state, string $what, ?array $seqs = null): void
     {
         $this->noteTrouble($channel->label, $state, $what, $channel->w, $seqs);
@@ -2292,7 +2321,7 @@ final class Runtime
     {
         $key = $where . '|' . $state;
         $note = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
-        if (in_array($state, ['kept_out', 'unverified'], true) && $seqs !== null) {
+        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict'], true) && $seqs !== null) {
             $previous = $this->attention[$key] ?? [];
             $note['seqs'] = array_merge($previous['seqs'] ?? [], $seqs);
             $note['count'] = count($note['seqs']);

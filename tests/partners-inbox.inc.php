@@ -19,7 +19,9 @@ declare(strict_types=1);
  * $check in scope.
  */
 
+use Aamio\Address;
 use Aamio\Http;
+use Aamio\Keys;
 use Aamio\Runtime;
 
 echo "the inbox follows the address book\n";
@@ -225,6 +227,53 @@ $check(count($invites) === 1 && $invites[0]['verified'] === true && $invites[0][
 $check(($q->peers[$handed['w']] ?? null) === $g->keys->public, 'the handed-over address is bound to the key that signed the handoff');
 $sentBack = $q->send($handed['w'], 'on the side');
 $check($sentBack['w'] === $handed['w'] && $fake->threads[$handed['w']]['messages'] !== [], 'so the first send to it lands');
+
+// An address already bound to a key is not rebound by a claim from another
+// key. Finding N1 of the health check of 21 September 2026: a stranger's
+// signed message naming G's address in channel replaced G's key, and the next
+// send there was sealed to the stranger. S has no partners, so its inbox takes
+// any signed key, as a board reply inbox does.
+echo "a binding is not taken over\n";
+mkdir($root . DIRECTORY_SEPARATOR . 's', 0700, true);
+$s = new Runtime($root . DIRECTORY_SEPARATOR . 's', 'https://fake.test', ['s'], false, $quiet);
+$sInbox = $s->ensureInbox();
+$stranger = Keys::generate();
+$claimed = Address::w(Address::newId());
+$fake->threads[$claimed] = ['id' => 'g-open', 'created_at' => $fake->now, 'expire_at' => $fake->now + 900, 'allow' => [], 'messages' => [], 'gate' => []];
+$s->peers[$claimed] = $g->keys->public;
+$claim = static function (string $field, Keys $signer, bool $signed = true) use ($fake, $sInbox, $claimed): void {
+    $body = json_encode([$field => $claimed, 'text' => 'mine']);
+    $seq = count($fake->threads[$sInbox->w]['messages']) + 1;
+    $fake->threads[$sInbox->w]['messages'][] = [
+        'seq' => $seq, 'at' => $fake->now + $seq, 'type' => 'json', 'body' => $body, 'sha256' => hash('sha256', $body),
+        'from' => $signer->public, 'sig' => $signed ? $signer->sign(Keys::threadSigningInput($sInbox->w, $body)) : 'not-a-signature',
+        'verified' => true, 'sealed' => false,
+    ];
+};
+$claim('channel', $stranger);
+$claim('reply_to', $stranger);
+$claim('channel', $stranger, false);
+$s->attentionTaken();
+[$state, $entries] = $s->poll($sInbox);
+$conflicts = array_values(array_filter($s->attentionTaken(), static fn (array $n): bool => $n['state'] === 'binding_conflict'));
+$check($state === 'ok' && count($entries) === 3 && $entries[0]['verified'] === true && $entries[1]['verified'] === true && $entries[2]['verified'] === false, 'the claims arrive, two verified and one that does not check out', json_encode(array_column($entries, 'verified')));
+$check(($s->peers[$claimed] ?? null) === $g->keys->public, 'and the address stays bound to G on both fields');
+$check(($entries[0]['binding_conflicts'] ?? null) === [['field' => 'channel', 'address' => $claimed, 'claimed_by' => $stranger->public, 'bound_to' => $g->keys->public]] && ($entries[1]['binding_conflicts'][0]['field'] ?? null) === 'reply_to' && !isset($entries[2]['binding_conflicts']), 'each verified claim carries its conflict, and the unverified one binds nothing and claims nothing', json_encode(array_column($entries, 'binding_conflicts')));
+$check(count($conflicts) === 1 && ($conflicts[0]['seqs'] ?? null) === [1, 2] && str_contains($conflicts[0]['what'], 'kept'), 'attention says so once, with both seqs', json_encode($conflicts));
+$claim('channel', $g->keys);
+[$state, $entries] = $s->poll($sInbox);
+$check(($s->peers[$claimed] ?? null) === $g->keys->public && !isset($entries[0]['binding_conflicts']) && $s->attentionTaken() === [], 'the same key again is no conflict');
+$sealed = $s->send($claimed, 'still for G');
+$sealedEntry = end($s->outbox);
+$sealedBody = end($fake->threads[$claimed]['messages'])['body'];
+$strangerOpened = null;
+try {
+    $strangerOpened = $stranger->open($s->keys->public, $sealedBody);
+} catch (\Throwable $error) {
+    $strangerOpened = false;
+}
+$check($sealedEntry['to_key'] === $g->keys->public && str_contains($g->keys->open($s->keys->public, $sealedBody), 'still for G') && $strangerOpened === false, 'the next send there is sealed to G: G opens it, the stranger cannot', json_encode(['to_key' => $sealedEntry['to_key'] === $g->keys->public, 'stranger' => $strangerOpened]));
+$s->close();
 
 $g->close();
 $p->close();

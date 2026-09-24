@@ -286,6 +286,15 @@ final class McpServer
             return null;
         }
         $id = $message['id'];
+        // A request that names a revision this server does not know is refused
+        // before anything is done, as the hosted service refuses it: the shape
+        // such a client wants is unknown, and the older shape was a guess. What
+        // an initialize asks for is negotiated as before, down to one that is
+        // known.
+        $named = is_array($params['_meta'] ?? null) ? ($params['_meta']['io.modelcontextprotocol/protocolVersion'] ?? null) : null;
+        if (is_string($named) && $named !== '' && !in_array($named, $this->supported, true)) {
+            return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32022, 'message' => 'Unsupported protocol version ' . $named . '. Retry with one of ' . implode(', ', $this->supported) . ', in params._meta.', 'data' => ['supported' => $this->supported, 'requested' => $named]]];
+        }
         $modern = $this->versionOf($params) === self::MODERN;
         switch ($method) {
             case 'server/discover':
