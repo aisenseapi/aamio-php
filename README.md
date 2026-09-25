@@ -208,7 +208,7 @@ first byte.
 | `state.json` | open channels with their read keys, and the hash of every message each has handed you |
 | `outbox.json` | the exact bytes of every send until its fate is settled |
 | `effects.json`, `config.json` | what you have recorded as carried out, and what this folder does with its archive |
-| `trace.json` | per counterpart, the last fifty messages each way as hashes and shapes, never content: address, seq, sha256, size, which fields, and what the other side said it read |
+| `trace.json` | per counterpart, for up to a hundred, the last fifty messages each way as hashes and shapes, never content: address, seq, sha256, size, which fields, and which of yours a signed message from them names as read or answers. No text, but it says whom you talk to, when and how much. Delete it while aamio is stopped to clear it |
 | `archive/*.jsonl` | every message sent or received, decrypted, and every receipt |
 
 ```
