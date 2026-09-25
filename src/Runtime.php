@@ -2525,7 +2525,7 @@ final class Runtime
             foreach (['re' => 'answers', 'seen' => 'acknowledges'] as $field => $as) {
                 if (self::isMessageHash($record[$field] ?? null)) {
                     $ours = $mine[$record[$field]] ?? null;
-                    $record[$as] = $ours !== null ? ['seq' => $ours['seq'] ?? null, 'sha256' => $ours['sha256'], 'at' => $ours['at'] ?? null] : ['sha256' => $record[$field], 'note' => 'not one of the messages recorded here'];
+                    $record[$as] = $ours !== null ? ['seq' => $ours['seq'] ?? null, 'sha256' => $ours['sha256'], 'at' => $ours['at'] ?? null] : ['sha256' => $record[$field], 'note' => 'no confirmed send in this record has this sha256'];
                 }
             }
             $received[] = $record;
@@ -2534,33 +2534,52 @@ final class Runtime
         return ['sent' => $sent, 'received' => $received, 'no_read_claim' => $noClaim, 'note' => self::traceNote($sentRows, $receivedRows, $delivered, $noClaim, count(array_diff_key($claimed, $mine)))];
     }
 
-    /** What the record says, in words, and no more than it says. */
+    /**
+     * What the record says, in words, and no more than it says. A send the
+     * service did not confirm is not a send it did not store: the answer can be
+     * lost after the message was stored. The first version said the service
+     * stored none of the messages in a trace whose one send had an unknown
+     * outcome and had been stored all the same, and whoever trusts that sends
+     * the text again as new bytes, which is a second message. A claim naming
+     * such a send was put down to a message older than the record or sent from
+     * elsewhere. R5 of the follow-up review of 25 September 2026.
+     */
     private static function traceNote(array $sent, array $received, array $delivered, array $noClaim, int $elsewhere): string
     {
         if ($sent === []) {
             return 'Nothing sent to them is recorded here.';
         }
-        if ($delivered === []) {
-            return 'The service stored none of the messages recorded here: the status and outcome of each say what happened.';
-        }
         $named = false;
         foreach ($received as $row) {
             $named = $named || self::isMessageHash($row['seen'] ?? null);
         }
-        if (!$named) {
+        $turnedAway = count(array_filter($sent, static fn (array $row): bool => ($row['outcome'] ?? null) === 'refused' && ($row['status'] ?? null) !== 201));
+        $unsettled = count($sent) - count($delivered) - $turnedAway;
+        if ($delivered === []) {
+            $note = 'No message here has an answer from the service that confirms it was stored.';
+        } elseif (!$named) {
             $said = $received !== [] ? 'Nothing from them has named a message of yours as read' : 'Nothing has come back from them';
-
-            return $said . ', so each is unknown, not unread. A client that does not send seen says nothing, and neither does one that cannot open what it gets: every message here is sealed to their key, so a reader without it sees an envelope and no text. The sha256 of each message is what the service stored, byte for byte; ask them for the sha256 they read.';
-        }
-        $note = count($delivered) . ' delivered, and their runtime says it read and opened ' . (count($delivered) - count($noClaim)) . ' of them.';
-        if ($noClaim !== []) {
-            $note .= ' For ' . count($noClaim) . ' there is no claim kept here: that is unknown, not unread, since each message from them names only the last of yours it had read when it was written, and this record keeps fifty each way.';
+            $note = $said . ', so each is unknown, not unread. A client that does not send seen says nothing, and neither does one that cannot open what it gets: every message here is sealed to their key, so a reader without it sees an envelope and no text. The sha256 of each message is what the service stored, byte for byte; ask them for the sha256 they read.';
+        } else {
+            $note = count($delivered) . ' delivered, and their runtime says it read and opened ' . (count($delivered) - count($noClaim)) . ' of them.';
+            if ($noClaim !== []) {
+                $note .= ' For ' . count($noClaim) . ' there is no claim kept here: that is unknown, not unread, since each message from them names only the last of yours it had read when it was written, and this record keeps fifty each way.';
+            }
         }
         if ($elsewhere > 0) {
-            $note .= ' They also named ' . $elsewhere . ' message(s) not recorded here: older than this record, or not sent from this runtime.';
+            $note .= ' They named ' . $elsewhere . ' message(s) this record cannot match to a send the service confirmed: older than this record, sent from elsewhere, or sent from here without an answer that confirmed it.';
+        }
+        if ($unsettled > 0) {
+            $note .= ' For ' . $unsettled . ' no answer settled whether the service stored it, so it may be stored already. Check each one\'s status and outcome first, and if it must go again, retry it from the outbox: the same bytes are marked a replay where the first arrived, and new bytes would be a second message.';
+        }
+        if ($turnedAway > 0) {
+            $note .= ' The service turned away ' . $turnedAway . '; the status of each says why.';
+        }
+        if ($named) {
+            $note .= ' A claim covers the one message it names. It says their runtime opened it, not that anyone understood it or acted on it.';
         }
 
-        return $note . ' A claim covers the one message it names. It says their runtime opened it, not that anyone understood it or acted on it.';
+        return $note;
     }
 
     /** The record for one key, made when first needed and kept to a bound. */

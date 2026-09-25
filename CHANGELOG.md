@@ -25,6 +25,20 @@ not what moved in the source.
   was missing while our send log said delivered; every message is sealed to
   the recipient's key, and a reader without it sees an envelope. This is how
   to tell.
+- The note says no more than the rows. A send whose answer never settled it,
+  `unknown` or `attempted`, may be stored already, and the note says so and
+  tells you to retry the same bytes from the outbox rather than send new ones;
+  a send the service turned away is counted apart, and one that never left has
+  no row. A claim the trace cannot match is put down to a message older than
+  the record, one sent from elsewhere, or one sent from here that no answer
+  confirmed.
+- The command line prints JSON on stdout and nothing else. The transport
+  called `curl_close()`, which has done nothing since PHP 8.0 and is
+  deprecated from 8.5, and on 8.5 its notice came out on stdout ahead of the
+  answer, so `aamio doctor` exited 0 with output no parser would take. The
+  call is gone, and the command line sends PHP's diagnostics to stderr from
+  its first line; what PHP says while it starts needs
+  `-d display_errors=stderr`. The local MCP server already did this.
 - The trace is kept in `trace.json`, fifty messages each way for up to a
   hundred counterparts. It holds no text, but it says whom you talk to, when
   and how much; deleting it while aamio is stopped clears it. It is

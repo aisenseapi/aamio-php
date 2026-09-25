@@ -28,9 +28,12 @@ declare(strict_types=1);
  */
 
 use Aamio\Codec;
+use Aamio\GateStop;
+use Aamio\Http;
 use Aamio\Keys;
 use Aamio\McpServer;
 use Aamio\Runtime;
+use Aamio\SendFailed;
 
 // A logger of its own: an earlier include reuses $quiet for a path.
 $traceQuiet = static function (string $line): void {
@@ -148,8 +151,8 @@ $sent = $t->send($uInbox->w, 'unread');
 $traceDirect($u, $tInbox->w, $t->keys->public, ['seen' => str_repeat('f', 64), 'text' => 'a claim about something else']);
 $t->poll($tInbox);
 $traced = $t->trace('U');
-$check(array_column($traced['sent'], 'seen_by_them') === [null] && $traced['no_read_claim'] === [$sent['message_id']] && !str_contains($traced['note'], 'Everything') && str_contains($traced['note'], 'read and opened 0 of them') && str_contains($traced['note'], '1 message(s) not recorded here'), 'R1: a claim to a message not recorded here is not everything read', $traced['note']);
-$check((end($traced['received'])['acknowledges'] ?? null) === ['sha256' => str_repeat('f', 64), 'note' => 'not one of the messages recorded here'], 'and the claim is shown as one about a message not recorded here');
+$check(array_column($traced['sent'], 'seen_by_them') === [null] && $traced['no_read_claim'] === [$sent['message_id']] && !str_contains($traced['note'], 'Everything') && str_contains($traced['note'], 'read and opened 0 of them') && str_contains($traced['note'], 'They named 1 message(s) this record cannot match'), 'R1: a claim to a message not recorded here is not everything read', $traced['note']);
+$check((end($traced['received'])['acknowledges'] ?? null) === ['sha256' => str_repeat('f', 64), 'note' => 'no confirmed send in this record has this sha256'], 'and the claim is shown as one no confirmed send here matches');
 $t->close();
 $u->close();
 
@@ -214,6 +217,88 @@ $check(($u->traces[$t->keys->public]['last_read']['sha256'] ?? null) === $lastSe
 $u->send($tInbox->w, 'after a replay');
 $reply = array_values(array_filter($t->poll($tInbox)[1], static fn (array $m): bool => ($m['body']['text'] ?? null) === 'after a replay'))[0] ?? [];
 $check(($reply['body']['seen'] ?? null) === $lastSent['sha256'], 'the next message names the last one read, not the replay');
+$t->close();
+$u->close();
+
+// ---------------------------------------------------------------- R5: what was not confirmed is not called unstored
+
+/** The service's answer to writes, replaced after it did or did not store them. */
+$answerWith = static function (int $status, bool $stored) use ($fake): \Closure {
+    return static function (string $method, string $url, ?string $body, array $headers) use ($fake, $status, $stored): array {
+        if ($method !== 'POST' || preg_match('!^/[a-z2-7]{20}$!', (string) parse_url($url, PHP_URL_PATH)) !== 1) {
+            return $fake($method, $url, $body, $headers);
+        }
+        if ($stored) {
+            $fake($method, $url, $body, $headers);
+        }
+
+        return [$status, ['error' => $status === 0 ? 'no answer: the answer was lost on the way back' : 'an answer the fixture chose', 'fix' => 'see the outcome'], []];
+    };
+};
+
+[$t, $u, $tInbox, $uInbox] = $tracePair('lost');
+Http::$override = $answerWith(0, true);
+// Not $failed: that is the count every check adds to.
+$lostSend = null;
+try {
+    $t->send($uInbox->w, 'stored, the answer lost');
+} catch (SendFailed $error) {
+    $lostSend = $error;
+} finally {
+    Http::$override = $fake;
+}
+$traced = $t->trace('U');
+$check($lostSend !== null && $lostSend->outcome === 'unknown' && $lostSend->status === 0 && count($fake->threads[$uInbox->w]['messages']) === 1 && array_column($t->outbox, 'status') === ['unknown'], 'R5: a send the service stored and whose answer was lost is unknown, in the send and the outbox');
+$check(array_map(static fn (array $r): array => [$r['status'], $r['outcome'], $r['sha256'], $r['seen_by_them']], $traced['sent']) === [[0, 'unknown', null, null]] && $traced['no_read_claim'] === [], 'and in the trace, where only a confirmed send can lack a claim');
+$check(!str_contains($traced['note'], 'stored none') && str_starts_with($traced['note'], 'No message here has an answer from the service that confirms it was stored.') && str_contains($traced['note'], 'For 1 no answer settled whether the service stored it, so it may be stored already') && str_contains($traced['note'], 'retry it from the outbox') && str_contains($traced['note'], 'new bytes would be a second message'), 'and the note says it may be stored already, and to retry the same bytes rather than send new ones', $traced['note']);
+$t->close();
+$u->close();
+
+[$t, $u, $tInbox, $uInbox] = $tracePair('outcomes');
+$outcomes = [];
+foreach ([[403, false, 'turned away'], [500, true, 'stored, then a server error']] as [$status, $stored, $text]) {
+    Http::$override = $answerWith($status, $stored);
+    try {
+        $t->send($uInbox->w, $text);
+    } catch (SendFailed $error) {
+        $outcomes[] = $error->outcome;
+    } finally {
+        Http::$override = $fake;
+    }
+}
+// A fresh address whose gate asks for what no client does: the runtime keeps
+// the gate it read for an address, so the inbox above would not be asked again.
+$gated = \Aamio\Address::w(\Aamio\Address::newId());
+$fake->threads[$gated] = ['id' => 'x', 'created_at' => $fake->now, 'expire_at' => time() + 600, 'allow' => [], 'messages' => [], 'gate' => ['require' => ['captcha' => true]]];
+$t->peers[$gated] = $u->keys->public;
+$stopped = false;
+try {
+    $t->send($gated, 'never left');
+} catch (GateStop $stop) {
+    $stopped = true;
+}
+$traced = $t->trace('U');
+$check($outcomes === ['refused', 'attempted'] && $stopped && array_column($traced['sent'], 'outcome') === ['refused', 'attempted'], 'R5: turned away and attempted each have a row, and a send the gate stopped before anything left has none');
+$check(str_starts_with($traced['note'], 'No message here has an answer from the service that confirms it was stored.') && !str_contains($traced['note'], 'stored none') && str_contains($traced['note'], 'For 1 no answer settled whether the service stored it') && str_contains($traced['note'], 'The service turned away 1'), 'and the note counts each for what it is', $traced['note']);
+$t->close();
+$u->close();
+
+[$t, $u, $tInbox, $uInbox] = $tracePair('lost-read');
+Http::$override = $answerWith(0, true);
+try {
+    $t->send($uInbox->w, 'stored, the answer lost');
+} catch (SendFailed) {
+} finally {
+    Http::$override = $fake;
+}
+$lost = end($fake->threads[$uInbox->w]['messages'])['sha256'];
+$u->poll($uInbox);
+$u->send($tInbox->w, 'I read it');
+$delivered = $t->send($uInbox->w, 'a delivered one');
+$t->poll($tInbox);
+$traced = $t->trace('U');
+$check(array_map(static fn (array $r): array => [$r['outcome'], $r['seen_by_them']], $traced['sent']) === [['unknown', null], ['delivered', null]] && $traced['no_read_claim'] === [$delivered['message_id']], 'R5: when they read the send whose answer was lost, it stays unknown here, and the delivered one without a claim is listed');
+$check((end($traced['received'])['acknowledges'] ?? null) === ['sha256' => $lost, 'note' => 'no confirmed send in this record has this sha256'] && !str_contains($traced['note'], 'not sent from this runtime') && !str_contains($traced['note'], 'not recorded here') && str_contains($traced['note'], 'this record cannot match to a send the service confirmed') && str_contains($traced['note'], 'sent from here without an answer that confirmed it'), 'and their claim is not put down to a message older than the record or sent from elsewhere', $traced['note']);
 $t->close();
 $u->close();
 

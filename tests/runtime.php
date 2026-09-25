@@ -888,6 +888,7 @@ require __DIR__ . '/outbox-reconcile.inc.php';
 require __DIR__ . '/gate-set.inc.php';
 require __DIR__ . '/read-wire.inc.php';
 require __DIR__ . '/trace.inc.php';
+require __DIR__ . '/cli-stdout.inc.php';
 $a->close();
 $b->close();
 Http::$override = null;

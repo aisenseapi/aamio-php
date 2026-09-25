@@ -27,6 +27,14 @@ declare(strict_types=1);
  *   outbox pending | outbox retry [--id ID] | outbox forget ID | serve
  */
 
+// Diagnostics to stderr from here on, so stdout carries the JSON and nothing
+// else. On PHP 8.5 a deprecation raised by the transport was printed on stdout
+// ahead of the answer, and `aamio doctor` exited 0 with output no parser would
+// take (C1 of the follow-up review of 25 September 2026). What PHP says while
+// it starts, before this line, is beyond reach from here: for that, run it
+// with -d display_errors=stderr.
+ini_set('display_errors', 'stderr');
+
 foreach ([__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php', __DIR__ . '/../tests/bootstrap.php'] as $autoload) {
     if (is_file($autoload)) {
         require $autoload;

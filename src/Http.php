@@ -64,14 +64,16 @@ final class Http
             curl_setopt($handle, CURLOPT_POSTFIELDS, $body);
         }
         $text = curl_exec($handle);
+        // The handle goes when it goes out of scope. curl_close() has done
+        // nothing since PHP 8.0 and is deprecated from 8.5, where its notice
+        // was printed ahead of the JSON the command line answers with (C1 of
+        // the follow-up review of 25 September 2026).
         if ($text === false) {
             $reason = curl_error($handle);
-            curl_close($handle);
 
             return [0, ['error' => 'no answer: ' . $reason, 'fix' => 'The request may have landed. Keep the bytes, mark the send unknown, and retry only when somebody has decided it is safe to.'], []];
         }
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-        curl_close($handle);
         $decoded = json_decode((string) $text, true);
 
         return [$status, json_last_error() === JSON_ERROR_NONE ? $decoded : (string) $text, $responseHeaders];
