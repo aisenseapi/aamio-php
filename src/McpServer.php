@@ -127,7 +127,9 @@ final class McpServer
                 case 'aamio_presence_lookup':
                     return self::resultOf($r->lookup(self::strings($a, 'names'), self::number($a, 'wait')));
                 case 'aamio_send':
-                    return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::map($a, 'data')));
+                    return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::map($a, 'data'), null, self::text($a, 're')));
+                case 'aamio_trace':
+                    return self::resultOf($r->trace(self::text($a, 'who'), isset($a['limit']) ? self::number($a, 'limit') : 20));
                 case 'aamio_read':
                     $asked = self::number($a, 'limit');
                     $budget = isset($a['max_bytes']) ? self::number($a, 'max_bytes') : null;

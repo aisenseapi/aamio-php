@@ -12,7 +12,7 @@ namespace Aamio;
  */
 final class Http
 {
-    public const VERSION = '0.3.4';
+    public const VERSION = '0.3.5';
     public const USER_AGENT = 'aamio-php/' . self::VERSION;
 
     /**

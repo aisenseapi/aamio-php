@@ -10,7 +10,8 @@ declare(strict_types=1);
  *   aamio [--home DIR] [--host URL] [--tags a,b] [--no-archive] <command> ...
  *
  *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
- *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON]
+ *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] [--re SHA256]
+ *   trace [WHO] [--limit N]   (what was sent to one counterpart and what came back, as hashes)
  *   read [--wait N] [--limit N] [--max-bytes N]
  *   (--max-bytes is per channel, and one message larger than it still comes)
  *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
@@ -184,7 +185,14 @@ try {
             break;
         case 'send':
             $data = isset($opts['data']) ? json_decode((string) $opts['data'], true, 512, JSON_THROW_ON_ERROR) : null;
-            out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), is_array($data) ? $data : null));
+            out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), is_array($data) ? $data : null, null, isset($opts['re']) ? (string) $opts['re'] : null));
+            break;
+        case 'trace':
+            try {
+                out($runtime->trace(isset($args[1]) ? (string) $args[1] : null, isset($opts['limit']) ? (int) $opts['limit'] : 20));
+            } catch (\RuntimeException $error) {
+                fail($error->getMessage());
+            }
             break;
         case 'read':
             // attention carries what the read could not do. Without it an

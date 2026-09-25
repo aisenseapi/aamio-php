@@ -66,7 +66,7 @@ $check(($mcpDiscover['capabilities']['tools']['listChanged'] ?? null) === false 
 $check(($mcpAnswer($mcpServer, 'server/discover', [], null)['result']['supportedVersions'] ?? null) === $mcpSupported, 'a legacy client may ask too');
 
 $mcpListed = $mcpAnswer($mcpServer, 'tools/list')['result'] ?? [];
-$check(count($mcpListed['tools'] ?? []) === 22 && ($mcpListed['tools'][0]['name'] ?? null) === 'aamio_whoami', 'a modern tools/list has the twenty-two tools');
+$check(count($mcpListed['tools'] ?? []) === 23 && ($mcpListed['tools'][0]['name'] ?? null) === 'aamio_whoami', 'a modern tools/list has the twenty-two tools');
 // The shape the revision requires, not only the count.
 $check(($mcpListed['resultType'] ?? null) === 'complete' && ($mcpListed['cacheScope'] ?? null) === 'public' && ($mcpListed['ttlMs'] ?? 0) > 0, 'and it carries resultType, ttlMs and cacheScope, which 2026-07-28 requires on a list and a client of that revision refuses it without');
 $mcpShapeless = [];

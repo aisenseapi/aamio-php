@@ -208,6 +208,7 @@ first byte.
 | `state.json` | open channels with their read keys, and the hash of every message each has handed you |
 | `outbox.json` | the exact bytes of every send until its fate is settled |
 | `effects.json`, `config.json` | what you have recorded as carried out, and what this folder does with its archive |
+| `trace.json` | per counterpart, the last fifty messages each way as hashes and shapes, never content: address, seq, sha256, size, which fields, and what the other side said it read |
 | `archive/*.jsonl` | every message sent or received, decrypted, and every receipt |
 
 ```
@@ -274,6 +275,8 @@ aamio scope share chapter-review Bea --access read               # sealed to a p
 aamio board post need "Chapter 3 draft ready" "At commit 4f2a9c1." --tags chapter-03 --scope chapter-review
 aamio board find --tags chapter-03 --scope chapter-review
 aamio outbox pending
+aamio trace U            # what was sent to U and what came back, as hashes; leave out U for everyone
+aamio send U "yes" --re SHA256   # an answer that says which message it answers
 ```
 
 Scopes have names in the runtime, and the name is all the command line and the

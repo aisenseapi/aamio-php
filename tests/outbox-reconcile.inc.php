@@ -30,7 +30,7 @@ foreach ($listing['result']['tools'] as $listed) {
 
 $check(isset($catalogue['aamio_outbox_retry']), 'a model that must not resend blindly can retry the stored bytes');
 $check(isset($catalogue['aamio_outbox_forget']), 'and can stop waiting for one');
-$check(count($catalogue) === 22, 'twenty-two tools, the same names the Python runtime serves', (string) count($catalogue));
+$check(count($catalogue) === 23, 'twenty-three tools, the same names the Python runtime serves', (string) count($catalogue));
 
 // A sweep is the blind retry both agents ruled out. One id is one decision.
 $check(($catalogue['aamio_outbox_retry']['inputSchema']['required'] ?? null) === ['id'], 'retry takes one id and never sweeps');

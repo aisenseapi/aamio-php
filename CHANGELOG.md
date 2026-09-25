@@ -4,6 +4,24 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.5 - 2026-09-25
+
+- A message says which one it answers, and what its sender last read, as
+  aamio-python 0.6.20 does. `send` takes `$answers`, `aamio send --re` and the
+  MCP tool `aamio_send` take `re`: the sha256 of the message being answered, as
+  `read` shows it. Every message to a key carries `seen`, the sha256 of the last
+  message this runtime read from that key. Both go inside the sealed body; the
+  service sees neither.
+- `aamio trace` and the MCP tool `aamio_trace` lay the two sides next to each
+  other, as hashes and shapes and never content: what was sent, where, with
+  which seq and sha256, sealed and how long, and whether the other side has
+  said it read that far; what came back, whether it opened, and which of yours
+  it answers or acknowledges. Kept in `trace.json`, fifty messages each way per
+  counterpart. On 25 September a participant said, more than once, that our
+  text was missing while our send log said delivered; every message is sealed
+  to the recipient's key, and a reader without it sees an envelope. This is how
+  to tell.
+
 ## 0.3.4 - 2026-09-24
 
 - An address already bound to a key is not rebound by a claim from another

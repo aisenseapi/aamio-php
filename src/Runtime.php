@@ -72,6 +72,11 @@ final class Runtime
     public array $outbox;
     /** @var array<string, array> */
     public array $effects;
+    /**
+     * @var array<string, array> per key, what was sent and what came back, as
+     * hashes and shapes and never content; trace.json
+     */
+    public array $traces = [];
     public bool $archiveEnabled;
     /** What this home does with its archive: keep, off, or so many days. */
     public array $archivePolicy;
@@ -213,6 +218,10 @@ final class Runtime
         }
         $this->outbox = (array) $this->loadJson('outbox.json', []);
         $this->effects = (array) $this->loadJson('effects.json', []);
+        // Not a kept file: a trace that cannot be read starts again, and is no
+        // reason to stop.
+        $traces = $this->loadJson('trace.json', []);
+        $this->traces = is_array($traces) ? $traces : [];
         // Anything still pending was in flight when the last process stopped.
         // Whether it reached aamio is unknown, and it stays unknown until
         // somebody looks. Retrying is a decision, not a default.
@@ -1331,6 +1340,7 @@ final class Runtime
         if ($data !== null) {
             $body['data'] = $data;
         }
+        $body += $this->conversation((string) $post['key']);
         $envelope = $this->keys->seal((string) $post['key'], Codec::json($body));
         // An answer is a send, and goes the way a send goes: one outbox entry
         // written before the first attempt, and an outcome that tells refused
@@ -1513,6 +1523,7 @@ final class Runtime
             if ($note !== null) {
                 $body['text'] = $note;
             }
+            $body += $this->conversation($key);
             // The message that carries the address is a send, and goes through
             // the outbox like one. It was posted directly, and a refusal was a
             // bare error: on the command line a traceback, with the channel
@@ -1582,8 +1593,16 @@ final class Runtime
      * message did not land, with the outcome, and GateStop when the inbox
      * asks for something this client cannot do.
      */
-    public function send(string $to, ?string $text = null, ?array $data = null, ?string $replyTo = null): array
+    /**
+     * $answers is the sha256 of the message this one answers, as read shows it.
+     * It goes in the sealed body as re, so the other side can tell which of its
+     * messages this is about.
+     */
+    public function send(string $to, ?string $text = null, ?array $data = null, ?string $replyTo = null, ?string $answers = null): array
     {
+        if ($answers !== null && !self::isMessageHash($answers)) {
+            throw new \InvalidArgumentException('re is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it');
+        }
         if (Codec::isKey($to)) {
             $partner = $this->partnerByKey($to);
             if ($partner === null) {
@@ -1597,11 +1616,11 @@ final class Runtime
                 throw new \RuntimeException('no key known for address ' . $to . '; look the partner up or reply to a message');
             }
 
-            return $this->sendSealed($to, $key, null, $text, $data, $replyTo);
+            return $this->sendSealed($to, $key, null, $text, $data, $replyTo, null, $answers);
         }
         [$w, $key] = $this->addressFor($to);
 
-        return $this->sendSealed($w, $key, $to, $text, $data, $replyTo);
+        return $this->sendSealed($w, $key, $to, $text, $data, $replyTo, null, $answers);
     }
 
     /**
@@ -1610,7 +1629,7 @@ final class Runtime
      * an address given as it is. $archivedData stands in for $data in the
      * archive, for a message carrying what no file should.
      */
-    private function sendSealed(string $w, string $key, ?string $partner, ?string $text = null, ?array $data = null, ?string $replyTo = null, ?array $archivedData = null): array
+    private function sendSealed(string $w, string $key, ?string $partner, ?string $text = null, ?array $data = null, ?string $replyTo = null, ?array $archivedData = null, ?string $answers = null): array
     {
         // What the inbox asks of writers is read before anything is stored,
         // with how long it still takes writes, so work that would not be done
@@ -1634,6 +1653,7 @@ final class Runtime
         if ($data !== null) {
             $body['data'] = $data;
         }
+        $body += $this->conversation($key, $answers);
         $plaintext = Codec::json($body);
         $envelope = $this->keys->seal($key, $plaintext);
         $entry = $this->outboxAdd($w, $key, $envelope, $body);
@@ -1694,6 +1714,8 @@ final class Runtime
             'w' => $w, 'to_key' => $key, 'envelope' => $envelope,
             'summary' => array_intersect_key($body, array_flip(['post', 'reply_to', 'channel'])),
             'created_at' => time(), 'attempts' => 0, 'status' => 'sending', 'last_status' => null, 'replaces' => $replaces,
+            // For the trace: what the message was made of, without what it said.
+            'shape' => self::messageShape($body, $envelope),
         ];
         $this->outbox[$entry['id']] = $entry;
         $this->saveOutbox();
@@ -1782,6 +1804,7 @@ final class Runtime
             $this->outbox[$id]['status'] = 'attempted';
         }
         $this->saveOutbox();
+        $this->traceSent($this->outbox[$id], $status, $result);
 
         return [$status, $result];
     }
@@ -2228,6 +2251,12 @@ final class Runtime
                     $this->bindClaimedAddress($channel, $entry, $field, $body[$field] ?? null, $from);
                 }
             }
+            // And the trace: what came from this key, and what it says it read of
+            // ours. Verified only, since an unsigned message can claim to be from
+            // anyone and to have read anything.
+            if ($entry['verified'] === true && $from) {
+                $this->traceReceived($channel, $entry);
+            }
             $channel->received[] = $entry;
             // Received, readable, archived and handled are four different things.
             try {
@@ -2310,6 +2339,286 @@ final class Runtime
         }
         $entry['binding_conflicts'][] = ['field' => $field, 'address' => $address, 'claimed_by' => $key, 'bound_to' => $bound];
         $this->note($channel, 'binding_conflict', 'message ' . $entry['seq'] . ' names ' . $address . ' as ' . $field . ', signed by ' . ($this->nameForKey($key) ?? $key) . ', and that address is already bound to ' . ($this->nameForKey($bound) ?? $bound) . '. The binding is kept: a signature proves who made the claim, not who holds the address. Reach the claimant through the partner list or a fresh handoff.', [(int) $entry['seq']]);
+    }
+
+    // ------------------------------------------------------------- trace --
+    //
+    // A conversation that goes wrong is hard to take apart from one side. On 25
+    // September 2026 a participant answered, more than once, that the text of our
+    // messages was missing, while the send log said non-empty and delivered. Both
+    // can be true: every message this runtime sends is sealed to the key it goes
+    // to, and a reader without that key sees an envelope and no text. So each
+    // message now says, inside the sealed body, which message it answers (re) and
+    // the last one this side read from the other (seen), and trace() lays the two
+    // sides next to each other as hashes: the sha256 the service stored, byte for
+    // byte, is the one the other side read, or it is not. The same as aamio-python.
+
+    public const TRACE_KEEP = 50;
+    public const TRACE_KEYS = 100;
+
+    /** The sha256 of a message as the service gives it: 64 lowercase hex characters. */
+    public static function isMessageHash(mixed $value): bool
+    {
+        return is_string($value) && preg_match('/^[0-9a-f]{64}$/D', $value) === 1;
+    }
+
+    /** What a message was made of, for the trace, without what it said. */
+    private static function messageShape(array $body, string $envelope): array
+    {
+        $fields = array_keys($body);
+        sort($fields);
+        $shape = ['bytes' => strlen($envelope), 'fields' => $fields, 'text_chars' => is_string($body['text'] ?? null) ? (int) preg_match_all('/./us', $body['text']) : null];
+        foreach (['re', 'seen'] as $field) {
+            if (self::isMessageHash($body[$field] ?? null)) {
+                $shape[$field] = $body[$field];
+            }
+        }
+
+        return $shape;
+    }
+
+    /** The record for one key, made when first needed and kept to a bound. */
+    private function &traceBook(string $key): array
+    {
+        if (!is_array($this->traces[$key] ?? null)) {
+            $this->traces[$key] = ['sent' => [], 'received' => [], 'last_read' => null, 'seen_by_them' => null];
+        }
+        $this->traces[$key]['active'] = time();
+        if (count($this->traces) > self::TRACE_KEYS) {
+            $by = array_map(static fn ($book): int => (int) (is_array($book) ? ($book['active'] ?? 0) : 0), $this->traces);
+            asort($by);
+            foreach (array_slice(array_keys($by), 0, count($this->traces) - self::TRACE_KEYS) as $stale) {
+                if ($stale !== $key) {
+                    unset($this->traces[$stale]);
+                }
+            }
+        }
+
+        return $this->traces[$key];
+    }
+
+    /** Written when it changes. A trace that cannot be written costs the trace and nothing else. */
+    private function saveTrace(): void
+    {
+        try {
+            $this->saveJson('trace.json', $this->traces === [] ? new \stdClass() : $this->traces);
+        } catch (\Throwable $error) {
+            ($this->log)('trace.json: ' . $error->getMessage());
+        }
+    }
+
+    /** The two fields a message carries about the conversation it is part of. */
+    private function conversation(string $key, ?string $answers = null): array
+    {
+        $fields = [];
+        if ($answers !== null) {
+            $fields['re'] = $answers;
+        }
+        $last = $this->traces[$key]['last_read'] ?? null;
+        if (is_array($last) && self::isMessageHash($last['sha256'] ?? null)) {
+            $fields['seen'] = $last['sha256'];
+        }
+
+        return $fields;
+    }
+
+    /** One answer to one send: what went where, as the service stored it. */
+    private function traceSent(array $entry, int $status, mixed $result): void
+    {
+        $key = (string) ($entry['to_key'] ?? '');
+        if ($key === '') {
+            return;
+        }
+        $stored = is_array($result) && $status === 201;
+        $record = [
+            'message_id' => $entry['id'] ?? null,
+            'at' => time(),
+            'w' => $entry['w'] ?? null,
+            'status' => $status,
+            'outcome' => $entry['status'] ?? null,
+            'seq' => $stored ? ($result['seq'] ?? null) : null,
+            'sha256' => $stored ? ($result['sha256'] ?? null) : null,
+            'sealed' => true,
+        ] + (is_array($entry['shape'] ?? null) ? $entry['shape'] : []);
+        $book = &$this->traceBook($key);
+        $kept = array_values(array_filter($book['sent'], static fn (array $r): bool => ($r['message_id'] ?? null) !== $record['message_id']));
+        $kept[] = $record;
+        $book['sent'] = array_slice($kept, -self::TRACE_KEEP);
+        unset($book);
+        $this->saveTrace();
+    }
+
+    /** One verified message from a key, as it arrived here. */
+    private function traceReceived(Channel $channel, array $entry): void
+    {
+        $key = (string) $entry['from_key'];
+        $body = is_array($entry['body'] ?? null) ? $entry['body'] : [];
+        $re = self::isMessageHash($body['re'] ?? null) ? $body['re'] : null;
+        $seen = self::isMessageHash($body['seen'] ?? null) ? $body['seen'] : null;
+        $book = &$this->traceBook($key);
+        $digest = $entry['sha256'] ?? null;
+        foreach ($book['received'] as $had) {
+            if ($digest !== null && ($had['sha256'] ?? null) === $digest) {
+                unset($book);
+
+                return;
+            }
+        }
+        $fields = array_keys($body);
+        sort($fields);
+        $book['received'][] = [
+            'at' => $entry['at'] ?? null,
+            'channel' => $channel->label,
+            'w' => $channel->w,
+            'seq' => $entry['seq'] ?? null,
+            'sha256' => $digest,
+            'encrypted' => $entry['encrypted'] ?? null,
+            'format' => $entry['format'] ?? null,
+            'error' => $entry['error'] ?? null,
+            'fields' => $fields,
+            'text_chars' => is_string($body['text'] ?? null) ? (int) preg_match_all('/./us', $body['text']) : null,
+            're' => $re,
+            'seen' => $seen,
+        ];
+        $book['received'] = array_slice($book['received'], -self::TRACE_KEEP);
+        if ($digest !== null) {
+            $book['last_read'] = ['sha256' => $digest, 'seq' => $entry['seq'] ?? null, 'w' => $channel->w, 'at' => $entry['at'] ?? null];
+        }
+        if ($seen !== null) {
+            $book['seen_by_them'] = ['sha256' => $seen, 'at' => time(), 'in' => ['seq' => $entry['seq'] ?? null, 'sha256' => $digest]];
+        }
+        unset($book);
+        $this->saveTrace();
+    }
+
+    /**
+     * What was sent to one counterpart and what came back, as hashes and shapes.
+     * $who is a partner name, a key or a write address; null gives one line per
+     * counterpart. Nothing here is content: the sha256 is what the service stored,
+     * byte for byte, so the other side can hold its own trace against this one.
+     */
+    public function trace(?string $who = null, int $limit = 20): array
+    {
+        $limit = max(1, min($limit, self::TRACE_KEEP));
+        if ($who === null) {
+            $everyone = [];
+            foreach ($this->traces as $key => $book) {
+                if (!is_array($book)) {
+                    continue;
+                }
+                $sent = $book['sent'] ?? [];
+                $received = $book['received'] ?? [];
+                $everyone[] = [
+                    'with' => $this->nameForKey((string) $key) ?? (string) $key,
+                    'key' => (string) $key,
+                    'sent' => count($sent),
+                    'received' => count($received),
+                    'last_sent_at' => $sent === [] ? null : end($sent)['at'],
+                    'last_received_at' => $received === [] ? null : end($received)['at'],
+                    'unacknowledged' => count($this->unacknowledged($book)),
+                ];
+            }
+            usort($everyone, static fn (array $x, array $y): int => max($y['last_sent_at'] ?? 0, $y['last_received_at'] ?? 0) <=> max($x['last_sent_at'] ?? 0, $x['last_received_at'] ?? 0));
+
+            return ['counterparts' => $everyone, 'note' => 'Name one with who for the messages themselves, as hashes.'];
+        }
+        $key = $this->traceKey($who);
+        $book = $key === null ? null : ($this->traces[$key] ?? null);
+        if (!is_array($book)) {
+            throw new \RuntimeException('nothing sent to or received from ' . $who . ' is recorded here');
+        }
+        $mine = [];
+        foreach ($book['sent'] ?? [] as $record) {
+            if (is_string($record['sha256'] ?? null)) {
+                $mine[$record['sha256']] = $record;
+            }
+        }
+        $acknowledged = $this->acknowledged($book);
+        $sent = [];
+        foreach (array_slice($book['sent'] ?? [], -$limit) as $record) {
+            $sent[] = $record + ['seen_by_them' => $acknowledged[$record['message_id'] ?? ''] ?? null];
+        }
+        $received = [];
+        foreach (array_slice($book['received'] ?? [], -$limit) as $record) {
+            foreach (['re' => 'answers', 'seen' => 'acknowledges'] as $field => $as) {
+                if (is_string($record[$field] ?? null)) {
+                    $ours = $mine[$record[$field]] ?? null;
+                    $record[$as] = $ours !== null ? ['seq' => $ours['seq'] ?? null, 'sha256' => $ours['sha256'], 'at' => $ours['at'] ?? null] : ['sha256' => $record[$field], 'note' => 'not one of the messages recorded here'];
+                }
+            }
+            $received[] = $record;
+        }
+        $unacknowledged = $this->unacknowledged($book);
+
+        return [
+            'with' => $this->nameForKey($key) ?? $key,
+            'key' => $key,
+            'sent' => $sent,
+            'received' => $received,
+            'seen_by_them' => $book['seen_by_them'] ?? null,
+            'unacknowledged' => array_map(static fn (array $r): ?string => $r['message_id'] ?? null, $unacknowledged),
+            'note' => $this->traceNote($book, $unacknowledged),
+        ];
+    }
+
+    /** A partner name, a key or a write address, as the key it stands for. */
+    private function traceKey(string $who): ?string
+    {
+        $partner = $this->partnerByName($who);
+        if ($partner !== null) {
+            return (string) $partner['key'];
+        }
+        if (Codec::isKey($who)) {
+            return $who;
+        }
+
+        return $this->peers[$who] ?? null;
+    }
+
+    /** message_id => whether the other side has said it read that far: true, false, or null when nothing said. */
+    private function acknowledged(array $book): array
+    {
+        $sent = $book['sent'] ?? [];
+        $seen = $book['seen_by_them']['sha256'] ?? null;
+        $out = [];
+        $at = null;
+        if (is_string($seen)) {
+            foreach ($sent as $i => $record) {
+                if (($record['sha256'] ?? null) === $seen) {
+                    $at = $i;
+                }
+            }
+        }
+        foreach ($sent as $i => $record) {
+            // Nothing said, or a message older than this record holds: nothing
+            // here can be said to be read.
+            $out[$record['message_id'] ?? ''] = $at === null ? null : $i <= $at;
+        }
+
+        return $out;
+    }
+
+    private function unacknowledged(array $book): array
+    {
+        $acknowledged = $this->acknowledged($book);
+
+        return array_values(array_filter($book['sent'] ?? [], static fn (array $r): bool => ($r['status'] ?? null) === 201 && ($acknowledged[$r['message_id'] ?? ''] ?? null) === false));
+    }
+
+    private function traceNote(array $book, array $unacknowledged): string
+    {
+        $sent = $book['sent'] ?? [];
+        $received = $book['received'] ?? [];
+        if ($sent !== [] && empty($book['seen_by_them'])) {
+            $said = $received !== [] ? 'Nothing from them has said what it read of yours' : 'Nothing has come back from them';
+
+            return $said . '. A client that does not send seen, or cannot open sealed messages, says nothing: every message here is sealed to their key, so a reader without it sees an envelope and no text. The sha256 of each message is what the service stored, byte for byte; ask them for the sha256 they read.';
+        }
+        if ($unacknowledged !== []) {
+            return count($unacknowledged) . ' message(s) delivered after the last one they said they read. That is not lost: they may not have read yet.';
+        }
+
+        return $sent !== [] ? 'Everything delivered is acknowledged as far as they have said.' : 'Nothing sent to them is recorded here.';
     }
 
     private function note(Channel $channel, string $state, string $what, ?array $seqs = null): void
