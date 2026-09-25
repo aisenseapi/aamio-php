@@ -278,7 +278,7 @@ try {
     $stopped = true;
 }
 $traced = $t->trace('U');
-$check($outcomes === ['refused', 'attempted'] && $stopped && array_column($traced['sent'], 'outcome') === ['refused', 'attempted'], 'R5: turned away and attempted each have a row, and a send the gate stopped before anything left has none');
+$check($outcomes === ['refused', 'attempted'] && count($fake->threads[$uInbox->w]['messages']) === 1 && $stopped && array_column($traced['sent'], 'outcome') === ['refused', 'attempted'], 'R5: turned away and attempted each have a row, only the attempted one was stored, and a send the gate stopped before anything left has none');
 $check(str_starts_with($traced['note'], 'No message here has an answer from the service that confirms it was stored.') && !str_contains($traced['note'], 'stored none') && str_contains($traced['note'], 'For 1 no answer settled whether the service stored it') && str_contains($traced['note'], 'The service turned away 1'), 'and the note counts each for what it is', $traced['note']);
 $t->close();
 $u->close();
