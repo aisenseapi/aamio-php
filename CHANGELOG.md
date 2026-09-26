@@ -4,6 +4,20 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.6 - 2026-09-26
+
+- A failure that only had a logger had no reader. `$this->log` does nothing
+  unless the caller sets it, so a trace that was never written, an archive that
+  was never pruned and a privacy check that objected all passed in silence.
+  They reach `attentionTaken()` now, and still the log.
+- A trace failure also lands on the answer `send()` and `boardAnswer()` return,
+  as `trace_error`, because attention has to be fetched and a script that sends
+  once and exits never fetches it. The line comes back out of `traceSafely`
+  rather than being written into something shared, since two sends can be in
+  flight at once.
+- What happened the time this was found is still not established. This closes a
+  way for a failure to go unseen; it does not close that case.
+
 ## 0.3.5 - 2026-09-25
 
 - A message says which one it answers, and the last one its sender read and
