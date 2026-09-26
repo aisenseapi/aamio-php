@@ -157,7 +157,14 @@ final class Runtime
             // `aamio doctor` and `aamio init`.
             $found = Storage::check($this->home);
             foreach (array_slice($found['findings'], 0, 5) as $finding) {
-                ($this->log)('WARNING: ' . ($finding['path'] ?? $this->home) . ': ' . $finding['problem'] . '. ' . ($found['fix'] ?? ''));
+                // Who can read the decrypted archive is not a detail to mention once
+                // into a logger a caller may never have set. It goes where every
+                // other thing a caller has to hear about goes.
+                $this->noteTrouble(
+                    'home',
+                    'unsafe',
+                    ($finding['path'] ?? $this->home) . ': ' . $finding['problem'] . '. ' . ($found['fix'] ?? '')
+                );
             }
         }
         $this->prune();
@@ -172,7 +179,14 @@ final class Runtime
         try {
             $gone = Storage::prune($this->home, $this->archivePolicy);
         } catch (\Throwable $error) {
-            ($this->log)('archive not pruned: ' . $error->getMessage());
+            // The archive keeps growing, in plain text, and the policy meant to
+            // bound it did not run.
+            $this->noteTrouble(
+                'archive',
+                'unpruned',
+                'the archive was not pruned: ' . $error->getMessage()
+                . '. It keeps growing, and what is in it stays readable to whoever can read this folder.'
+            );
 
             return;
         }
@@ -1368,6 +1382,11 @@ final class Runtime
         if (($entry['gate_notes'] ?? []) !== []) {
             $answer['notes'] = $entry['gate_notes'];
         }
+        // The call this whole round came from: answer a post and exit, with no
+        // logger and no second call to fetch attention.
+        if (($entry['trace_error'] ?? null) !== null) {
+            $answer['trace_error'] = $entry['trace_error'];
+        }
         if ($ownPost) {
             $answer['warning'] = 'You answered your own post. The answer is sealed to your own key, so it reaches nobody but you.';
         }
@@ -1696,6 +1715,9 @@ final class Runtime
         if ($archiveError !== null) {
             $sent['archive_error'] = $archiveError;
         }
+        if (($entry['trace_error'] ?? null) !== null) {
+            $sent['trace_error'] = $entry['trace_error'];
+        }
 
         return $sent;
     }
@@ -1805,7 +1827,13 @@ final class Runtime
         }
         $this->saveOutbox();
         // After the outcome is saved, and unable to change it.
-        $this->traceSafely('sent', fn () => $this->traceSent($this->outbox[$id], $status, $result));
+        // A script that sends once and exits never fetches attention, so the
+        // failure rides on the record this send is about. Codex, 26 September.
+        $traceError = $this->traceSafely('sent', fn (): ?string => $this->traceSent($this->outbox[$id], $status, $result));
+
+        if ($traceError !== null) {
+            $this->outbox[$id]['trace_error'] = $traceError;
+        }
 
         return [$status, $result];
     }
@@ -2257,7 +2285,11 @@ final class Runtime
             // anyone and to have read anything. Whatever goes wrong in the trace
             // costs the trace, never this batch.
             if ($entry['verified'] === true && $from) {
-                $this->traceSafely('received', fn () => $this->traceReceived($channel, $entry));
+                $received = $this->traceSafely('received', fn (): ?string => $this->traceReceived($channel, $entry));
+
+                if ($received !== null) {
+                    $entry['trace_error'] = $received;
+                }
             }
             $channel->received[] = $entry;
             // Received, readable, archived and handled are four different things.
@@ -2603,25 +2635,67 @@ final class Runtime
     }
 
     /** Written when it changes. A trace that cannot be written costs the trace and nothing else. */
-    private function saveTrace(): void
+    private function saveTrace(): ?string
     {
         try {
             $this->saveJson('trace.json', $this->traces === [] ? new \stdClass() : $this->traces);
         } catch (\Throwable $error) {
-            ($this->log)('trace.json: ' . $error->getMessage());
+            return $this->untraced('trace.json: ' . $error->getMessage());
         }
+
+        return null;
     }
 
-    /** The trace is diagnostics: whatever goes wrong in it costs the trace, never the send or the read it records. */
-    private function traceSafely(string $what, callable $update): void
+    /**
+     * A trace that did not happen, said in the two places a caller may be looking.
+     *
+     * Costing the trace is the contract and it still holds. Costing it in
+     * silence was not: the logger is a no-op unless the caller set one, and a
+     * failure with no reader is a failure nobody can act on. That is one way a
+     * trace goes missing without a word; it is not established that it was the
+     * way it happened the time this was found, so this closes the silence
+     * without claiming to have closed the case.
+     *
+     * attention has to be fetched, and a script that sends once and exits never
+     * fetches it, so the line is also returned for the caller to put on the
+     * answer that call is about to hand back.
+     *
+     * The line reaches the log through noteTrouble, which puts its channel in
+     * front of it, as it does for every other note.
+     */
+    private function untraced(string $line): string
     {
         try {
-            $update();
-        } catch (\Throwable $error) {
+            $this->noteTrouble(
+                'trace',
+                'untraced',
+                $line . ' The sends and reads themselves are unaffected; what is behind is the record of them.'
+            );
+        } catch (\Throwable) {
+            // Never at the cost of the thing being traced, even here.
             try {
-                ($this->log)('trace ' . $what . ': not recorded: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage());
+                ($this->log)($line);
             } catch (\Throwable) {
             }
+        }
+
+        return $line;
+    }
+
+    /**
+     * The trace is diagnostics: whatever goes wrong in it costs the trace, never
+     * the send or the read it records.
+     *
+     * The line comes back out rather than being written into something passed
+     * in: the update is a closure with no arguments here, and a field on the
+     * runtime would belong to whichever send finished last.
+     */
+    private function traceSafely(string $what, callable $update): ?string
+    {
+        try {
+            return $update();
+        } catch (\Throwable $error) {
+            return $this->untraced('trace ' . $what . ': not recorded: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage());
         }
     }
 
@@ -2646,11 +2720,11 @@ final class Runtime
     }
 
     /** One answer to one send: what went where, as the service stored it. */
-    private function traceSent(array $entry, int $status, mixed $result): void
+    private function traceSent(array $entry, int $status, mixed $result): ?string
     {
         $key = (string) ($entry['to_key'] ?? '');
         if ($key === '') {
-            return;
+            return null;
         }
         $stored = is_array($result) && $status === 201;
         $record = self::traceRow([
@@ -2668,7 +2742,7 @@ final class Runtime
         $kept[] = $record;
         $book['sent'] = array_slice($kept, -self::TRACE_KEEP);
         unset($book);
-        $this->saveTrace();
+        return $this->saveTrace();
     }
 
     /**
@@ -2679,10 +2753,10 @@ final class Runtime
      * that merely arrived. A replay is neither recorded nor read: its first
      * arrival was, and an old message sent again must not move seen back to it.
      */
-    private function traceReceived(Channel $channel, array $entry): void
+    private function traceReceived(Channel $channel, array $entry): ?string
     {
         if (($entry['replay'] ?? false) === true) {
-            return;
+            return null;
         }
         $key = (string) $entry['from_key'];
         $opened = in_array($entry['format'] ?? null, ['text', 'json'], true) && empty($entry['error']);
@@ -2709,7 +2783,7 @@ final class Runtime
             if ($row['sha256'] !== null && ($had['sha256'] ?? null) === $row['sha256']) {
                 unset($book);
 
-                return;
+                return null;
             }
         }
         $book['received'][] = $row;
@@ -2718,7 +2792,7 @@ final class Runtime
             $book['last_read'] = self::traceRow(['sha256' => $entry['sha256'], 'seq' => $entry['seq'] ?? null, 'w' => $channel->w, 'at' => $entry['at'] ?? null], self::TRACE_READ_FIELDS);
         }
         unset($book);
-        $this->saveTrace();
+        return $this->saveTrace();
     }
 
     /**

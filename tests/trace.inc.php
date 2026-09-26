@@ -340,15 +340,27 @@ $logged = [];
 $capture = static function (string $line) use (&$logged): void {
     $logged[] = $line;
 };
+
+// What a caller who wired no logger at all is told. The log above is the
+// other half; this is the half that needs nobody to have set anything up.
+$untraced = static function (Runtime $runtime): ?string {
+    foreach ($runtime->attentionTaken() as $note) {
+        if ($note['channel'] === 'trace' && $note['state'] === 'untraced') {
+            return $note['what'];
+        }
+    }
+
+    return null;
+};
 [$t, $u, $tInbox, $uInbox, $homes] = $tracePair('unsaved', $capture);
 mkdir($homes['t'] . DIRECTORY_SEPARATOR . 'trace.json');
 $sent = $t->send($uInbox->w, 'one');
-$check(Runtime::isMessageHash($sent['sha256'] ?? null) && count(array_filter($logged, static fn (string $line): bool => str_starts_with($line, 'trace.json: '))) > 0, 'R3: a trace that cannot be saved costs the trace: the send comes back, and the log says so');
+$check(Runtime::isMessageHash($sent['sha256'] ?? null) && count(array_filter($logged, static fn (string $line): bool => str_contains($line, 'trace.json: '))) > 0 && $untraced($t) !== null && str_contains( ( string ) ( $sent['trace_error'] ?? '' ), 'trace.json' ), 'R3: a trace that cannot be saved costs the trace: the send comes back, and the log, attention and the answer it hands back all say so');
 $t->traces[$u->keys->public] = ['sent' => new \stdClass(), 'received' => new \stdClass(), 'last_read' => null, 'active' => 0];
 $second = $t->send($uInbox->w, 'two');
-$check(Runtime::isMessageHash($second['sha256'] ?? null) && count($fake->threads[$uInbox->w]['messages']) === 2 && count(array_filter($logged, static fn (string $line): bool => str_starts_with($line, 'trace sent: not recorded: '))) > 0, 'a trace that cannot be updated costs the trace: the send comes back, sent once');
+$check(Runtime::isMessageHash($second['sha256'] ?? null) && count($fake->threads[$uInbox->w]['messages']) === 2 && count(array_filter($logged, static fn (string $line): bool => str_contains($line, 'trace sent: not recorded: '))) > 0 && $untraced($t) !== null && ( $second['trace_error'] ?? null ) !== null, 'a trace that cannot be updated costs the trace: the send comes back, sent once, and the answer carries what was missed');
 $u->traces[$t->keys->public] = ['sent' => new \stdClass(), 'received' => new \stdClass(), 'last_read' => null, 'active' => 0];
 [, $entries] = $u->poll($uInbox);
-$check($texts($entries) === ['one', 'two'] && count(array_filter($logged, static fn (string $line): bool => str_starts_with($line, 'trace received: not recorded: '))) > 0, 'and a read hands over the whole batch');
+$check($texts($entries) === ['one', 'two'] && count(array_filter($logged, static fn (string $line): bool => str_contains($line, 'trace received: not recorded: '))) > 0 && $untraced($u) !== null, 'and a read hands over the whole batch, with attention saying the trace was missed');
 $t->close();
 $u->close();
