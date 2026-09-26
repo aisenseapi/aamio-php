@@ -13,6 +13,14 @@ namespace Aamio;
 final class McpServer
 {
     /**
+     * What a read hands over when the caller names no budget.
+     *
+     * One message's maximum, the same number the hosted endpoint and the Python
+     * client use. Fifty messages of that size is more than the conversation
+     * calling this can carry, and the tool said so while handing it over.
+     */
+    public const DEFAULT_MAX_BYTES = 65536;
+    /**
      * From 2026-07-28 there is no handshake: every request names its revision
      * in params._meta, and every result carries resultType. Before it,
      * initialize settles the revision, and the reference SDK's empty result
@@ -132,7 +140,10 @@ final class McpServer
                     return self::resultOf($r->trace(self::text($a, 'who'), isset($a['limit']) ? self::number($a, 'limit') : 20));
                 case 'aamio_read':
                     $asked = self::number($a, 'limit');
-                    $budget = isset($a['max_bytes']) ? self::number($a, 'max_bytes') : null;
+                    // Fifty messages of 65536 bytes is more than the conversation
+                    // calling this can carry, and a caller that named no budget was
+                    // the one who found out. Same number as the other two surfaces.
+                    $budget = isset($a['max_bytes']) ? self::number($a, 'max_bytes') : self::DEFAULT_MAX_BYTES;
 
                     // 512 is the floor because one message can be 65536 bytes and a
                     // signed message cannot be cut in half and still verify. Under the

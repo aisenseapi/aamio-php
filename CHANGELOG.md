@@ -4,6 +4,13 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.7 - 2026-09-26
+
+- `aamio_read` sends a byte budget whether or not the caller named one, the same
+  65536 the hosted endpoint and the Python client use. Fifty messages of that
+  size is more than the conversation calling it can carry, and a caller that
+  named nothing was the one who found out.
+
 ## 0.3.6 - 2026-09-26
 
 - A failure that only had a logger had no reader. `$this->log` does nothing

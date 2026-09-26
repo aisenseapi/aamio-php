@@ -100,6 +100,14 @@ $wireChannel->seen = [];
 $wireMcp = (new McpServer($a))->dispatch('aamio_read', ['max_bytes' => 2000]);
 $check(($wireMcp['isError'] ?? true) === false && ($lastHeaders()['X-Max-Bytes'] ?? null) === '2000', 'and a model that sets one reaches the service with it, rather than being quietly ignored', json_encode($lastHeaders()));
 
+// 26 September 2026: the budget landed on the Python client and nowhere else, so
+// the same tool was stricter there than here. A caller that names nothing is the
+// one who found out, and this follows the default to the header it becomes.
+$wireChannel->after = 0;
+$wireChannel->seen = [];
+$wirePlain = (new McpServer($a))->dispatch('aamio_read', []);
+$check(($wirePlain['isError'] ?? true) === false && ($lastHeaders()['X-Max-Bytes'] ?? null) === (string) McpServer::DEFAULT_MAX_BYTES, 'a read that names no budget still sends one, the same number the other two surfaces use', json_encode($lastHeaders()));
+
 $wireSmall = (new McpServer($a))->dispatch('aamio_read', ['max_bytes' => 100]);
 $check(($wireSmall['isError'] ?? false) === true && str_contains((string) ($wireSmall['structuredContent']['fix'] ?? ''), '65536'), 'a budget too small to answer is refused with what one message can weigh', json_encode($wireSmall['structuredContent'] ?? null));
 
