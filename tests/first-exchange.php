@@ -20,9 +20,10 @@ declare(strict_types=1);
  *
  * It writes to the service: about ten threads, one presence record per
  * runtime and a few messages, and it closes the threads at the end. The
- * service takes thirty new threads a minute from one client, so leave a minute
- * between runs. It is a smoke test a person starts before a release, not a
- * gate: a service that is down is not a failed release.
+ * service takes thirty opens and closes of threads a minute from one client,
+ * so each of those waits its turn, and a run started right after another one
+ * waits for the room it needs. It is a smoke test a person starts before a
+ * release, not a gate: a service that is down is not a failed release.
  *
  * This runtime has no listener, so a read spends its wait on the first
  * channel. Where mail is expected on a private thread the test reads with no
@@ -30,6 +31,7 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/bootstrap.php';
+require __DIR__ . '/live-pace.inc.php';
 
 use Aamio\Client;
 use Aamio\Runtime;
@@ -38,6 +40,8 @@ use Aamio\SendFailed;
 ini_set('display_errors', 'stderr');
 
 $host = $argv[1] ?? Client::DEFAULT_HOST;
+// Every open and close of a thread waits its turn: live-pace.inc.php says why.
+LivePace::install($host);
 $passed = 0;
 $failed = 0;
 $check = static function (bool $ok, string $label, string $detail = '') use (&$passed, &$failed): void {

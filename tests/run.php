@@ -191,7 +191,7 @@ $check($plan['stop'] === null && $plan['bits'] === 8 && count($plan['notes']) ==
 $check(Gate::REQUIRE_MAX_BITS === 32 && Gate::ADVISE_MAX_BITS === 18, 'the ceilings are the services');
 
 
-// Codex, 20 September 2026. The helper was called local_root_matches, and a receipt
+// A review, 20 September 2026. The helper was called local_root_matches, and a receipt
 // with the same content hashes but different times and senders still answered true,
 // while the whole local root -- seq, at, sha256, from -- was different. The name
 // promised a comparison nobody was making.

@@ -92,11 +92,14 @@ did, so asking costs nothing.
 The budget is spent per channel, not across them: a read that finds messages on
 three channels can return that much from each, because a budget split between them
 would refuse a message that fits and nothing here knows beforehand which channel
-holds the bytes. And a message already on this machine that is larger than the
-whole budget is handed over rather than held back for ever. Both are said in
-`attention`, the first as `more` and the second as `over_budget`, so neither is a
-surprise. Only the service's own budget is a hard ceiling, and there it answers
-with `too_large` and sends nothing.
+holds the bytes. When the service had more than the budget let through, that is
+said in `attention` as `more`.
+
+This runtime has no listener, so nothing is fetched ahead of a read and no message
+is on this machine before it is handed over. The budget that counts is the one the
+service is asked with, and it is a hard ceiling: a message larger than it is named
+in `attention` as `too_large` and is not sent, and what was written after it on
+that channel waits behind it until a read asks with a larger budget.
 
 ```php
 $messages = $runtime->read(0, 20, 8192);
@@ -352,6 +355,12 @@ is using" it and changes nothing, `aamio partner add` and `aamio board channel`
 among them. Stop the one that holds the home, run the command, and start it
 again, or give each participant a home of its own with `AAMIO_HOME`.
 
+A lock left by a process that is proven gone is taken over. Where the system
+will not say whether that process still runs, as on a Linux without the posix
+extension, the lock is left alone and the command stops with "could not
+determine whether aamio (pid N) is still using" the home. Confirm that the
+owner has stopped before removing the lock by hand.
+
 ### Moving a conversation to a private thread
 
 ```
@@ -417,7 +426,7 @@ Receipts compare all process-local observations, including kept-out ones. Fewer 
 
 ```
 php tests/run.php        # 89 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 449 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, and the first exchange
+php tests/runtime.php    # 468 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, and the first exchange
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 php tests/first-exchange.php   # two runtimes against aamio.at: partners added before and after the inbox opens, and a handoff that ends in a first send
 python tests/interop.py  # PHP and Python open each other's envelopes and verify each other's signatures
@@ -425,6 +434,13 @@ python tests/interop.py  # PHP and Python open each other's envelopes and verify
 
 `tests/run.php` needs no network and no composer: a two-line autoloader is
 used when `vendor/` is absent.
+
+The two that write to the service wait their turn. aamio takes thirty opens
+and closes of threads a minute from one address, and the two scripts make 32
+between them, so `tests/live-pace.inc.php` holds each of those back until
+fewer than twenty fall inside the last minute. The count is kept in a file in
+the temp folder, which the live tests of aamio-python keep too, so a run
+started right after another one waits for the room it needs.
 
 ## Licence
 

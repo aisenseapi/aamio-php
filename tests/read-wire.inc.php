@@ -113,7 +113,7 @@ $check(($wireSmall['isError'] ?? false) === true && str_contains((string) ($wire
 
 $check(array_key_exists('read-limits', Compat::USES), 'and doctor stops calling read-limits an unknown capability, three releases after this client could have used it');
 
-// Codex, 20 September 2026, on the budget added the same day. The service
+// A review on 20 September 2026, of the budget added the same day. The service
 // answers a byte budget honestly: whole messages only, more when something was
 // left, too_large naming a message that does not fit on its own. This runtime
 // looked at neither field, so a thread holding one 70 000-byte message read at
@@ -167,7 +167,7 @@ foreach ($fake->seen as $call) {
 }
 $check($resetHeaders !== [] && !in_array('none', $resetHeaders, true), 'a re-read after a thread reset keeps the byte budget the caller asked for', implode(' / ', $resetHeaders));
 
-// Codex, 20 September 2026, against published 0.2.14. The service said it had
+// A review on 20 September 2026, against published 0.2.14. The service said it had
 // more than the budget allowed, the runtime wrote it down, and nothing ever told
 // the caller: a read that stopped early looked exactly like one that finished.
 $heldW = Address::w(Address::newId());
@@ -200,7 +200,7 @@ $cliOut = [];
 $cliHelp = implode(' ', $cliOut);
 $check(str_contains($cliHelp, '--limit') && str_contains($cliHelp, '--max-bytes'), 'the command line offers the two options its README says it takes', $cliHelp === '' ? 'no help output' : 'neither is in the help');
 
-// Codex, 20 September 2026. A 500 set the status to refused beside a note saying
+// A review, 20 September 2026. A 500 set the status to refused beside a note saying
 // the message may have been stored, and refused is not a status outboxPending
 // shows: the one kind of message that most needs a decision was the one kind that
 // did not appear on the list. And a 410 after an attempt that got no answer was
@@ -278,7 +278,7 @@ $saidNo = $saidNoId === null ? null : ($a->outbox[$saidNoId] ?? null);
 $check($saidNo !== null && \Aamio\Runtime::outboxOutcome($saidNo) === 'refused', 'a refusal is still a refusal', $saidNo === null ? 'no entry' : \Aamio\Runtime::outboxOutcome($saidNo));
 $check($saidNoId !== null && !in_array($saidNoId, array_column($a->outboxPending(), 'id'), true), 'and a settled one stays off the list');
 
-// Codex, 20 September 2026. Encrypt and sign `for your eyes` without wrapping it
+// A review, 20 September 2026. Encrypt and sign `for your eyes` without wrapping it
 // as JSON: the envelope opened, the bytes were exactly those words, and json_decode
 // then failed -- inside the same catch, so the answer was text: null, unreadable,
 // and the cursor moved on. Three cases, because they are three.

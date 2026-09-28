@@ -34,6 +34,29 @@ not what moved in the source.
   wait ends. `aamio_read` says so now, where it used to say what is true of
   the Python server. Presence is renewed by whoever calls, so a server nobody
   has called for two minutes is not found until the next call.
+- `aamio_read` no longer promises a message it does not hand over. The
+  description of `max_bytes` said one larger than the budget "is handed over
+  on its own ... because it is already on this machine", which is true of the
+  Python server, where a listener has fetched it. This runtime has no
+  listener: the service keeps the message, `attention` names it as
+  `too_large`, and what was written after it waits behind it until a read asks
+  with a larger budget. The description, the help of `aamio read` and the
+  README say that now, and the README no longer names `over_budget`, a state
+  this runtime never reports. The description had also said its first
+  sentence twice since 0.3.7.
+- The note for such a message says what its reader can do: a larger
+  `max_bytes`, or `--max-bytes` on the command line. It carried the service's
+  advice word for word, with a header by name and a cursor nobody on these
+  surfaces holds.
+- The README says what happens to a lock when the system will not say whether
+  its owner still runs.
+- The live tests wait their turn. `tests/live.php` and
+  `tests/first-exchange.php` make 32 opens and closes of threads between them,
+  the service takes thirty a minute from one address, and the one that ran
+  second failed on the 429. `tests/live-pace.inc.php` holds them to twenty a
+  minute, counted in a file the live tests of aamio-python keep too.
+  `Http::$override` is handed the timeout as a fifth argument, for a stand-in
+  that passes the call on.
 
 ## 0.3.7 - 2026-09-26
 

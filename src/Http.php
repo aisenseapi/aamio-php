@@ -18,6 +18,8 @@ final class Http
     /**
      * A stand-in for the network, for tests: a callable taking (method, url,
      * body, headers) and returning [status, body, headers]. Null in production.
+     * The timeout is handed over as a fifth argument, for a stand-in that
+     * passes the call on to the network and has to pass that on too.
      * @var callable|null
      */
     public static $override = null;
@@ -26,7 +28,7 @@ final class Http
     public static function call(string $method, string $url, ?string $body = null, array $headers = [], int $timeout = 40): array
     {
         if (self::$override !== null) {
-            return (self::$override)($method, $url, $body, $headers);
+            return (self::$override)($method, $url, $body, $headers, $timeout);
         }
         $handle = curl_init($url);
         $lines = [];

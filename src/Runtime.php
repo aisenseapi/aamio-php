@@ -2341,10 +2341,13 @@ final class Runtime
         $tooLarge = $answer['too_large'] ?? null;
 
         if (is_array($tooLarge)) {
+            // The advice is this runtime's own. The service's speaks of the
+            // header this read sent and of stepping past the message with after,
+            // and whoever reads this note set max_bytes and holds no cursor.
             $this->note(
                 $channel,
                 'too_large',
-                'message ' . ($tooLarge['seq'] ?? '?') . ' on this channel is ' . ($tooLarge['bytes'] ?? '?') . ' bytes and does not fit the byte budget this read asked for, so it was not sent. It is still there and every read at this budget will leave it. ' . (is_string($tooLarge['fix'] ?? null) ? $tooLarge['fix'] : 'Read again with a larger max_bytes, or without one.'),
+                'message ' . ($tooLarge['seq'] ?? '?') . ' on this channel is ' . ($tooLarge['bytes'] ?? '?') . ' bytes and does not fit the byte budget this read asked for, so it was not sent. It is still there, what was written after it waits behind it, and every read at this budget will leave it. Read again with a larger budget to take it: max_bytes, or --max-bytes on the command line.',
                 isset($tooLarge['seq']) ? [(int) $tooLarge['seq']] : null
             );
         }

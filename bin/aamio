@@ -13,7 +13,7 @@ declare(strict_types=1);
  *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] [--re SHA256]
  *   trace [WHO] [--limit N]   (what was sent to one counterpart and what came back, as hashes)
  *   read [--wait N] [--limit N] [--max-bytes N]
- *   (--max-bytes is per channel, and one message larger than it still comes)
+ *   (--max-bytes is per channel, and a message larger than it stays at the service, named in attention)
  *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
  *   archive [status|keep|off|days:N|prune] [--max-mb M] [--all] | doctor
  *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO] [--scope NAME]

@@ -307,7 +307,7 @@ $check($repaired === '{"n":1}' . "\n" . '{"n":2' . "\n" . '{"n":3}' . "\n", 'a l
 
 // A message is only called archived when something was written.
 //
-// Found by a Codex project review, 20 September 2026 (F2). archive() returned
+// Found by a project review, 20 September 2026 (F2). archive() returned
 // without writing when the folder keeps nothing, and the receiving loop set
 // archived => true regardless, so an application was told to look in an archive
 // that does not exist. Off is still not a failure: no archive_error, and the

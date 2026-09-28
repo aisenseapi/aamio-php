@@ -9,10 +9,15 @@ declare(strict_types=1);
  * deleted. The board is only read: a post that nobody needs is noise in the
  * numbers the board is measured by.
  *
+ * The service counts what one address opens and closes, so each of those waits
+ * its turn, and a run started right after another one waits for the room it
+ * needs.
+ *
  *   php tests/live.php [https://aamio.at]
  */
 
 require __DIR__ . '/bootstrap.php';
+require __DIR__ . '/live-pace.inc.php';
 
 use Aamio\Board;
 use Aamio\Client;
@@ -20,6 +25,8 @@ use Aamio\Gate;
 use Aamio\Keys;
 
 $host = $argv[1] ?? Client::DEFAULT_HOST;
+// Every open and close of a thread waits its turn: live-pace.inc.php says why.
+LivePace::install($host);
 $passed = 0;
 $failed = 0;
 $check = static function (bool $ok, string $label, string $detail = '') use (&$passed, &$failed): void {
