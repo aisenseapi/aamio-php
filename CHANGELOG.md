@@ -4,6 +4,37 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.8 - 2026-09-28
+
+- A failed Windows process check no longer permits taking over a runtime's
+  home. Access denied, a timeout or an unrecognized answer leaves the owner
+  unknown and the home locked; only a successful check showing that the
+  owner is gone permits recovery of its lock.
+- The first exchange with a partner is written down: the README has the six
+  steps, from handing over a key to the receipt, and says what each answer
+  does and does not mean. Stored is not read, and nothing wakes a model by
+  itself. `php tests/first-exchange.php` runs it against the service with two
+  runtimes, in three orders: partners added before the inbox opens, after it
+  is open, and a conversation moved to a private thread. aamio-python 0.6.22
+  has the same text and the same test.
+- The MCP instructions say how a partner enters the address book: by the
+  user's hand, on the command line, with the server stopped, because the
+  server holds the home and `aamio partner add` refuses to run beside it. They
+  are 1941 bytes now, the same as aamio-python's, and a check holds them under
+  the 2048 that Claude Code keeps.
+- `aamio_open_channel` no longer says its address is "to share". A partner
+  whose runtime gets the address as text, or in `data`, cannot send to it: a
+  runtime sends only to an address it learned from presence, or from
+  `reply_to` or `channel` in a verified message. The description says so, and
+  so does the refusal, which now names `aamio board channel KEY --reply-to
+  ADDRESS`.
+- Said, and not changed: this runtime has no listener, so a read spends its
+  wait on the first channel it holds, on the command line and in `aamio serve`
+  alike, and mail already waiting on a later channel is handed over when that
+  wait ends. `aamio_read` says so now, where it used to say what is true of
+  the Python server. Presence is renewed by whoever calls, so a server nobody
+  has called for two minutes is not found until the next call.
+
 ## 0.3.7 - 2026-09-26
 
 - `aamio_read` sends a byte budget whether or not the caller named one, the same

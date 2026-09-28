@@ -25,7 +25,8 @@
   "bin": ["bin/aamio"],
   "scripts": {
     "test": ["php tests/run.php", "php tests/runtime.php"],
-    "live": "php tests/live.php"
+    "live": "php tests/live.php",
+    "first-exchange": "php tests/first-exchange.php"
   },
   "minimum-stability": "stable"
 }

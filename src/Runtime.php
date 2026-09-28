@@ -336,18 +336,22 @@ final class Runtime
         }
     }
 
-    private function takeLock(): void
+    private function takeLock(?callable $probe = null): void
     {
         $real = realpath($this->home) ?: $this->home;
         if (isset(self::$lockedHomes[$real])) {
             throw new \RuntimeException('another aamio in this process is already using ' . $this->home);
         }
         $held = $this->loadJson('lock', null);
-        if (is_array($held) && is_int($held['pid'] ?? null) && $held['pid'] !== getmypid() && self::pidAlive($held['pid'])) {
+        if (is_array($held) && is_int($held['pid'] ?? null) && $held['pid'] !== getmypid()) {
+            $alive = ($probe ?? self::pidAlive(...))($held['pid']);
+            if ($alive === null) {
+                throw new \RuntimeException(sprintf('could not determine whether aamio (pid %d) is still using %s; the lock is left untouched. Process inspection was unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. Do not remove the lock unless you have independently confirmed its owner has stopped.', $held['pid'], $this->home));
+            }
             // The lock is written after its owner started. A process that
             // started later got the pid after the owner was gone.
-            $started = is_int($held['at'] ?? null) || is_float($held['at'] ?? null) ? self::startedAt($held['pid']) : null;
-            if ($started === null || $started <= $held['at'] + 2) {
+            $started = $alive && (is_int($held['at'] ?? null) || is_float($held['at'] ?? null)) ? self::startedAt($held['pid']) : null;
+            if ($alive && ($started === null || $started <= $held['at'] + 2)) {
                 throw new \RuntimeException(sprintf('another aamio (pid %d) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, the one that took the lock stopped without letting go of it: delete %s and start again.', $held['pid'], $this->home, $this->path('lock')));
             }
         }
@@ -355,22 +359,130 @@ final class Runtime
         self::$lockedHomes[$real] = true;
     }
 
-    private static function pidAlive(int $pid): bool
+    /** True is alive, false is proven gone, and null must never release a lock. */
+    private static function pidAlive(int $pid): ?bool
     {
+        if ($pid <= 0) {
+            return null;
+        }
         if (function_exists('posix_kill')) {
             // Refused is not gone: EPERM is a process that belongs to someone else.
-            return @posix_kill($pid, 0) || posix_get_last_error() === 1;
+            if (@posix_kill($pid, 0)) {
+                return true;
+            }
+
+            return match (posix_get_last_error()) {
+                1 => true, // EPERM
+                3 => false, // ESRCH
+                default => null,
+            };
         }
         if (is_dir('/proc')) {
-            return is_dir('/proc/' . $pid);
+            if (is_dir('/proc/' . $pid)) {
+                return true;
+            }
+            // A restricted /proc can hide another owner's processes even
+            // while showing ours. Absence here cannot prove that one is gone.
+            return null;
         }
         if (PHP_OS_FAMILY === 'Windows') {
-            $out = @shell_exec('tasklist /FI "PID eq ' . $pid . '" /NH 2>NUL');
-
-            return is_string($out) && str_contains($out, (string) $pid);
+            // A filtered tasklist uses a localized sentence for no matches.
+            // Read a complete CSV list instead, requiring our own PID as a
+            // positive control before absence can mean that the owner is gone.
+            return self::windowsPidAlive($pid, self::processStatusCommand(['tasklist.exe', '/FO', 'CSV', '/NH']));
         }
 
-        return true;
+        return null;
+    }
+
+    /** @param array{0:int,1:string,2:string}|null $result */
+    private static function windowsPidAlive(int $pid, ?array $result): ?bool
+    {
+        if ($result === null || $result[0] !== 0 || trim($result[2]) !== '' || trim($result[1]) === '') {
+            return null;
+        }
+        $pids = [];
+        foreach (preg_split('/\r?\n/', trim($result[1])) ?: [] as $line) {
+            // Five quoted CSV fields, with no ignored error text or broken row.
+            if (preg_match('/^"(?:[^"\r\n]|"")*"(?:,"(?:[^"\r\n]|"")*"){4}$/D', $line) !== 1) {
+                return null;
+            }
+            $row = str_getcsv($line, ',', '"', '');
+            if ($row[0] === '' || preg_match('/^(?:0|[1-9][0-9]*)$/D', $row[1]) !== 1 || isset($pids[$row[1]])) {
+                return null;
+            }
+            $pids[$row[1]] = true;
+        }
+
+        return isset($pids[(string) getmypid()]) ? isset($pids[(string) $pid]) : null;
+    }
+
+    /**
+     * A short, bounded local inspection. Files rather than pipes keep Windows
+     * pipe reads from blocking past the deadline. Each call owns its handles.
+     * @param string[] $command
+     * @return array{0:int,1:string,2:string}|null
+     */
+    private static function processStatusCommand(array $command, float $timeout = 3.0): ?array
+    {
+        if (!function_exists('proc_open')) {
+            return null;
+        }
+        $mask = umask(0077);
+        try {
+            $out = @tmpfile();
+            $err = @tmpfile();
+        } finally {
+            umask($mask);
+        }
+        $process = null;
+        try {
+            if (!is_resource($out) || !is_resource($err)) {
+                return null;
+            }
+            $process = @proc_open($command, [0 => ['file', PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', 'r'], 1 => $out, 2 => $err], $pipes, null, null, ['bypass_shell' => true, 'create_no_window' => true]);
+            if (!is_resource($process)) {
+                return null;
+            }
+            $until = hrtime(true) / 1e9 + $timeout;
+            do {
+                $status = proc_get_status($process);
+                if (!is_array($status) || (fstat($out)['size'] ?? 1048577) > 1048576 || (fstat($err)['size'] ?? 1048577) > 1048576) {
+                    return null;
+                }
+                if (!$status['running']) {
+                    rewind($out);
+                    rewind($err);
+                    $stdout = stream_get_contents($out, 1048577);
+                    $stderr = stream_get_contents($err, 1048577);
+                    if (!is_string($stdout) || !is_string($stderr) || strlen($stdout) > 1048576 || strlen($stderr) > 1048576) {
+                        return null;
+                    }
+
+                    return [(int) $status['exitcode'], $stdout, $stderr];
+                }
+                if (hrtime(true) / 1e9 >= $until) {
+                    return null;
+                }
+                usleep(10000);
+            } while (true);
+        } catch (\Throwable) {
+            return null;
+        } finally {
+            if (is_resource($process)) {
+                $status = proc_get_status($process);
+                if (is_array($status) && $status['running']) {
+                    @proc_terminate($process);
+                }
+                @proc_close($process);
+            }
+            if (is_resource($out)) {
+                fclose($out);
+            }
+            if (is_resource($err)) {
+                fclose($err);
+            }
+        }
     }
 
     /** When the process with this pid started, in Unix seconds, where /proc says so, and null elsewhere. */
@@ -1632,7 +1744,11 @@ final class Runtime
         if (Address::isW($to)) {
             $key = $this->peers[$to] ?? null;
             if ($key === null) {
-                throw new \RuntimeException('no key known for address ' . $to . '; look the partner up or reply to a message');
+                // What to do instead, said where it stops. An address pasted into
+                // text or data is the dead end an agent on MCP walks into: the
+                // tool that opens a channel returns an address, and nothing here
+                // learns whose it is from reading it (item 5 of the round-2 list).
+                throw new \RuntimeException('no key known for address ' . $to . '. A runtime learns whose an address is from presence, or from reply_to or channel in a verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its reply_to, or ask the owner to hand the address over with aamio board channel KEY --reply-to ADDRESS');
             }
 
             return $this->sendSealed($to, $key, null, $text, $data, $replyTo, null, $answers);
@@ -1828,7 +1944,7 @@ final class Runtime
         $this->saveOutbox();
         // After the outcome is saved, and unable to change it.
         // A script that sends once and exits never fetches attention, so the
-        // failure rides on the record this send is about. Codex, 26 September.
+        // failure rides on the record this send is about.
         $traceError = $this->traceSafely('sent', fn (): ?string => $this->traceSent($this->outbox[$id], $status, $result));
 
         if ($traceError !== null) {
@@ -2890,7 +3006,13 @@ final class Runtime
         return $taken;
     }
 
-    /** New messages on the inbox and every open channel; the first channel waits, the rest are read at once. */
+    /**
+     * New messages on the inbox and every open channel; the first channel
+     * waits, the rest are read at once. So with a quiet first channel, mail
+     * already waiting on a later one is handed over when the wait ends. There
+     * is no listener in this runtime, and the command line, the MCP server and
+     * a controller all read this way; the README and aamio_read say so.
+     */
     public function read(int $wait = 0, int $limit = 50, ?int $maxBytes = null): array
     {
         $this->ensureInbox();

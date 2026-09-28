@@ -1,3 +1,7 @@
 vendor/
 composer.lock
 .phpunit.cache/
+.agent-state/
+.claude/
+.codex/
+.antigravity/
