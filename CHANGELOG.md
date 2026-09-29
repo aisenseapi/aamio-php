@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## 0.3.8 - 2026-09-28
+## 0.3.8 - 2026-09-29
 
 - A failed Windows process check no longer permits taking over a runtime's
   home. Access denied, a timeout or an unrecognized answer leaves the owner
