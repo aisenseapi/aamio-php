@@ -55,12 +55,23 @@ not what moved in the source.
   the service takes thirty a minute from one address, and the one that ran
   second failed on the 429. `tests/live-pace.inc.php` holds them to twenty a
   minute, counted in a file the live tests of aamio-python keep too. A turn is
-  taken only once it is written there: the first version went on without the
-  lock when one was let go of at the wrong moment, and four runs on one file
-  let 21 through a window of 20. `tests/interop.py` has two runs of each
-  client take turns on one file, and checks that none of them passes the
-  limit. `Http::$override` is handed the timeout as a fifth argument, for a
-  stand-in that passes the call on.
+  taken only once it is written there, under a lock the operating system
+  holds: the first version made a folder for a lock, went on without it when
+  one was let go of at the wrong moment, and took one older than ten seconds
+  away from a run that was only slow to write. `tests/interop.py` has two runs
+  of each client take turns on one file, and a slow Python run keep its turn
+  from a PHP run, however old its lock looks. `Http::$override` is handed the
+  timeout as a fifth argument, for a stand-in that passes the call on.
+- Two runtimes started on one home at the same moment leave one owner. Taking
+  the home was three steps, a read of the pid file, a check and a write, and
+  the check that starts four at once failed in each of three runs without the
+  new lock. The operating system now holds a lock on `owner.lock` for the
+  runtime using the home, taken in one step, and lets go of it when that
+  process ends, however it ends. aamio-python 0.6.22 takes the same lock, so
+  the two keep each other out of one home. The pid file is still written, for
+  the message a second runtime gives and for older versions, and a pid file
+  whose writer held the lock is taken over without asking about its pid, which
+  a Linux without the posix extension cannot answer.
 
 ## 0.3.7 - 2026-09-26
 

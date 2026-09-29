@@ -112,23 +112,69 @@ for ($n = 0; $n < 20; $n++) {
 }
 $check($free && $pace->alone && $pace->take() > 60.0 && !file_exists($paceDir . DIRECTORY_SEPARATOR . 'no such folder'), 'where the folder for the file does not exist the count is kept in this process, and it says so');
 
-[$pace, $time] = $paceAt('left-behind.json');
-mkdir($pace->path . '.lock');
-touch($pace->path . '.lock', time() - 120);
-clearstatcache();
-$check($pace->take() === 0.0 && !file_exists($pace->path . '.lock') && count((array) json_decode((string) file_get_contents($pace->path), true)) === 1, 'a lock left by a run that was stopped is taken over, and let go of again');
+/** Whether the turn can be taken now, asked by taking it and letting go at once. */
+$turnIsFree = static function (string $ledger): bool {
+    $handle = fopen($ledger . LivePace::TURN, 'c');
+    $wouldBlock = 0;
+    if (!flock($handle, LOCK_EX | LOCK_NB, $wouldBlock)) {
+        fclose($handle);
 
-// The first version gave up on a lock after five seconds and went on without
-// it, and took a lock let go of between its mkdir and the look after it for
-// one that could not be made. Either way the turn was taken and never written.
+        return false;
+    }
+    LivePace::unlockFile($handle);
+
+    return true;
+};
+
+// Another process that holds the turn: it lets go after so many seconds, or
+// ends with the turn held. What it is told comes on its standard input.
+$holderScript = $paceDir . DIRECTORY_SEPARATOR . 'hold-turn.php';
+file_put_contents($holderScript, "<?php\ndeclare(strict_types=1);\n\$handle = fopen(\$argv[1], 'c');\n\$wouldBlock = 0;\nif (!flock(\$handle, LOCK_EX | LOCK_NB, \$wouldBlock)) {\n    echo \"not held\\n\";\n    exit(1);\n}\necho \"held\\n\";\nfflush(STDOUT);\nusleep((int) ((float) \$argv[2] * 1e6));\nif (\$argv[3] === 'ends') {\n    exit(0);\n}\nflock(\$handle, LOCK_UN);\nfclose(\$handle);\n");
+$anotherRunHolding = static function (string $ledger, float $seconds, string $then = 'lets go') use ($holderScript, $childPhp): array {
+    $pipes = [];
+    $process = proc_open(array_merge($childPhp ?? [PHP_BINARY], [$holderScript, $ledger . LivePace::TURN, (string) $seconds, $then]), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    $said = trim((string) fgets($pipes[1]));
+
+    return [$process, $pipes, $said];
+};
+$endRun = static function (array $run): void {
+    [$process, $pipes] = $run;
+    proc_terminate($process);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    proc_close($process);
+};
+
+[$pace, $time] = $paceAt('ended.json', LivePace::LIMIT, 0.5);
+$ended = $anotherRunHolding($pace->path, 0.2, 'ends');
+while (proc_get_status($ended[0])['running']) {
+    usleep(20000);
+}
+$endRun($ended);
+$began = microtime(true);
+$check($ended[2] === 'held' && $pace->take() === 0.0 && microtime(true) - $began < 0.5 && count((array) json_decode((string) file_get_contents($pace->path), true)) === 1, 'the lock of a run that ended goes with it, and the next turn is taken at once');
+
+[$pace, $time] = $paceAt('a-moment.json');
+$moment = $anotherRunHolding($pace->path, 1.0);
+$began = microtime(true);
+$took = $pace->take();
+$waitedFor = microtime(true) - $began;
+$endRun($moment);
+$check($moment[2] === 'held' && $took === 0.0 && $waitedFor >= 0.7 && count((array) json_decode((string) file_get_contents($pace->path), true)) === 1 && $turnIsFree($pace->path), 'a turn another run holds for a moment is waited for, and then taken and written', sprintf('%.2f s', $waitedFor));
+
+// The first version took a lock older than ten seconds away from a run that
+// was only slow. However old the lock looks, it is not taken away now.
 [$pace, $time] = $paceAt('in-the-way.json', LivePace::LIMIT, 0.3);
-mkdir($pace->path . '.lock');
-$said = $stopped($pace);
+$inTheWay = $anotherRunHolding($pace->path, 30);
+touch($pace->path . LivePace::TURN, time() - 7200);
 clearstatcache();
+$said = $stopped($pace);
+$stillThere = proc_get_status($inTheWay[0])['running'] && !$turnIsFree($pace->path);
+$endRun($inTheWay);
 $check(
-    is_string($said) && str_contains($said, 'was out of reach for 0.3 seconds') && str_contains($said, 'AAMIO_LIVE_LEDGER')
-    && $pace->taken === 0 && $pace->own === [] && $pace->last === null && !file_exists($pace->path) && is_dir($pace->path . '.lock'),
-    'a lock in the way for longer than the patience stops the test, takes no turn, and leaves the other run its lock',
+    $inTheWay[2] === 'held' && is_string($said) && str_contains($said, 'was out of reach for 0.3 seconds') && str_contains($said, 'AAMIO_LIVE_LEDGER')
+    && $pace->taken === 0 && $pace->own === [] && $pace->last === null && !file_exists($pace->path) && $stillThere,
+    'a turn held for longer than the patience stops the test, takes no turn, and is not taken away from the run that holds it',
     (string) $said
 );
 
@@ -137,7 +183,7 @@ $check(
 mkdir($pace->path);
 $said = $stopped($pace);
 clearstatcache();
-$check(is_string($said) && str_contains($said, 'could not be read for 0.3 seconds') && $pace->taken === 0 && $pace->own === [] && !file_exists($pace->path . '.lock'), 'a file that is there and will not open is not taken for empty', (string) $said);
+$check(is_string($said) && str_contains($said, 'could not be read for 0.3 seconds') && $pace->taken === 0 && $pace->own === [] && $turnIsFree($pace->path), 'a file that is there and will not open is not taken for empty', (string) $said);
 
 [$pace, $time] = $paceAt('will-not-write.json', LivePace::LIMIT, 0.3);
 $before = (string) json_encode([$time->now - 1]);
@@ -148,7 +194,7 @@ $said = $stopped($pace);
 clearstatcache();
 $check(
     is_string($said) && str_contains($said, 'could not be written for 0.3 seconds') && $pace->taken === 0 && $pace->own === [] && $pace->last === null
-    && file_get_contents($pace->path) === $before && !file_exists($pace->path . '.lock'),
+    && file_get_contents($pace->path) === $before && $turnIsFree($pace->path),
     'a turn that could not be written is not taken',
     (string) $said
 );
@@ -260,7 +306,7 @@ if (!isset($childPhp)) {
     }
     clearstatcache();
     $check(
-        $manyTrouble === [] && count($manyStamps) === 3 * $manyTurns && $manyMost <= $manyLimit && !file_exists($manyLedger . '.lock'),
+        $manyTrouble === [] && count($manyStamps) === 3 * $manyTurns && $manyMost <= $manyLimit && $turnIsFree($manyLedger),
         'three processes on one file never hold more than the limit in a window',
         $manyTrouble !== [] ? implode(' | ', $manyTrouble) : $manyMost . ' inside one window of ' . $manyWindow . ' s, where the limit is ' . $manyLimit
     );

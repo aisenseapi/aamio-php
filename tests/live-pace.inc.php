@@ -20,13 +20,21 @@ declare(strict_types=1);
  * The count is kept in a file in the temp folder, not in this process, so two
  * scripts run one after the other are counted as the one client the service
  * sees. The live tests of aamio-python keep the same file. A turn is taken
- * only once it is written there, under a lock both keep. The first version
- * took a lock that was let go of between a failed mkdir and the look after it
- * for one that could not be made, went on without it and wrote nothing, and
- * four runs on one file let 21 through a window of 20. Where the folder for
- * the file does not exist nobody can keep it, and this process counts its
- * own, and says so. A lock or a file out of reach for longer than PATIENCE
- * stops the test with the reason.
+ * only once it is written there, under a lock both keep.
+ *
+ * The lock is one the operating system holds on the file beside the count,
+ * TURN, and lets go of when its process ends, however that comes. So it is
+ * never taken over, and nothing has to guess whether its holder is gone. The
+ * first version made a folder for a lock and took over one older than ten
+ * seconds, and two things went wrong with that. A lock let go of between a
+ * failed mkdir and the look after it was taken for one that could not be
+ * made, and the turn went on without it. And a writer that was only slow lost
+ * its lock to another run while it wrote (a review, 29 September 2026). Both
+ * let 21 through a window of 20.
+ *
+ * Where the folder for the file does not exist nobody can keep it, and this
+ * process counts its own, and says so. A lock or a file out of reach for
+ * longer than PATIENCE stops the test with the reason.
  *
  * Required by tests/live.php and tests/first-exchange.php, after bootstrap.php.
  */
@@ -39,14 +47,14 @@ final class LivePace
     public const LIMIT = 20;
     /** One second more than the service's window, so what has left this one has left that one. */
     public const WINDOW = 61.0;
-    /** A lock this old was left by a run that was stopped while it held it. */
-    public const STALE = 10.0;
-    /**
-     * How long a turn waits for the lock, or for a file another program has
-     * open, before it stops the test and says why. Longer than STALE, so a
-     * lock left by a run that was stopped is taken over first.
-     */
+    /** How long a turn waits for the lock, or for a file another program has open, before it stops the test and says why. */
     public const PATIENCE = 30.0;
+    /**
+     * Beside the count: the file whose lock says whose turn it is. flock() on
+     * Windows locks the whole file, which covers the one byte aamio-python
+     * locks there, so each keeps the other out.
+     */
+    public const TURN = '.turn';
 
     /** @var float[] */
     public array $own = [];
@@ -110,7 +118,8 @@ final class LivePace
 
     private function takeOrHold(): ?float
     {
-        $held = $this->lock();
+        $turn = $this->lock();
+        $held = $turn !== null;
 
         try {
             $now = (float) ($this->clock)();
@@ -142,7 +151,7 @@ final class LivePace
             return null;
         } finally {
             if ($held) {
-                $this->unlock();
+                self::unlockFile($turn);
             }
         }
     }
@@ -180,36 +189,42 @@ final class LivePace
         return $stamps;
     }
 
-    // The lock is a folder, because making one either happens or does not on
-    // every system and in every language that keeps this file.
-
-    /** True once the lock is held, and false only where there is no folder to keep the count in. */
-    private function lock(): bool
+    /**
+     * The open TURN file once its lock is held, and null only where there is
+     * no folder to keep the count in. A lock held by another run is waited for
+     * as long as that run holds it, up to PATIENCE, and never taken away:
+     * however old, it is held by a process that is still there, since the
+     * lock of one that ended is gone.
+     * @return resource|null
+     */
+    private function lock()
     {
-        $folder = $this->path . '.lock';
         $deadline = hrtime(true) / 1e9 + $this->patience;
 
         while (true) {
             error_clear_last();
+            $handle = @fopen($this->path . self::TURN, 'c');
 
-            if (@mkdir($folder)) {
-                return true;
-            }
+            if ($handle === false) {
+                clearstatcache();
 
-            $reason = error_get_last()['message'] ?? 'mkdir failed';
-            clearstatcache();
+                // No folder for the file, so no other run can keep it either.
+                if (!is_dir(dirname($this->path))) {
+                    $this->keepAlone(dirname($this->path) . ' does not exist');
 
-            // Asked of the folder the file lives in, never of the lock: a lock
-            // let go of since the mkdir looks the same as one that cannot be
-            // made, and it is only free.
-            if (!is_dir(dirname($folder))) {
-                $this->keepAlone(dirname($folder) . ' does not exist');
+                    return null;
+                }
 
-                return false;
-            }
+                $reason = error_get_last()['message'] ?? 'the file would not open';
+            } else {
+                $wouldBlock = 0;
 
-            if ($this->stale($folder)) {
-                continue;
+                if (@flock($handle, LOCK_EX | LOCK_NB, $wouldBlock)) {
+                    return $handle;
+                }
+
+                fclose($handle);
+                $reason = $wouldBlock ? 'another run holds it' : 'it cannot be locked here';
             }
 
             if (hrtime(true) / 1e9 >= $deadline) {
@@ -220,25 +235,11 @@ final class LivePace
         }
     }
 
-    /** Takes a lock away from a run that was stopped while it held it. True when it was taken away. */
-    private function stale(string $folder): bool
+    /** Lets go of the lock and closes the file, which would let go of it anyway. @param resource $handle */
+    public static function unlockFile($handle): void
     {
-        $made = @filemtime($folder);
-
-        return $made !== false && time() - $made > self::STALE && @rmdir($folder);
-    }
-
-    private function unlock(): void
-    {
-        // A lock that stays is taken over after STALE seconds, so this tries a
-        // few times and then leaves it to that.
-        for ($n = 0; $n < 20; $n++) {
-            clearstatcache();
-            if (@rmdir($this->path . '.lock') || !is_dir($this->path . '.lock')) {
-                return;
-            }
-            usleep(10000);
-        }
+        @flock($handle, LOCK_UN);
+        fclose($handle);
     }
 
     private function keepAlone(string $why): void

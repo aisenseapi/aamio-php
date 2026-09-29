@@ -9,7 +9,9 @@ PyNaCl's, which the shared vectors were made with; PHP is the port under test.
 
 And one count between them: the live tests of both keep the opens and closes
 they make at the service in one file, so four runs, two of each, take turns on
-it here and no window may hold more than the limit.
+it here and no window may hold more than the limit. A Python run that is slow
+to write keeps its turn from a PHP run that asks meanwhile, however old its
+lock looks. And a home one of them holds, the other stays out of.
 """
 
 import json
@@ -18,6 +20,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PYTHON_TESTS = os.path.join(HERE, "..", "..", "aamio-python", "tests")
@@ -112,6 +116,131 @@ def one_count():
     return ok, "%d turns, at most %d inside one window of %.1f s where the limit is %d, lock left behind: %s" % (len(stamps), most, window, limit, lock_left)
 
 
+ONE_TURN_PHP = r'''<?php
+require $argv[1] . "/bootstrap.php";
+require $argv[1] . "/live-pace.inc.php";
+$pace = new LivePace((int) $argv[3], LivePace::WINDOW, $argv[2], null, null, (float) $argv[4]);
+$error = null;
+try {
+    $pace->take();
+} catch (RuntimeException $stopped) {
+    $error = $stopped->getMessage();
+}
+echo json_encode(['taken' => $pace->taken, 'last' => $pace->last, 'error' => $error]);
+'''
+
+OWNER_PHP = r'''<?php
+require $argv[1] . "/bootstrap.php";
+try {
+    $runtime = new Aamio\Runtime($argv[2], 'https://fake.test', ['interop'], false, static function (string $line): void {
+    });
+} catch (RuntimeException $refused) {
+    echo 'refused: ' . str_replace("\n", ' ', $refused->getMessage()) . "\n";
+    exit(0);
+}
+echo "owned\n";
+fflush(STDOUT);
+if ($argv[3] === 'hold') {
+    fgets(STDIN);
+}
+$runtime->close();
+'''
+
+
+def slow_writer_keeps_its_turn():
+    """The review of 29 September: a run that is only slow to write, with the turn in hand, and a run of the other client asking meanwhile."""
+    if not os.path.isfile(os.path.join(PYTHON_TESTS, "live_pace.py")):
+        return None, "no aamio-python/tests/live_pace.py beside this checkout"
+
+    if PYTHON_TESTS not in sys.path:
+        sys.path.insert(0, PYTHON_TESTS)
+
+    import live_pace
+
+    folder = tempfile.mkdtemp(prefix="aamio-interop-slow-")
+    ledger = os.path.join(folder, "ledger.json")
+    script = os.path.join(folder, "turn.php")
+    entered, resume = threading.Event(), threading.Event()
+
+    with open(script, "w", encoding="utf-8") as handle:
+        handle.write(ONE_TURN_PHP)
+
+    class SlowWriter(live_pace.Pace):
+        def _write(self, stamps):
+            entered.set()
+            resume.wait(10)
+            super()._write(stamps)
+
+    first = SlowWriter(path=ledger, limit=2)
+    worker = threading.Thread(target=first.take)
+    worker.start()
+
+    try:
+        entered.wait(5)
+        # However old the lock looks: the first version took one over at ten seconds.
+        long_ago = time.time() - 7200
+        os.utime(ledger + live_pace.TURN, (long_ago, long_ago))
+        asked = subprocess.run([PHP, script, HERE, ledger, "2", "0.5"], capture_output=True, text=True, timeout=60)
+    finally:
+        resume.set()
+        worker.join(10)
+
+    try:
+        meanwhile = json.loads(asked.stdout)
+        after = json.loads(subprocess.run([PHP, script, HERE, ledger, "2", "5"], capture_output=True, text=True, timeout=60).stdout)
+
+        with open(ledger, encoding="utf-8") as handle:
+            stored = json.load(handle)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+    ok = (meanwhile["taken"] == 0 and "out of reach" in (meanwhile["error"] or "") and first.taken == 1 and after["taken"] == 1
+          and sorted(stored) == sorted([first.last, after["last"]]))
+
+    return ok, json.dumps({"meanwhile": meanwhile, "after": after, "stored": stored, "first": first.last})
+
+
+def one_owner_across_clients():
+    """A home held by a runtime of one client keeps a runtime of the other out, both ways."""
+    from aamio.runtime import Runtime
+
+    folder = tempfile.mkdtemp(prefix="aamio-interop-owner-")
+    home = os.path.join(folder, "home")
+    script = os.path.join(folder, "owner.php")
+    php = [PHP, "-d", "extension_dir=" + EXT, "-d", "extension=sodium", script, HERE, home]
+
+    with open(script, "w", encoding="utf-8") as handle:
+        handle.write(OWNER_PHP)
+
+    try:
+        held = Runtime(home=home, host="https://fake.test", archive=False)
+
+        try:
+            php_beside_python = subprocess.run(php + ["try"], capture_output=True, text=True, timeout=60).stdout.strip()
+        finally:
+            held.close()
+
+        child = subprocess.Popen(php + ["hold"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        try:
+            php_alone = child.stdout.readline().strip()
+
+            try:
+                Runtime(home=home, host="https://fake.test", archive=False).close()
+                python_beside_php = "owned"
+            except RuntimeError as refused:
+                python_beside_php = "refused: " + str(refused)
+        finally:
+            child.communicate("done\n", timeout=30)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+    ok = (php_beside_python.startswith("refused: another aamio (pid %d)" % os.getpid()) and php_alone == "owned"
+          and python_beside_php.startswith("refused: another aamio (pid %d)" % child.pid))
+
+    return ok, json.dumps([php_beside_python[:120], php_alone, python_beside_php[:120]])
+
+
 def main():
     py = Keys(os.urandom(32))
     php_seed = os.urandom(32)
@@ -164,6 +293,17 @@ def main():
         print("  skip  " + label + ": " + detail)
     else:
         checks.append((counted, label + ("" if counted else "  [" + detail + "]")))
+
+    kept, detail = slow_writer_keeps_its_turn()
+    label = "a Python run that is slow to write keeps its turn from a PHP run that asks meanwhile, however old the lock looks"
+
+    if kept is None:
+        print("  skip  " + label + ": " + detail)
+    else:
+        checks.append((kept, label + ("" if kept else "  [" + detail + "]")))
+
+    owned, detail = one_owner_across_clients()
+    checks.append((owned, "a home a runtime of one client holds keeps a runtime of the other out, both ways" + ("" if owned else "  [" + detail + "]")))
 
     failed = 0
     for ok, label in checks:

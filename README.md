@@ -355,11 +355,16 @@ is using" it and changes nothing, `aamio partner add` and `aamio board channel`
 among them. Stop the one that holds the home, run the command, and start it
 again, or give each participant a home of its own with `AAMIO_HOME`.
 
-A lock left by a process that is proven gone is taken over. Where the system
-will not say whether that process still runs, as on a Linux without the posix
-extension, the lock is left alone and the command stops with "could not
-determine whether aamio (pid N) is still using" the home. Confirm that the
-owner has stopped before removing the lock by hand.
+Two runtimes that start at the same moment leave one owner. The operating
+system holds a lock on `owner.lock` for the runtime using the home and lets go
+of it when that process ends, however it ends, so a lock left by a process
+that is gone blocks nobody. aamio-python takes the same lock, so a Python
+runtime and this one keep each other out too. A pid file from a version before
+`owner.lock` is still honoured: where the system will not say whether that
+process still runs, as on a Linux without the posix extension, the lock is
+left alone and the command stops with "could not determine whether aamio (pid
+N) is still using" the home. Confirm that the owner has stopped before
+removing the lock by hand.
 
 ### Moving a conversation to a private thread
 
@@ -426,10 +431,10 @@ Receipts compare all process-local observations, including kept-out ones. Fewer 
 
 ```
 php tests/run.php        # 89 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 472 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, and the first exchange
+php tests/runtime.php    # 477 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, one owner per home, and the first exchange
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 php tests/first-exchange.php   # two runtimes against aamio.at: partners added before and after the inbox opens, and a handoff that ends in a first send
-python tests/interop.py  # PHP and Python open each other's envelopes, verify each other's signatures, and keep one count of what their live tests open
+python tests/interop.py  # PHP and Python open each other's envelopes, verify each other's signatures, keep one count of what their live tests open, and keep each other out of a home the other holds
 ```
 
 `tests/run.php` needs no network and no composer: a two-line autoloader is

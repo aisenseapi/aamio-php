@@ -891,6 +891,7 @@ require __DIR__ . '/trace.inc.php';
 require __DIR__ . '/cli-stdout.inc.php';
 require __DIR__ . '/first-exchange.inc.php';
 require __DIR__ . '/runtime-lock-status.inc.php';
+require __DIR__ . '/owner-lock.inc.php';
 require __DIR__ . '/read-budget-texts.inc.php';
 require __DIR__ . '/live-pace-check.inc.php';
 $a->close();
