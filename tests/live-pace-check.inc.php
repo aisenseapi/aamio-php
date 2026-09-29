@@ -10,9 +10,11 @@ declare(strict_types=1);
  * between them, and the second one failed on the 429 and not on the code.
  * live-pace.inc.php holds them to twenty a window, counted in a file the live
  * tests of aamio-python keep too. What is checked here is the counting: a
- * clock that is moved by hand, and a sleep that moves it.
+ * clock that is moved by hand, and a sleep that moves it. And, at the end,
+ * three processes on one file, because the first version held in every check
+ * here and let 21 through a window of 20 when four runs met at the lock.
  *
- * Included by tests/runtime.php with $root and $check in scope.
+ * Included by tests/runtime.php with $root, $check and $childPhp in scope.
  */
 
 use Aamio\Http;
@@ -25,16 +27,27 @@ $paceDir = $root . DIRECTORY_SEPARATOR . 'live-pace';
 mkdir($paceDir, 0700, true);
 
 /** A pace over its own file, with time that passes only while something sleeps. */
-$paceAt = static function (string $name, int $limit = LivePace::LIMIT) use ($paceDir): array {
+$paceAt = static function (string $name, int $limit = LivePace::LIMIT, float $patience = LivePace::PATIENCE) use ($paceDir): array {
     $time = new stdClass();
     $time->now = 1790000000.0;
     $time->slept = [];
     $pace = new LivePace($limit, LivePace::WINDOW, $paceDir . DIRECTORY_SEPARATOR . $name, static fn (): float => $time->now, static function (float $seconds) use ($time): void {
         $time->slept[] = $seconds;
         $time->now += $seconds;
-    });
+    }, $patience);
 
     return [$pace, $time];
+};
+
+/** What take() threw, or null. */
+$stopped = static function (LivePace $pace): ?string {
+    try {
+        $pace->take();
+    } catch (RuntimeException $error) {
+        return $error->getMessage();
+    }
+
+    return null;
 };
 
 [$pace, $time] = $paceAt('twenty.json');
@@ -82,7 +95,7 @@ $kept = json_decode((string) file_get_contents($pace->path), true);
 $check($room === 0.0 && $full > 0.0 && is_array($kept) && array_is_list($kept) && array_filter($kept, static fn (mixed $stamp): bool => !is_int($stamp) && !is_float($stamp)) === [] && array_filter($kept, static fn (mixed $stamp): bool => $time->now - $stamp >= 61.0) === [], 'the file is a list of seconds and nothing else, so the Python tests can keep it too', json_encode([$room, $full, $kept]));
 
 $odd = true;
-foreach (['', 'not json', '{}', '{"stamps": [1]}', '[true, null, "12", {}]', 'null'] as $index => $found) {
+foreach (['', 'not json', '{}', '{"stamps": [1]}', '[true, null, "12", {}]', 'null', '[1e999, -1e999, 1' . str_repeat('0', 400) . ']', "\xff"] as $index => $found) {
     [$pace, $time] = $paceAt('odd-' . $index . '.json');
     file_put_contents($pace->path, $found);
     for ($n = 0; $n < 20; $n++) {
@@ -97,13 +110,48 @@ $free = true;
 for ($n = 0; $n < 20; $n++) {
     $free = $free && $pace->take() === 0.0;
 }
-$check($free && $pace->take() > 60.0 && !file_exists($paceDir . DIRECTORY_SEPARATOR . 'no such folder'), 'where the file cannot be kept the count is kept in this process');
+$check($free && $pace->alone && $pace->take() > 60.0 && !file_exists($paceDir . DIRECTORY_SEPARATOR . 'no such folder'), 'where the folder for the file does not exist the count is kept in this process, and it says so');
 
 [$pace, $time] = $paceAt('left-behind.json');
 mkdir($pace->path . '.lock');
 touch($pace->path . '.lock', time() - 120);
 clearstatcache();
 $check($pace->take() === 0.0 && !file_exists($pace->path . '.lock') && count((array) json_decode((string) file_get_contents($pace->path), true)) === 1, 'a lock left by a run that was stopped is taken over, and let go of again');
+
+// The first version gave up on a lock after five seconds and went on without
+// it, and took a lock let go of between its mkdir and the look after it for
+// one that could not be made. Either way the turn was taken and never written.
+[$pace, $time] = $paceAt('in-the-way.json', LivePace::LIMIT, 0.3);
+mkdir($pace->path . '.lock');
+$said = $stopped($pace);
+clearstatcache();
+$check(
+    is_string($said) && str_contains($said, 'was out of reach for 0.3 seconds') && str_contains($said, 'AAMIO_LIVE_LEDGER')
+    && $pace->taken === 0 && $pace->own === [] && $pace->last === null && !file_exists($pace->path) && is_dir($pace->path . '.lock'),
+    'a lock in the way for longer than the patience stops the test, takes no turn, and leaves the other run its lock',
+    (string) $said
+);
+
+[$pace, $time] = $paceAt('will-not-open.json', LivePace::LIMIT, 0.3);
+// A folder where the file should be opens on no system.
+mkdir($pace->path);
+$said = $stopped($pace);
+clearstatcache();
+$check(is_string($said) && str_contains($said, 'could not be read for 0.3 seconds') && $pace->taken === 0 && $pace->own === [] && !file_exists($pace->path . '.lock'), 'a file that is there and will not open is not taken for empty', (string) $said);
+
+[$pace, $time] = $paceAt('will-not-write.json', LivePace::LIMIT, 0.3);
+$before = (string) json_encode([$time->now - 1]);
+file_put_contents($pace->path, $before);
+// The file the new count goes to first, before it replaces the old one.
+mkdir($pace->path . '.' . getmypid() . '.tmp');
+$said = $stopped($pace);
+clearstatcache();
+$check(
+    is_string($said) && str_contains($said, 'could not be written for 0.3 seconds') && $pace->taken === 0 && $pace->own === [] && $pace->last === null
+    && file_get_contents($pace->path) === $before && !file_exists($pace->path . '.lock'),
+    'a turn that could not be written is not taken',
+    (string) $said
+);
 
 $wrong = [];
 foreach ([
@@ -174,3 +222,46 @@ foreach (['live.php', 'first-exchange.php'] as $script) {
     }
 }
 $check($unpaced === [], 'both scripts that write to the service wait their turn', implode(', ', $unpaced));
+
+// The rule itself, on the stamps as they were written, with real processes
+// meeting at the lock.
+if (!isset($childPhp)) {
+    echo "  skip  three processes on one file: no child PHP here\n";
+} else {
+    $manyLedger = $paceDir . DIRECTORY_SEPARATOR . 'three-processes.json';
+    $manyChild = $paceDir . DIRECTORY_SEPARATOR . 'take-turns.php';
+    file_put_contents($manyChild, "<?php\ndeclare(strict_types=1);\nrequire " . var_export(__DIR__ . '/bootstrap.php', true) . ";\nrequire " . var_export(__DIR__ . '/live-pace.inc.php', true) . ";\n\$pace = new LivePace((int) \$argv[2], (float) \$argv[3], \$argv[1]);\n\$stamps = [];\nfor (\$n = 0; \$n < (int) \$argv[4]; \$n++) {\n    \$pace->take();\n    \$stamps[] = \$pace->last;\n    usleep(random_int(0, 10000));\n}\necho json_encode(\$stamps);\n");
+    [$manyLimit, $manyWindow, $manyTurns] = [4, 0.5, 8];
+    $manyRunning = [];
+    for ($n = 0; $n < 3; $n++) {
+        $pipes = [];
+        $process = proc_open(array_merge($childPhp, [$manyChild, $manyLedger, (string) $manyLimit, (string) $manyWindow, (string) $manyTurns]), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        $manyRunning[] = [$process, $pipes];
+    }
+    $manyStamps = [];
+    $manyTrouble = [];
+    foreach ($manyRunning as [$process, $pipes]) {
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $status = proc_close($process);
+        $found = json_decode($out, true);
+        if ($status !== 0 || !is_array($found) || trim($err) !== '') {
+            $manyTrouble[] = $status . ' ' . substr(trim($err . ' ' . $out), 0, 200);
+            continue;
+        }
+        $manyStamps = array_merge($manyStamps, $found);
+    }
+    sort($manyStamps);
+    $manyMost = 0;
+    foreach ($manyStamps as $index => $first) {
+        $manyMost = max($manyMost, count(array_filter(array_slice($manyStamps, $index), static fn (float $stamp): bool => $stamp - $first < $manyWindow)));
+    }
+    clearstatcache();
+    $check(
+        $manyTrouble === [] && count($manyStamps) === 3 * $manyTurns && $manyMost <= $manyLimit && !file_exists($manyLedger . '.lock'),
+        'three processes on one file never hold more than the limit in a window',
+        $manyTrouble !== [] ? implode(' | ', $manyTrouble) : $manyMost . ' inside one window of ' . $manyWindow . ' s, where the limit is ' . $manyLimit
+    );
+}

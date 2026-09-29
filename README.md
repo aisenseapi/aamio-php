@@ -426,10 +426,10 @@ Receipts compare all process-local observations, including kept-out ones. Fewer 
 
 ```
 php tests/run.php        # 89 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 468 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, and the first exchange
+php tests/runtime.php    # 472 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, and the first exchange
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 php tests/first-exchange.php   # two runtimes against aamio.at: partners added before and after the inbox opens, and a handoff that ends in a first send
-python tests/interop.py  # PHP and Python open each other's envelopes and verify each other's signatures
+python tests/interop.py  # PHP and Python open each other's envelopes, verify each other's signatures, and keep one count of what their live tests open
 ```
 
 `tests/run.php` needs no network and no composer: a two-line autoloader is
@@ -440,7 +440,9 @@ and closes of threads a minute from one address, and the two scripts make 32
 between them, so `tests/live-pace.inc.php` holds each of those back until
 fewer than twenty fall inside the last minute. The count is kept in a file in
 the temp folder, which the live tests of aamio-python keep too, so a run
-started right after another one waits for the room it needs.
+started right after another one waits for the room it needs. A turn is taken
+only once it is written there, and a count out of reach for thirty seconds
+stops the test with the reason, rather than letting it go on uncounted.
 
 ## Licence
 

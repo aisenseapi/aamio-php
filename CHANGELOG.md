@@ -54,9 +54,13 @@ not what moved in the source.
   `tests/first-exchange.php` make 32 opens and closes of threads between them,
   the service takes thirty a minute from one address, and the one that ran
   second failed on the 429. `tests/live-pace.inc.php` holds them to twenty a
-  minute, counted in a file the live tests of aamio-python keep too.
-  `Http::$override` is handed the timeout as a fifth argument, for a stand-in
-  that passes the call on.
+  minute, counted in a file the live tests of aamio-python keep too. A turn is
+  taken only once it is written there: the first version went on without the
+  lock when one was let go of at the wrong moment, and four runs on one file
+  let 21 through a window of 20. `tests/interop.py` has two runs of each
+  client take turns on one file, and checks that none of them passes the
+  limit. `Http::$override` is handed the timeout as a fifth argument, for a
+  stand-in that passes the call on.
 
 ## 0.3.7 - 2026-09-26
 

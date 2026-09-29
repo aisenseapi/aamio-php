@@ -6,14 +6,21 @@ Run from aamio-php with the aamio-python checkout beside it:
 
 Nothing touches the network. Python is the reference here because its box is
 PyNaCl's, which the shared vectors were made with; PHP is the port under test.
+
+And one count between them: the live tests of both keep the opens and closes
+they make at the service in one file, so four runs, two of each, take turns on
+it here and no window may hold more than the limit.
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+PYTHON_TESTS = os.path.join(HERE, "..", "..", "aamio-python", "tests")
 sys.path.insert(0, os.path.join(HERE, "..", "..", "aamio-python", "src"))
 
 from aamio.crypto import Keys, thread_signing_input  # noqa: E402
@@ -36,6 +43,74 @@ $out["php_signature"] = $php->sign($in["signing_input"]);
 echo json_encode($out);
 '''
 
+PACE_PHP = r'''<?php
+require $argv[1] . "/bootstrap.php";
+require $argv[1] . "/live-pace.inc.php";
+$pace = new LivePace((int) $argv[3], (float) $argv[4], $argv[2]);
+$stamps = [];
+for ($n = 0; $n < (int) $argv[5]; $n++) {
+    $pace->take();
+    $stamps[] = $pace->last;
+    usleep(random_int(0, 10000));
+}
+echo json_encode($stamps);
+'''
+
+PACE_PYTHON = r'''
+import json, random, sys, time
+sys.path.insert(0, sys.argv[1])
+import live_pace
+pace = live_pace.Pace(limit=int(sys.argv[3]), window=float(sys.argv[4]), path=sys.argv[2])
+stamps = []
+for _ in range(int(sys.argv[5])):
+    pace.take()
+    stamps.append(pace.last)
+    time.sleep(random.uniform(0.0, 0.01))
+print(json.dumps(stamps))
+'''
+
+
+def one_count():
+    """Two PHP and two Python runs take turns on one file. The stamps are the ones written, so the rule is checked exactly."""
+    if not os.path.isfile(os.path.join(PYTHON_TESTS, "live_pace.py")):
+        return None, "no aamio-python/tests/live_pace.py beside this checkout"
+
+    folder = tempfile.mkdtemp(prefix="aamio-interop-pace-")
+    ledger = os.path.join(folder, "ledger.json")
+    script = os.path.join(folder, "pace.php")
+    limit, window, turns = 4, 0.5, 8
+
+    with open(script, "w", encoding="utf-8") as handle:
+        handle.write(PACE_PHP)
+
+    try:
+        runs = [[PHP, script, HERE, ledger, str(limit), str(window), str(turns)] for _ in range(2)]
+        runs += [[sys.executable, "-c", PACE_PYTHON, PYTHON_TESTS, ledger, str(limit), str(window), str(turns)] for _ in range(2)]
+        children = [subprocess.Popen(run, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for run in runs]
+        stamps = []
+        trouble = []
+
+        for child in children:
+            out, err = child.communicate(timeout=120)
+
+            if child.returncode != 0 or err.strip():
+                trouble.append("exit %s: %s" % (child.returncode, (err.strip() or out.strip())[:200]))
+            else:
+                stamps.extend(json.loads(out))
+
+        lock_left = os.path.exists(ledger + ".lock")
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+    if trouble:
+        return False, "; ".join(trouble)
+
+    stamps.sort()
+    most = max(sum(1 for later in stamps[index:] if later - first < window) for index, first in enumerate(stamps))
+    ok = len(stamps) == 4 * turns and most <= limit and not lock_left
+
+    return ok, "%d turns, at most %d inside one window of %.1f s where the limit is %d, lock left behind: %s" % (len(stamps), most, window, limit, lock_left)
+
 
 def main():
     py = Keys(os.urandom(32))
@@ -54,13 +129,17 @@ def main():
     php_pub_b64 = b64url(bytes(SigningKey(php_seed).verify_key))
     request["envelope_from_py"] = py.seal(php_pub_b64, "fra python, åpnet i php 🐍".encode("utf-8"))
 
-    script = os.path.join(HERE, "_interop_side.php")
+    # In the temp folder, not beside this file: a checkout in a synced folder
+    # had the script held open by the sync client at the moment it was
+    # removed, and the round stopped on that rather than on anything it checks.
+    folder = tempfile.mkdtemp(prefix="aamio-interop-")
+    script = os.path.join(folder, "side.php")
     with open(script, "w", encoding="utf-8") as handle:
         handle.write(PHP_SIDE)
     try:
         run = subprocess.run([PHP, "-d", "extension_dir=" + EXT, "-d", "extension=sodium", script, HERE], input=json.dumps(request).encode("utf-8"), capture_output=True, check=True)
     finally:
-        os.remove(script)
+        shutil.rmtree(folder, ignore_errors=True)
     out = json.loads(run.stdout.decode("utf-8"))
 
     checks = []
@@ -77,6 +156,14 @@ def main():
     except Exception:
         verified = False
     checks.append((verified, "Python verifies PHP's signature"))
+
+    counted, detail = one_count()
+    label = "PHP and Python keep one count of the opens and closes their live tests make, and four runs on it never pass the limit"
+
+    if counted is None:
+        print("  skip  " + label + ": " + detail)
+    else:
+        checks.append((counted, label + ("" if counted else "  [" + detail + "]")))
 
     failed = 0
     for ok, label in checks:

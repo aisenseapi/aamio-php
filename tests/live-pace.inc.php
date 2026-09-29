@@ -19,9 +19,14 @@ declare(strict_types=1);
  *
  * The count is kept in a file in the temp folder, not in this process, so two
  * scripts run one after the other are counted as the one client the service
- * sees. The live tests of aamio-python keep the same file. Where the file
- * cannot be kept, the count of this process is kept in memory and the tests
- * run as before.
+ * sees. The live tests of aamio-python keep the same file. A turn is taken
+ * only once it is written there, under a lock both keep. The first version
+ * took a lock that was let go of between a failed mkdir and the look after it
+ * for one that could not be made, went on without it and wrote nothing, and
+ * four runs on one file let 21 through a window of 20. Where the folder for
+ * the file does not exist nobody can keep it, and this process counts its
+ * own, and says so. A lock or a file out of reach for longer than PATIENCE
+ * stops the test with the reason.
  *
  * Required by tests/live.php and tests/first-exchange.php, after bootstrap.php.
  */
@@ -36,9 +41,19 @@ final class LivePace
     public const WINDOW = 61.0;
     /** A lock this old was left by a run that was stopped while it held it. */
     public const STALE = 10.0;
+    /**
+     * How long a turn waits for the lock, or for a file another program has
+     * open, before it stops the test and says why. Longer than STALE, so a
+     * lock left by a run that was stopped is taken over first.
+     */
+    public const PATIENCE = 30.0;
 
     /** @var float[] */
     public array $own = [];
+    /** The stamp of the last turn, as it was written. */
+    public ?float $last = null;
+    /** Whether the count is kept in this process only, for want of a folder. */
+    public bool $alone = false;
     public int $taken = 0;
     public float $waited = 0.0;
     public string $path;
@@ -47,7 +62,7 @@ final class LivePace
     /** @var callable */
     private $sleep;
 
-    public function __construct(public int $limit = self::LIMIT, public float $window = self::WINDOW, ?string $path = null, ?callable $clock = null, ?callable $sleep = null)
+    public function __construct(public int $limit = self::LIMIT, public float $window = self::WINDOW, ?string $path = null, ?callable $clock = null, ?callable $sleep = null, public float $patience = self::PATIENCE)
     {
         $this->path = $path ?? self::ledgerPath();
         $this->clock = $clock ?? static fn (): float => microtime(true);
@@ -100,9 +115,7 @@ final class LivePace
         try {
             $now = (float) ($this->clock)();
             $inside = fn (float $stamp): bool => $now - $stamp >= 0 && $now - $stamp < $this->window;
-            // Read without the lock too: the file is replaced whole, never
-            // written in place, so what is there is what somebody finished.
-            $shared = array_values(array_filter($this->read(), $inside));
+            $shared = $held ? array_values(array_filter($this->read(), $inside)) : [];
             $own = array_values(array_filter($this->own, $inside));
             // What this process took is in the file as well, where the file
             // could be written, and is counted once. Two that fell on the same
@@ -115,12 +128,16 @@ final class LivePace
             }
 
             $stamps[] = $now;
-            $own[] = $now;
-            $this->own = $own;
 
             if ($held) {
+                // Written before the turn is taken. A turn the other runs
+                // cannot see is the one that takes the count over the limit.
                 $this->write($stamps);
             }
+
+            $own[] = $now;
+            $this->own = $own;
+            $this->last = $now;
 
             return null;
         } finally {
@@ -166,61 +183,143 @@ final class LivePace
     // The lock is a folder, because making one either happens or does not on
     // every system and in every language that keeps this file.
 
+    /** True once the lock is held, and false only where there is no folder to keep the count in. */
     private function lock(): bool
     {
         $folder = $this->path . '.lock';
-        $deadline = hrtime(true) / 1e9 + 5.0;
+        $deadline = hrtime(true) / 1e9 + $this->patience;
 
         while (true) {
+            error_clear_last();
+
             if (@mkdir($folder)) {
                 return true;
             }
-            if (!is_dir($folder)) {
-                // Not there and not to be made: the folder it would stand in is missing.
+
+            $reason = error_get_last()['message'] ?? 'mkdir failed';
+            clearstatcache();
+
+            // Asked of the folder the file lives in, never of the lock: a lock
+            // let go of since the mkdir looks the same as one that cannot be
+            // made, and it is only free.
+            if (!is_dir(dirname($folder))) {
+                $this->keepAlone(dirname($folder) . ' does not exist');
+
                 return false;
             }
-            clearstatcache(true, $folder);
-            $made = @filemtime($folder);
-            if ($made !== false && time() - $made > self::STALE) {
-                @rmdir($folder);
 
+            if ($this->stale($folder)) {
                 continue;
             }
+
             if (hrtime(true) / 1e9 >= $deadline) {
-                return false;
+                throw new RuntimeException(sprintf('the count of opens and closes in %s was out of reach for %s seconds (%s). Another run holds it, or its folder cannot be written: set AAMIO_LIVE_LEDGER to a file in a folder this process can write.', $this->path, $this->patience, $reason));
             }
+
             usleep(50000);
         }
     }
 
-    private function unlock(): void
+    /** Takes a lock away from a run that was stopped while it held it. True when it was taken away. */
+    private function stale(string $folder): bool
     {
-        @rmdir($this->path . '.lock');
+        $made = @filemtime($folder);
+
+        return $made !== false && time() - $made > self::STALE && @rmdir($folder);
     }
 
-    /** @return float[] */
+    private function unlock(): void
+    {
+        // A lock that stays is taken over after STALE seconds, so this tries a
+        // few times and then leaves it to that.
+        for ($n = 0; $n < 20; $n++) {
+            clearstatcache();
+            if (@rmdir($this->path . '.lock') || !is_dir($this->path . '.lock')) {
+                return;
+            }
+            usleep(10000);
+        }
+    }
+
+    private function keepAlone(string $why): void
+    {
+        if (!$this->alone) {
+            $this->alone = true;
+
+            if (defined('STDERR')) {
+                fwrite(STDERR, 'aamio live pace: ' . $why . ", so this process counts its own opens and closes and no other run sees them\n");
+            }
+        }
+    }
+
+    /**
+     * The stamps in the file. A file that is not there holds none. One that is
+     * there and will not open is waited for, never taken for empty.
+     * @return float[]
+     */
     private function read(): array
     {
-        $text = @file_get_contents($this->path);
-        $found = is_string($text) ? json_decode($text, true) : null;
+        $deadline = hrtime(true) / 1e9 + $this->patience;
+
+        while (true) {
+            clearstatcache();
+
+            if (!file_exists($this->path)) {
+                return [];
+            }
+
+            error_clear_last();
+            $text = is_file($this->path) ? @file_get_contents($this->path) : false;
+
+            if (is_string($text)) {
+                break;
+            }
+
+            if (hrtime(true) / 1e9 >= $deadline) {
+                throw new RuntimeException(sprintf('the count in %s could not be read for %s seconds: %s', $this->path, $this->patience, error_get_last()['message'] ?? 'not a file'));
+            }
+
+            usleep(50000);
+        }
+
+        // Not written here when it is no list of seconds, since the file is
+        // only ever replaced whole: taken for empty, and written over next turn.
+        $found = json_decode($text, true);
 
         if (!is_array($found) || !array_is_list($found)) {
             return [];
         }
 
-        return array_values(array_map('floatval', array_filter($found, static fn (mixed $stamp): bool => is_int($stamp) || is_float($stamp))));
+        return array_values(array_map('floatval', array_filter($found, static fn (mixed $stamp): bool => (is_int($stamp) || is_float($stamp)) && is_finite((float) $stamp))));
     }
 
-    /** @param float[] $stamps */
+    /**
+     * Replaces the file whole, so a reader never meets half of it, and waits
+     * out another program that has it open.
+     * @param float[] $stamps
+     */
     private function write(array $stamps): void
     {
         $text = json_encode(array_values($stamps));
+        $temporary = $this->path . '.' . getmypid() . '.tmp';
+        $deadline = hrtime(true) / 1e9 + $this->patience;
 
-        if (!is_string($text) || @file_put_contents($this->path . '.tmp', $text) === false) {
-            return;
+        while (true) {
+            error_clear_last();
+
+            if (is_string($text) && @file_put_contents($temporary, $text) !== false && @rename($temporary, $this->path)) {
+                return;
+            }
+
+            if (hrtime(true) / 1e9 >= $deadline) {
+                $reason = error_get_last()['message'] ?? 'the count would not encode';
+                @unlink($temporary);
+
+                throw new RuntimeException(sprintf('the count in %s could not be written for %s seconds: %s', $this->path, $this->patience, $reason));
+            }
+
+            usleep(50000);
         }
-
-        @rename($this->path . '.tmp', $this->path);
     }
 
     /**
