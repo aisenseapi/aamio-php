@@ -192,3 +192,80 @@ try {
 }
 clearstatcache();
 $check(!file_exists($againHome . DIRECTORY_SEPARATOR . 'lock'), 'and the owner that did take it still lets go of it when it closes');
+
+// Kept from the review of 30 September 2026, which ran them on its own: a
+// flock() that fails without another runtime holding the lock, and a close()
+// that meets an exception on its way out.
+$standInHome = $ownerRoot . DIRECTORY_SEPARATOR . 'lock-fails';
+mkdir($standInHome, 0700, true);
+$standInHandles = [];
+Runtime::$lockStandIn = static function ($handle, int $operation, &$wouldBlock) use (&$standInHandles): bool {
+    $standInHandles[] = $handle;
+    $wouldBlock = 0;
+
+    return false;
+};
+$standInSaid = '';
+try {
+    (new Runtime($standInHome, 'https://fake.test', ['lock-fails'], false, $quietOwner))->close();
+} catch (RuntimeException $error) {
+    $standInSaid = $error->getMessage();
+} finally {
+    Runtime::$lockStandIn = null;
+}
+clearstatcache();
+$check(
+    str_contains($standInSaid, 'cannot establish exclusive ownership') && str_contains($standInSaid, 'could not be locked') && !str_contains($standInSaid, 'another aamio')
+    && count($standInHandles) === 1 && !is_resource($standInHandles[0]) && !file_exists($standInHome . DIRECTORY_SEPARATOR . 'lock'),
+    'a flock() that fails with nobody holding the lock stops the runtime, closes the file it opened and writes nothing',
+    $standInSaid
+);
+$afterStandIn = new Runtime($standInHome, 'https://fake.test', ['lock-fails'], false, $quietOwner);
+$check(is_file($standInHome . DIRECTORY_SEPARATOR . 'lock'), 'and once flock() works again the home is taken as usual');
+$afterStandIn->close();
+
+$busyHandles = [];
+Runtime::$lockStandIn = static function ($handle, int $operation, &$wouldBlock) use (&$busyHandles): bool {
+    $busyHandles[] = $handle;
+    $wouldBlock = 1;
+
+    return false;
+};
+$busySaid = '';
+try {
+    (new Runtime($standInHome, 'https://fake.test', ['lock-fails'], false, $quietOwner))->close();
+} catch (RuntimeException $error) {
+    $busySaid = $error->getMessage();
+} finally {
+    Runtime::$lockStandIn = null;
+}
+$check(str_contains($busySaid, 'another aamio') && !str_contains($busySaid, 'cannot establish') && count($busyHandles) === 1 && !is_resource($busyHandles[0]), 'a flock() that would block is another runtime, and says so rather than that locking failed', $busySaid);
+
+// A host that turns every warning into an exception, as many frameworks do,
+// meets one in close() when the pid file will not read. The lock and the home
+// go back all the same.
+$throwingHome = $ownerRoot . DIRECTORY_SEPARATOR . 'close-throws';
+$throwing = new Runtime($throwingHome, 'https://fake.test', ['close-throws'], false, $quietOwner);
+unlink($throwingHome . DIRECTORY_SEPARATOR . 'lock');
+mkdir($throwingHome . DIRECTORY_SEPARATOR . 'lock');
+set_error_handler(static function (int $severity, string $message): bool {
+    throw new ErrorException($message, 0, $severity);
+});
+$thrownOnClose = null;
+try {
+    $throwing->close();
+} catch (\Throwable $error) {
+    $thrownOnClose = $error;
+} finally {
+    restore_error_handler();
+}
+rmdir($throwingHome . DIRECTORY_SEPARATOR . 'lock');
+$takenAfter = '';
+try {
+    $next = new Runtime($throwingHome, 'https://fake.test', ['close-throws'], false, $quietOwner);
+    $takenAfter = 'taken';
+    $next->close();
+} catch (RuntimeException $error) {
+    $takenAfter = $error->getMessage();
+}
+$check($thrownOnClose instanceof ErrorException && $takenAfter === 'taken', 'a close() that meets an exception still gives back the lock and the home, and the exception still reaches the caller', $thrownOnClose === null ? 'nothing was thrown, so the case was not reached' : $takenAfter);

@@ -123,6 +123,15 @@ final class Runtime
     private $ownerLock = null;
     /** Whether this runtime took the home, so its close() gives back only what it took. */
     private bool $ownsHome = false;
+    /**
+     * A stand-in for flock() on OWNER_LOCK, for tests: a callable taking
+     * (resource, int, &int) and returning bool, as flock() does. Null in
+     * production. A lock that fails without another runtime holding it cannot
+     * be made to happen on purpose on every system, and the refusal it leads
+     * to has to hold all the same.
+     * @var callable|null
+     */
+    public static $lockStandIn = null;
 
     /**
      * $archive null is the home's own choice, kept in config.json; false turns
@@ -416,7 +425,8 @@ final class Runtime
         }
         $wouldBlock = 0;
         error_clear_last();
-        if (@flock($handle, LOCK_EX | LOCK_NB, $wouldBlock)) {
+        $locked = self::$lockStandIn !== null ? (self::$lockStandIn)($handle, LOCK_EX | LOCK_NB, $wouldBlock) : @flock($handle, LOCK_EX | LOCK_NB, $wouldBlock);
+        if ($locked) {
             $this->ownerLock = $handle;
 
             return true;
