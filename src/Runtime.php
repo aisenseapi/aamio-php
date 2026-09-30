@@ -1439,7 +1439,11 @@ final class Runtime
      */
     private function handoverFits(string $key, int $ttl, ?string $note): void
     {
-        [, $envelope] = $this->invitation($key, str_repeat('a', 20), time() + $ttl, $note);
+        [$body] = $this->invitation($key, str_repeat('a', 20), time() + $ttl, $note);
+        // seen can appear before the handover, if a message from this key is
+        // read meanwhile, and it is always 64 characters: counted as there already.
+        $body += ['seen' => str_repeat('0', 64)];
+        $envelope = $this->keys->seal($key, Codec::json($body));
         if (strlen($envelope) > Client::MAX_MESSAGE_BYTES) {
             throw new \InvalidArgumentException('with this note the message carrying the address would be ' . strlen($envelope) . ' bytes, and a message is at most ' . Client::MAX_MESSAGE_BYTES . ', so no channel was opened. Shorten the note, and send the rest on the channel once it is open.');
         }
