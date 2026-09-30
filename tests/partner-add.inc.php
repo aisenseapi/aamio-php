@@ -200,6 +200,21 @@ $r = $askRuntime();
 $written = $served($r, [$opening(), $legacyCall(), ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'tools/call', 'params' => ['name' => 'aamio_partners', 'arguments' => []]], ['jsonrpc' => '2.0', 'method' => 'notifications/cancelled', 'params' => ['requestId' => 3]], $answering(['action' => 'decline'])]);
 $check($ids($written) === [1, 'aamio-1', 2] && ($written[2]['result']['structuredContent']['action'] ?? null) === 'decline', 'a request kept for later and cancelled meanwhile is not served', json_encode($ids($written)));
 
+// A review of 30 September 2026: a batch that came during the wait was kept as
+// one line, and a call in it that was cancelled meanwhile went ahead.
+$openCancelled = ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'tools/call', 'params' => ['name' => 'aamio_open_channel', 'arguments' => ['label' => 'cancelled', 'ttl' => 120]]];
+$r = $askRuntime();
+$written = $served($r, [$opening(), $legacyCall(), [$openCancelled, ['jsonrpc' => '2.0', 'id' => 4, 'method' => 'ping']], ['jsonrpc' => '2.0', 'method' => 'notifications/cancelled', 'params' => ['requestId' => 3]], $answering(['action' => 'decline'])]);
+$check(count($written) === 4 && array_slice($ids($written), 0, 3) === [1, 'aamio-1', 2] && array_column($written[3], 'id') === [4] && !isset($r->channels['cancelled']), 'a call cancelled inside a batch that came during the wait is not served, and the rest of the batch is', json_encode($written[3] ?? null));
+
+$r = $askRuntime();
+$written = $served($r, [$opening(), [$legacyCall(), $openCancelled], ['jsonrpc' => '2.0', 'method' => 'notifications/cancelled', 'params' => ['requestId' => 3]], $answering(['action' => 'decline'])]);
+$check(count($written) === 3 && array_slice($ids($written), 0, 2) === [1, 'aamio-1'] && array_column($written[2], 'id') === [2] && !isset($r->channels['cancelled']), 'a call cancelled later in the batch being served, while the user was asked, is not served', json_encode($written[2] ?? null));
+
+$r = $askRuntime();
+$written = $served($r, [$opening(), $legacyCall(), ['jsonrpc' => '2.0', 'method' => 'notifications/cancelled', 'params' => ['requestId' => 9]], $answering(['action' => 'decline']), ['jsonrpc' => '2.0', 'id' => 9, 'method' => 'tools/call', 'params' => ['name' => 'aamio_partners', 'arguments' => []]]]);
+$check($ids($written) === [1, 'aamio-1', 2, 9], 'a cancellation does not outlive the backlog it came with', json_encode($ids($written)));
+
 $r = $askRuntime();
 $written = $served($r, [$opening(), $legacyCall()]);
 $check($ids($written) === [1, 'aamio-1'] && !isset($bookOf($r)['carol']), 'input that ends during the wait answers nothing and ends the server');

@@ -396,7 +396,8 @@ sealed and signed, with `note` beside it. Who and where are settled before
 anything is opened, so a partner who is not online, an address nobody bound,
 or an inbox whose gate asks for more work than a tool call has time for stops
 there with no thread left open. If the message carrying the address does not
-go, the thread is open all the same, and the answer says so under `opened`.
+go, whatever stopped it, the thread is open all the same, and the answer says
+so under `opened`, with `outcome` saying whether anything left this machine.
 
 An address by itself is enough for whoever writes to it directly, with
 `Aamio\Client` or a client of their own. It is not enough for a partner's
@@ -454,7 +455,7 @@ Receipts compare all process-local observations, including kept-out ones. Fewer 
 
 ```
 php tests/run.php        # 89 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 518 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, one owner per home, the first exchange, and a partner added over MCP by the user
+php tests/runtime.php    # 525 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, one owner per home, the first exchange, and a partner added over MCP by the user
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 php tests/first-exchange.php   # two runtimes against aamio.at: partners added before and after the inbox opens, and a handoff that ends in a first send
 python tests/interop.py  # PHP and Python open each other's envelopes, verify each other's signatures, keep one count of what their live tests open, and keep each other out of a home the other holds

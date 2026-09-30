@@ -69,6 +69,8 @@ final class McpServer
     /** @var list<string> Lines that came in while a question waited, served afterwards in order. */
     private array $held = [];
     private int $asked = 0;
+    /** @var list<mixed> Ids of calls cancelled during a wait, until the backlog is served. */
+    private array $cancelled = [];
 
     public function __construct(private readonly Runtime $runtime)
     {
@@ -502,6 +504,11 @@ final class McpServer
             return null;
         } catch (SendFailed $error) {
             [$retryable, $fix] = Runtime::sendAdvice($error->outcome, $error->status);
+            // A channel whose address never left: sending again would need the
+            // address, and nobody has it.
+            if ($error->opened !== null && $error->outcome === 'never_sent') {
+                $fix = 'Nothing left this machine, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to.';
+            }
 
             return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'operation' => ['aamio_board_answer' => 'board_answer', 'aamio_open_channel' => 'open_channel'][$name] ?? 'send', 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::stillOpen($error->opened) . $fix], true);
         } catch (GateStop $error) {
@@ -661,7 +668,31 @@ final class McpServer
     /** The next line to serve: one kept while a question waited, else a new one. False when the input has ended. */
     private function nextLine(): string|false
     {
-        return $this->held !== [] ? array_shift($this->held) : fgets($this->in);
+        if ($this->held !== []) {
+            return array_shift($this->held);
+        }
+        // Everything that came in while a question waited has been served, so
+        // the cancellations it brought have nothing left to stop.
+        $this->cancelled = [];
+
+        return fgets($this->in);
+    }
+
+    /** Whether $message is a call cancelled while a question waited. One that is, is not served. */
+    private function skips(mixed $message): bool
+    {
+        if (!is_array($message) || array_is_list($message) || !is_string($message['method'] ?? null) || !array_key_exists('id', $message)) {
+            return false;
+        }
+        foreach ($this->cancelled as $index => $id) {
+            if ($id === $message['id']) {
+                array_splice($this->cancelled, $index, 1);
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -669,7 +700,11 @@ final class McpServer
      * own request $waiting waits. What arrives meanwhile is kept and served
      * afterwards, in order: a ping is answered at once, and a cancellation of
      * the call that waits ends the wait, withdraws the question, and answers
-     * nothing.
+     * nothing. A cancellation of any other call is kept until what was waiting
+     * has been served, and that call is not served. It was applied to whole
+     * lines only, and a call inside a batch, kept whole or already being
+     * served, went ahead when its cancellation had come first (a review, 30
+     * September 2026).
      */
     private function ask(string $method, array $params, mixed $waiting): array
     {
@@ -694,12 +729,10 @@ final class McpServer
                 throw new McpInterrupt(null, 'the call was cancelled while the user was being asked');
             }
             if ($cancelled !== null) {
-                // A request kept for later that is cancelled now is not served.
-                $this->held = array_values(array_filter($this->held, static function (string $kept) use ($cancelled): bool {
-                    $request = json_decode($kept, true);
-
-                    return !(is_array($request) && !array_is_list($request) && array_key_exists('method', $request) && ($request['id'] ?? null) === $cancelled);
-                }));
+                // Kept, and asked about before each call is served: the call may
+                // be in a line kept for later, inside a batch, or next in the
+                // batch this wait interrupted.
+                $this->cancelled[] = $cancelled;
                 continue;
             }
             if (($message['method'] ?? null) === 'ping' && array_key_exists('id', $message)) {
@@ -742,7 +775,16 @@ final class McpServer
             if (json_last_error() !== JSON_ERROR_NONE) {
                 $reply = ['jsonrpc' => '2.0', 'id' => null, 'error' => ['code' => -32700, 'message' => 'Parse error']];
             } else {
-                $replies = array_values(array_filter(array_map([$this, 'safely'], is_array($message) && array_is_list($message) ? $message : [$message]), static fn ($r) => $r !== null));
+                // One at a time and asked about just before, since serving one
+                // call can wait on the user, and a later call in the same batch
+                // can be cancelled meanwhile.
+                $replies = [];
+                foreach (is_array($message) && array_is_list($message) ? $message : [$message] as $one) {
+                    $reply = $this->skips($one) ? null : $this->safely($one);
+                    if ($reply !== null) {
+                        $replies[] = $reply;
+                    }
+                }
                 if ($replies === []) {
                     continue;
                 }

@@ -206,6 +206,60 @@ try {
 }
 $said = $refused['structuredContent'] ?? [];
 $check(($refused['isError'] ?? false) === true && ($said['operation'] ?? null) === 'open_channel' && ($said['outcome'] ?? null) === 'refused' && ($said['opened']['label'] ?? null) === 'late' && str_starts_with((string) ($said['fix'] ?? ''), 'The channel late is open and listed by aamio_channels: only the message carrying its address did not go.') && isset($t->channels['late']), 'a handover the service refuses says the channel is open, and what did not go', json_encode($said));
+
+// Whatever else stops it once the channel is open, the answer says the channel
+// is there and whether anything left this machine. A review of 30 September
+// 2026 found a file that would not write left the channel out of the answer.
+$outboxFile = $t->home . DIRECTORY_SEPARATOR . 'outbox.json';
+$toU = static fn (): int => count($fake->threads[$uInbox->w]['messages']);
+$beforeU = $toU();
+@unlink($outboxFile);
+mkdir($outboxFile, 0700);
+try {
+    $partial = $tMcp->dispatch('aamio_open_channel', ['label' => 'partial', 'ttl' => 120, 'to' => 'U']);
+} finally {
+    rmdir($outboxFile);
+}
+$said = $partial['structuredContent'] ?? [];
+$check(($partial['isError'] ?? false) === true && ($said['outcome'] ?? null) === 'never_sent' && ($said['error_code'] ?? null) === 'send_never_sent' && ($said['operation'] ?? null) === 'open_channel' && ($said['opened']['label'] ?? null) === 'partial' && isset($t->channels['partial']) && array_key_exists('message_id', $said) && $said['message_id'] === null, 'a handover whose record cannot be written says the channel is open and that nothing left', json_encode($said));
+$check(str_starts_with((string) ($said['fix'] ?? ''), 'The channel partial is open and listed by aamio_channels') && str_contains((string) ($said['fix'] ?? ''), 'Close it with aamio_close_channel') && $toU() === $beforeU, 'and says what to do about a channel whose address nobody has, with nothing sent to the partner', json_encode($said));
+
+// Stored by the service, and the record here could not be written after it.
+$exchangeHeld = Http::$override;
+Http::$override = static function (string $method, string $url, ?string $body, array $headers, mixed ...$rest) use ($fake, $uInbox, $outboxFile): array {
+    $answer = $fake($method, $url, $body, $headers);
+    if ($method === 'POST' && str_contains($url, '/' . $uInbox->w)) {
+        @unlink($outboxFile);
+        @mkdir($outboxFile, 0700);
+    }
+
+    return $answer;
+};
+try {
+    $landed = $tMcp->dispatch('aamio_open_channel', ['label' => 'landed', 'ttl' => 120, 'to' => 'U']);
+} finally {
+    Http::$override = $exchangeHeld;
+    @rmdir($outboxFile);
+}
+[, $arrivedU] = $u->poll($uInbox);
+$check(($landed['isError'] ?? true) === false && str_contains((string) ($landed['structuredContent']['outbox_error'] ?? ''), 'outbox.json') && in_array($landed['structuredContent']['w'] ?? '', array_map(static fn (array $e): mixed => $e['body']['channel'] ?? null, $arrivedU), true), 'a handover the service stored is a handover, and the answer says the record here was not written', json_encode($landed['structuredContent'] ?? null));
+
+// Posted, and the line broke before an answer came back.
+Http::$override = static function (string $method, string $url, ?string $body, array $headers, mixed ...$rest) use ($fake, $uInbox): array {
+    $answer = $fake($method, $url, $body, $headers);
+    if ($method === 'POST' && str_contains($url, '/' . $uInbox->w)) {
+        throw new \RuntimeException('reset by the remote host');
+    }
+
+    return $answer;
+};
+try {
+    $unsure = $tMcp->dispatch('aamio_open_channel', ['label' => 'unsure', 'ttl' => 120, 'to' => 'U']);
+} finally {
+    Http::$override = $exchangeHeld;
+}
+$said = $unsure['structuredContent'] ?? [];
+$check(($said['outcome'] ?? null) === 'unknown' && ($said['opened']['label'] ?? null) === 'unsure' && isset($t->outbox[$said['message_id'] ?? '']) && str_contains((string) ($said['fix'] ?? ''), 'aamio_outbox_retry'), 'a handover whose post broke on the way is unknown, keeps its id, and says the channel is open', json_encode($said));
 $t->close();
 $u->close();
 

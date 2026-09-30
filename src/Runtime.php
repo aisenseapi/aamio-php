@@ -112,6 +112,12 @@ final class Runtime
     /** @var array<string, array> */
     private array $gates = [];
     /**
+     * How many times this process has handed a message to the client to post,
+     * counted just before it does. A handover that fails tells from it whether
+     * anything could have left this machine.
+     */
+    private int $posts = 0;
+    /**
      * Homes locked by this process, for a plainer message. The lock on
      * OWNER_LOCK keeps out a second runtime in this process as well.
      * @var array<string, true>
@@ -1376,9 +1382,9 @@ final class Runtime
         }
 
         [$replyTo, $key] = $handover;
-        $this->handOver($channel, $key, $replyTo, $note);
+        $told = $this->handOver($channel, $key, $replyTo, $note);
 
-        return $result + ['handed_to' => $this->nameForKey($key) ?? $key, 'address_sent_to' => $replyTo];
+        return $result + ['handed_to' => $this->nameForKey($key) ?? $key, 'address_sent_to' => $replyTo] + $told;
     }
 
     /**
@@ -1409,20 +1415,34 @@ final class Runtime
     }
 
     /** The channel's address sent to $replyTo, sealed to $key and signed, through the outbox like any send. */
+    /**
+     * The channel's address sent to $replyTo, sealed to $key and signed,
+     * through the outbox like any send. Returns what the caller's answer should
+     * carry besides: nothing, or that the address went and the record of it did
+     * not reach the disk.
+     *
+     * Whatever stops it, the channel is open by now, and the failure says so
+     * and says whether anything left this machine. Only a refusal and a gate
+     * used to: a file that would not write, found in a review of 30 September
+     * 2026, left an open channel out of the answer.
+     */
     private function handOver(Channel $channel, string $key, string $replyTo, ?string $note = null): array
     {
-        $body = ['channel' => $channel->w, 'expire_at' => $channel->expireAt];
-        if ($note !== null) {
-            $body['text'] = $note;
-        }
-        $body += $this->conversation($key);
         $opened = ['label' => $channel->label, 'w' => $channel->w, 'expire_at' => $channel->expireAt];
-        // The message that carries the address is a send, and goes through
-        // the outbox like one. It was posted directly, and a refusal was a
-        // bare error: on the command line a traceback, with the channel open
-        // and its address delivered to nobody.
-        $entry = $this->outboxAdd($replyTo, $key, $this->keys->seal($key, Codec::json($body)), $body);
+        $id = null;
+        $posts = $this->posts;
         try {
+            $body = ['channel' => $channel->w, 'expire_at' => $channel->expireAt];
+            if ($note !== null) {
+                $body['text'] = $note;
+            }
+            $body += $this->conversation($key);
+            // The message that carries the address is a send, and goes through
+            // the outbox like one. It was posted directly, and a refusal was a
+            // bare error: on the command line a traceback, with the channel
+            // open and its address delivered to nobody.
+            $entry = $this->outboxAdd($replyTo, $key, $this->keys->seal($key, Codec::json($body)), $body);
+            $id = $entry['id'];
             [$status, $handed] = $this->deliver($entry);
         } catch (GateStop $stop) {
             // The channel is open whatever stopped the message, and the caller
@@ -1430,6 +1450,27 @@ final class Runtime
             $stop->opened = $opened;
 
             throw $stop;
+        } catch (\Throwable $error) {
+            $why = (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage();
+            // Nothing was handed to the client to post, so nothing left, and the
+            // entry says so, as a stop before the post does.
+            if ($id === null || $this->posts === $posts) {
+                if ($id !== null && isset($this->outbox[$id])) {
+                    $this->outbox[$id]['status'] = ($this->outbox[$id]['ever_open'] ?? false) ? 'unknown' : 'stopped';
+                    $this->outbox[$id]['error'] = $why;
+                }
+
+                throw new SendFailed('never_sent', $id, 0, $why, $opened);
+            }
+            $settled = self::outboxOutcome($this->outbox[$id] ?? null);
+            if ($settled === 'delivered') {
+                // The service stored it, and only the record here did not reach the disk.
+                return ['outbox_error' => $why];
+            }
+
+            // A refusal the service answered settles it, and anything else that
+            // left may have landed.
+            throw new SendFailed($settled === 'refused' ? 'refused' : 'unknown', $id, (int) ($this->outbox[$id]['last_status'] ?? 0), $why, $opened);
         }
         if ($status !== 201) {
             $entry = $this->outbox[$entry['id']];
@@ -1437,7 +1478,7 @@ final class Runtime
             throw new SendFailed($entry['status'], $entry['id'], $status, $handed, $opened);
         }
 
-        return is_array($handed) ? $handed : [];
+        return [];
     }
 
     /**
@@ -1870,11 +1911,9 @@ final class Runtime
         $channel = new Channel($label, $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], [$key]);
         $this->channels[$label] = $channel;
         $this->saveState();
-        if ($replyTo !== null) {
-            $this->handOver($channel, $key, $replyTo, $note);
-        }
+        $told = $replyTo !== null ? $this->handOver($channel, $key, $replyTo, $note) : [];
 
-        return ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt, 'with' => $this->nameForKey($key) ?? $key, 'address_sent_to' => $replyTo];
+        return ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt, 'with' => $this->nameForKey($key) ?? $key, 'address_sent_to' => $replyTo] + $told;
     }
 
     // ------------------------------------------------------------- lookup --
@@ -2103,6 +2142,7 @@ final class Runtime
     /** POST an envelope to an inbox with the work its gate asks for, answering a 428 once. */
     private function post(string $w, string $envelope, array &$notes): array
     {
+        $this->posts++;
         $sent = $this->client->send($w, $envelope, true, null);
         $notes = array_values(array_unique(array_merge($notes, $sent['notes'])));
         if (!empty($sent['stopped'])) {
@@ -2328,6 +2368,9 @@ final class Runtime
     /** (retryable, fix) for one send outcome. retryable is about the same stored bytes, never a permission to repeat automatically. */
     public static function sendAdvice(string $outcome, int $status): array
     {
+        if ($outcome === 'never_sent') {
+            return [false, 'Nothing left this machine for this message, so it was not delivered and will not be: the error says what stopped it. Put that right, then send it as a new message. There is nothing to retry.'];
+        }
         if ($outcome === 'unknown') {
             return [null, 'No answer came back, so this message may already have been delivered. Keep its message_id. aamio_pending lists what has no settled outcome on this machine; it does not confirm delivery, and nothing here can, because the address it went to is not yours to read. Do not pass the message_id to aamio_send and do not compose a replacement. An approved retry sends the stored bytes again: aamio_outbox_retry with this id, or aamio outbox retry --id on the command line.'];
         }

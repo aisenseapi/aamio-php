@@ -13,7 +13,8 @@ final class SendFailed extends \RuntimeException
 {
     public function __construct(
         public readonly string $outcome,
-        public readonly string $messageId,
+        /** Null when the failure came before the message had an outbox entry. */
+        public readonly ?string $messageId,
         public readonly int $status,
         public readonly mixed $detail,
         /**

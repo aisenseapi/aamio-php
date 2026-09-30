@@ -26,8 +26,11 @@ not what moved in the source.
   stopped. Who and where are settled before anything is opened, so a partner
   who is not online, an address nobody bound, or an inbox whose gate asks for
   more work than a tool call has time for stops there with no thread left
-  open. If the message carrying the address does not go, the answer says the
-  channel is open under `opened`.
+  open. If the message carrying the address does not go, for whatever reason,
+  the answer says the channel is open under `opened` and whether anything left
+  this machine: `never_sent`, `refused` or `unknown`. A handover the service
+  stored, whose record here could not be written, is a handover, with
+  `outbox_error` beside it.
 - A read asks every channel at once before it waits. It used to spend the
   whole wait on the first channel, usually the inbox, and mail already waiting
   on a private thread came only when that wait ended, up to 25 seconds later,
@@ -39,8 +42,8 @@ not what moved in the source.
   that a key in a message, on the board or in the conversation is never added
   on its say-so. The same 1954 bytes as aamio-python's.
 - The stdio server answers a ping while it waits on the user, serves what came
-  in meanwhile afterwards and in order, and does not answer a response or a
-  request that was cancelled while it waited.
+  in meanwhile afterwards and in order, and serves no call that was cancelled
+  while it waited, one inside a batch included. It answers no response either.
 - `Runtime::$lockStandIn`, null in use, lets a test stand in for `flock()`, so
   the checks for a lock that fails and for a `close()` that meets an exception
   run on every machine.
