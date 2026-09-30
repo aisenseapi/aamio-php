@@ -359,7 +359,10 @@ Two runtimes that start at the same moment leave one owner. The operating
 system holds a lock on `owner.lock` for the runtime using the home and lets go
 of it when that process ends, however it ends, so a lock left by a process
 that is gone blocks nobody. aamio-python takes the same lock, so a Python
-runtime and this one keep each other out too. A pid file from a version before
+runtime and this one keep each other out too. Where `owner.lock` cannot be
+opened or locked, as on a network filesystem without locks, nothing proves the
+home free, and the runtime stops with the reason: give it an `AAMIO_HOME` on a
+local disk. A pid file from a version before
 `owner.lock` is still honoured: where the system will not say whether that
 process still runs, as on a Linux without the posix extension, the lock is
 left alone and the command stops with "could not determine whether aamio (pid
@@ -431,7 +434,7 @@ Receipts compare all process-local observations, including kept-out ones. Fewer 
 
 ```
 php tests/run.php        # 89 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 477 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, one owner per home, and the first exchange
+php tests/runtime.php    # 481 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, one owner per home, and the first exchange
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 php tests/first-exchange.php   # two runtimes against aamio.at: partners added before and after the inbox opens, and a handoff that ends in a first send
 python tests/interop.py  # PHP and Python open each other's envelopes, verify each other's signatures, keep one count of what their live tests open, and keep each other out of a home the other holds

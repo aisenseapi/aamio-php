@@ -354,7 +354,9 @@ final class Runtime
      * Taking it is one step. With the pid file alone, taking the home was
      * three steps, a read, a check and a write, and two runtimes started at
      * once could both read that nobody had it and both go on (a review, 29
-     * September 2026).
+     * September 2026). Where OWNER_LOCK cannot be opened or locked, as on a
+     * network filesystem without locks, nothing proves the home free, and the
+     * runtime stops with the reason instead of going on without it.
      *
      * The pid file is still written: it names the owner in the message a
      * second runtime gives, and it is all that versions from before
@@ -376,7 +378,7 @@ final class Runtime
         }
         try {
             $this->checkOlderOwner($probe);
-            $this->saveJson('lock', ['pid' => getmypid(), 'at' => time(), 'host' => $this->host, 'os_lock' => $this->ownerLock !== null]);
+            $this->saveJson('lock', ['pid' => getmypid(), 'at' => time(), 'host' => $this->host, 'os_lock' => true]);
         } catch (\Throwable $error) {
             $this->letGoOfOwnerLock();
             throw $error;
@@ -386,40 +388,46 @@ final class Runtime
     }
 
     /**
-     * True once OWNER_LOCK is held, false when another open file holds it, in
-     * this process or in another, and null where it cannot be locked here.
+     * True once OWNER_LOCK is held, and false when another open file holds it,
+     * in this process or in another. Anything else throws: held by nobody and
+     * not by this one either, nothing proves the home free. 0.3.8 went on with
+     * the pid file alone here, which two runtimes started at once could both
+     * take, and said so only to a logger that does nothing unless the caller
+     * sets one (a review, 30 September 2026).
+     *
      * flock() on Windows locks the whole file, which covers the one byte
      * aamio-python locks there, so each keeps the other out. The file is never
      * removed: a lock on a file that was removed and made again is a lock on
      * another file, and each of two runtimes would hold one.
      */
-    private function holdOwnerLock(): ?bool
+    private function holdOwnerLock(): bool
     {
         $path = $this->path(self::OWNER_LOCK);
         $mask = umask(0077);
         try {
+            error_clear_last();
             $handle = @fopen($path, 'c');
+            $why = error_get_last()['message'] ?? 'the file would not open';
         } finally {
             umask($mask);
         }
-        if ($handle !== false) {
-            $wouldBlock = 0;
-            if (@flock($handle, LOCK_EX | LOCK_NB, $wouldBlock)) {
-                $this->ownerLock = $handle;
-
-                return true;
-            }
-            fclose($handle);
-            if ($wouldBlock) {
-                return false;
-            }
+        if ($handle === false) {
+            throw new \RuntimeException(sprintf('cannot establish exclusive ownership of %s: %s could not be opened (%s). Restore file access, or use a different AAMIO_HOME on a local disk.', $this->home, $path, $why));
         }
-        // A system that cannot lock here: the pid file alone, as before.
-        if (is_callable($this->log)) {
-            ($this->log)($path . ' could not be locked here, so only the pid in the lock file keeps a second runtime out');
+        $wouldBlock = 0;
+        error_clear_last();
+        if (@flock($handle, LOCK_EX | LOCK_NB, $wouldBlock)) {
+            $this->ownerLock = $handle;
+
+            return true;
+        }
+        $why = error_get_last()['message'] ?? 'flock() refused without saying why';
+        fclose($handle);
+        if ($wouldBlock) {
+            return false;
         }
 
-        return null;
+        throw new \RuntimeException(sprintf('cannot establish exclusive ownership of %s: %s could not be locked (%s). Restore locking support, or use a different AAMIO_HOME on a local disk.', $this->home, $path, $why));
     }
 
     /** What the pid file says, for a message. Nothing when it cannot be read. */
@@ -434,14 +442,14 @@ final class Runtime
         return is_array($held) ? $held : null;
     }
 
-    /** An owner the operating system's lock cannot see: a version from before OWNER_LOCK, or a system that cannot lock. */
+    /** An owner the operating system's lock cannot see: a version from before OWNER_LOCK, which writes the pid file alone. */
     private function checkOlderOwner(?callable $probe): void
     {
         $held = $this->loadJson('lock', null);
         if (!is_array($held) || !is_int($held['pid'] ?? null) || $held['pid'] === getmypid()) {
             return;
         }
-        if ($this->ownerLock !== null && ($held['os_lock'] ?? null) === true) {
+        if (($held['os_lock'] ?? null) === true) {
             // Written by a runtime that held OWNER_LOCK. This one holds it now,
             // so that one has let go of it or ended: no pid needs asking about.
             return;
@@ -3251,17 +3259,26 @@ final class Runtime
 
     public function close(): void
     {
+        // Only what this runtime took. Closed a second time, after another
+        // runtime in this process had taken the home, it deleted that one's
+        // pid file: the two share a pid, so the pid could not tell them apart
+        // (a review, 30 September 2026).
+        if (!$this->ownsHome) {
+            return;
+        }
         // PHP has no background threads here, so there is nothing to wait for:
         // when this returns, nothing else in this process is reading.
         $this->homeReleased = true;
-        $held = $this->loadJson('lock', null);
-        if (is_array($held) && ($held['pid'] ?? null) === getmypid()) {
-            @unlink($this->path('lock'));
-        }
-        // After the pid file, so a runtime that takes the lock the moment it
-        // is free finds no pid file of this one's to wonder about.
-        $this->letGoOfOwnerLock();
-        if ($this->ownsHome) {
+        try {
+            $held = $this->loadJson('lock', null);
+            if (is_array($held) && ($held['pid'] ?? null) === getmypid()) {
+                @unlink($this->path('lock'));
+            }
+        } finally {
+            // After the pid file, so a runtime that takes the lock the moment
+            // it is free finds no pid file of this one's to wonder about. And
+            // whatever the pid file said, the lock and the home go back.
+            $this->letGoOfOwnerLock();
             unset(self::$lockedHomes[realpath($this->home) ?: $this->home]);
             $this->ownsHome = false;
         }

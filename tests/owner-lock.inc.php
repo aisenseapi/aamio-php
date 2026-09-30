@@ -110,3 +110,85 @@ if (!isset($childPhp)) {
     $afterOlder->close();
     $check(str_contains($olderRefused, 'another aamio (pid 999999999) is using'), 'a pid file from before owner.lock still keeps a runtime out', $olderRefused);
 }
+
+// A review on 30 September 2026: where owner.lock could not be opened or
+// locked, 0.3.8 went on with the pid file alone, and two runtimes started at
+// once could both take the home again. Nothing proves a home free then.
+$quietOwner = static function (string $line): void {
+};
+$ownerFiles = static fn (string $home): array => array_values(array_filter((array) scandir($home), static fn (string $name): bool => is_file($home . DIRECTORY_SEPARATOR . $name)));
+
+$blockedHome = $ownerRoot . DIRECTORY_SEPARATOR . 'blocked';
+mkdir($blockedHome . DIRECTORY_SEPARATOR . Runtime::OWNER_LOCK, 0700, true);
+file_put_contents($blockedHome . DIRECTORY_SEPARATOR . 'partners.json', "[]\n");
+$blockedSaid = '';
+try {
+    (new Runtime($blockedHome, 'https://fake.test', ['blocked'], false, $quietOwner))->close();
+} catch (RuntimeException $error) {
+    $blockedSaid = $error->getMessage();
+}
+clearstatcache();
+$check(
+    str_contains($blockedSaid, 'cannot establish exclusive ownership') && str_contains($blockedSaid, 'AAMIO_HOME') && !str_contains($blockedSaid, 'another aamio')
+    && is_dir($blockedHome . DIRECTORY_SEPARATOR . Runtime::OWNER_LOCK) && $ownerFiles($blockedHome) === ['partners.json'] && file_get_contents($blockedHome . DIRECTORY_SEPARATOR . 'partners.json') === "[]\n",
+    'an owner.lock that will not open stops the runtime with the reason, before anything is written',
+    $blockedSaid
+);
+
+if (isset($childPhp)) {
+    $blockedAtOnce = $ownerRoot . DIRECTORY_SEPARATOR . 'blocked-at-once';
+    mkdir($blockedAtOnce . DIRECTORY_SEPARATOR . Runtime::OWNER_LOCK, 0700, true);
+    $blockedGo = $ownerRoot . DIRECTORY_SEPARATOR . 'blocked-go';
+    $blockedDone = $ownerRoot . DIRECTORY_SEPARATOR . 'blocked-done';
+    $blockedRunning = [];
+    for ($n = 0; $n < 4; $n++) {
+        $pipes = [];
+        $blockedRunning[] = [proc_open(array_merge($childPhp, [$ownerStarter, $blockedAtOnce, $blockedGo, $blockedDone]), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes), $pipes];
+    }
+    usleep(1000000);
+    touch($blockedGo);
+    $blockedLines = [];
+    foreach ($blockedRunning as [, $pipes]) {
+        $blockedLines[] = trim((string) fgets($pipes[1]));
+    }
+    touch($blockedDone);
+    foreach ($blockedRunning as [$process, $pipes]) {
+        stream_get_contents($pipes[1]);
+        stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        proc_close($process);
+    }
+    clearstatcache();
+    $check(
+        count($blockedLines) === 4 && array_filter($blockedLines, static fn (string $line): bool => !str_starts_with($line, 'refused: cannot establish exclusive ownership')) === [] && !file_exists($blockedAtOnce . DIRECTORY_SEPARATOR . 'lock'),
+        'four runtimes started at once on a home that cannot be locked all stop, and none writes a pid file',
+        implode(' | ', $blockedLines)
+    );
+}
+
+// Two runtimes in one process share a pid, so only ownership can tell whose
+// pid file it is. A runtime closed again after the next one took the home
+// deleted that one's pid file.
+$againHome = $ownerRoot . DIRECTORY_SEPARATOR . 'closed-again';
+$first = new Runtime($againHome, 'https://fake.test', ['first'], false, $quietOwner);
+$first->close();
+$second = new Runtime($againHome, 'https://fake.test', ['second'], false, $quietOwner);
+try {
+    $marker = $againHome . DIRECTORY_SEPARATOR . 'lock';
+    $markerBefore = (string) file_get_contents($marker);
+    $first->close();
+    clearstatcache();
+    $markerKept = is_file($marker) && file_get_contents($marker) === $markerBefore;
+    $thirdSaid = '';
+    try {
+        (new Runtime($againHome, 'https://fake.test', ['third'], false, $quietOwner))->close();
+    } catch (RuntimeException $error) {
+        $thirdSaid = $error->getMessage();
+    }
+    $check($markerKept && str_contains($thirdSaid, 'is already using'), 'closing a runtime again leaves the next owner\'s pid file alone, and the home stays taken', $thirdSaid);
+} finally {
+    $second->close();
+}
+clearstatcache();
+$check(!file_exists($againHome . DIRECTORY_SEPARATOR . 'lock'), 'and the owner that did take it still lets go of it when it closes');

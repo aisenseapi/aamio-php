@@ -4,6 +4,22 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.9 - 2026-09-30
+
+- A home whose `owner.lock` cannot be opened or locked is not taken. 0.3.8
+  went on with the pid file alone when the lock failed for any reason but
+  another runtime holding it, and four runtimes started at once on such a
+  home left three owners in the check. The only word of it went to a logger
+  that does nothing unless the caller sets one. The runtime now stops with
+  "cannot establish exclusive ownership" and the reason, and a home on a
+  filesystem without locks has to move to a local disk. aamio-python 0.6.23
+  does the same.
+- `close()` gives back only what the runtime took. Called a second time, after
+  another runtime in the same process had taken the home, it deleted that
+  one's pid file, since the two share a pid, and a version from before
+  `owner.lock` could then have taken the home beside it. The lock and the home
+  are also given back when the pid file cannot be read.
+
 ## 0.3.8 - 2026-09-29
 
 - A failed Windows process check no longer permits taking over a runtime's
