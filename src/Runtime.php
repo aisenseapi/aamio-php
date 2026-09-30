@@ -1313,10 +1313,24 @@ final class Runtime
 
     // ----------------------------------------------------------- channels --
 
-    public function openChannel(string $label, int $ttl, ?array $allowNames = null, mixed $gate = null): array
+    /**
+     * A channel with its own lifetime and, with $to, its address handed to
+     * whoever is to write there.
+     *
+     * $to is a partner's name or key, or a write address a verified message
+     * gave as reply_to or channel. That key goes on the allowlist beside the
+     * partners in $allowNames, and the address goes to it sealed and signed,
+     * which is what makes the other runtime bind it: an address pasted into
+     * text or data binds nothing. Until 30 September 2026 only the command
+     * line could hand an address over, with aamio board channel.
+     */
+    public function openChannel(string $label, int $ttl, ?array $allowNames = null, mixed $gate = null, ?string $to = null, ?string $note = null): array
     {
         if (isset($this->channels[$label]) || str_starts_with($label, 'inbox')) {
             throw new \InvalidArgumentException('channel exists or reserved: ' . $label);
+        }
+        if ($note !== null && $to === null) {
+            throw new \InvalidArgumentException('note travels with the address to whoever to names, so without to there is nothing to carry it');
         }
         $keys = [];
         foreach ($allowNames ?? [] as $name) {
@@ -1328,6 +1342,20 @@ final class Runtime
         }
         if ($gate !== null) {
             $gate = self::checkGate($gate);
+        }
+
+        $handover = null;
+        if ($to !== null) {
+            // Where the address goes and whose key seals it, before anything is
+            // opened: a partner who is not online, an address nobody bound, or
+            // an inbox whose gate cannot be met stops here, with no channel
+            // left open behind it.
+            [$replyTo, $key] = $this->recipient($to);
+            $this->canHandOver($replyTo);
+            if (!in_array($key, $keys, true)) {
+                $keys[] = $key;
+            }
+            $handover = [$replyTo, $key];
         }
 
         $opened = $this->client->open($ttl, $keys !== [] ? $keys : null, $gate);
@@ -1342,7 +1370,74 @@ final class Runtime
         // with no conditions answered exactly like one whose gate went nowhere. It
         // is not kept here: the inbox holds it and GET /{w}/gate serves it, and a
         // second copy on this machine could only disagree with the first.
-        return ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt, 'allow' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, $keys), 'gate' => $gate];
+        $result = ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt, 'allow' => array_map(fn (string $k): string => $this->nameForKey($k) ?? $k, $keys), 'gate' => $gate];
+        if ($handover === null) {
+            return $result;
+        }
+
+        [$replyTo, $key] = $handover;
+        $this->handOver($channel, $key, $replyTo, $note);
+
+        return $result + ['handed_to' => $this->nameForKey($key) ?? $key, 'address_sent_to' => $replyTo];
+    }
+
+    /**
+     * Whether the inbox at $replyTo takes a handover from here, asked before a
+     * channel is opened for it. Its gate is read as a send reads it, and work
+     * longer than a caller with a time limit may wait stops here: this runtime
+     * cannot work in the background, and a handover that ran out of time would
+     * leave the channel open with its address on the way to nobody.
+     */
+    private function canHandOver(string $replyTo): void
+    {
+        $cached = array_key_exists($replyTo, $this->gates);
+        $plan = Gate::plan($this->gateFor($replyTo), $this->client->secondsLeft($replyTo));
+        if ($plan['stop'] !== null && $cached) {
+            $this->forgetGate($replyTo);
+            $plan = Gate::plan($this->gateFor($replyTo), $this->client->secondsLeft($replyTo));
+        }
+        if ($plan['stop'] !== null) {
+            throw new GateStop($plan['stop'] . '. No channel was opened for it');
+        }
+        $budget = $this->client->workBudget;
+        if ($budget !== null && $plan['expected_seconds'] > $budget) {
+            throw new GateStop(
+                'the inbox at ' . $replyTo . ' asks for ' . $plan['bits'] . ' bits of proof of work, about ' . Gate::describe($plan['expected_seconds']) . ' here, longer than this call may take, so no channel was opened',
+                'Hand the channel over from the command line, where the work has the time it needs: aamio board channel KEY --reply-to ADDRESS.',
+            );
+        }
+    }
+
+    /** The channel's address sent to $replyTo, sealed to $key and signed, through the outbox like any send. */
+    private function handOver(Channel $channel, string $key, string $replyTo, ?string $note = null): array
+    {
+        $body = ['channel' => $channel->w, 'expire_at' => $channel->expireAt];
+        if ($note !== null) {
+            $body['text'] = $note;
+        }
+        $body += $this->conversation($key);
+        $opened = ['label' => $channel->label, 'w' => $channel->w, 'expire_at' => $channel->expireAt];
+        // The message that carries the address is a send, and goes through
+        // the outbox like one. It was posted directly, and a refusal was a
+        // bare error: on the command line a traceback, with the channel open
+        // and its address delivered to nobody.
+        $entry = $this->outboxAdd($replyTo, $key, $this->keys->seal($key, Codec::json($body)), $body);
+        try {
+            [$status, $handed] = $this->deliver($entry);
+        } catch (GateStop $stop) {
+            // The channel is open whatever stopped the message, and the caller
+            // has to hear that as well as why.
+            $stop->opened = $opened;
+
+            throw $stop;
+        }
+        if ($status !== 201) {
+            $entry = $this->outbox[$entry['id']];
+
+            throw new SendFailed($entry['status'], $entry['id'], $status, $handed, $opened);
+        }
+
+        return is_array($handed) ? $handed : [];
     }
 
     /**
@@ -1776,21 +1871,7 @@ final class Runtime
         $this->channels[$label] = $channel;
         $this->saveState();
         if ($replyTo !== null) {
-            $body = ['channel' => $channel->w, 'expire_at' => $channel->expireAt];
-            if ($note !== null) {
-                $body['text'] = $note;
-            }
-            $body += $this->conversation($key);
-            // The message that carries the address is a send, and goes through
-            // the outbox like one. It was posted directly, and a refusal was a
-            // bare error: on the command line a traceback, with the channel
-            // open and its address delivered to nobody.
-            $entry = $this->outboxAdd($replyTo, $key, $this->keys->seal($key, Codec::json($body)), $body);
-            [$status, $handed] = $this->deliver($entry);
-            if ($status !== 201) {
-                $entry = $this->outbox[$entry['id']];
-                throw new SendFailed($entry['status'], $entry['id'], $status, $handed, ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt]);
-            }
+            $this->handOver($channel, $key, $replyTo, $note);
         }
 
         return ['label' => $label, 'w' => $channel->w, 'expire_at' => $channel->expireAt, 'with' => $this->nameForKey($key) ?? $key, 'address_sent_to' => $replyTo];
@@ -1860,6 +1941,22 @@ final class Runtime
         if ($answers !== null && !self::isMessageHash($answers)) {
             throw new \InvalidArgumentException('re is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it');
         }
+        [$w, $key, $partner] = $this->recipient($to);
+
+        return $this->sendSealed($w, $key, $partner, $text, $data, $replyTo, null, $answers);
+    }
+
+    /**
+     * Where a message for $to goes, the key it is sealed to, and the partner's
+     * name when it is one. $to is a partner's name or key, reached at the
+     * address presence gives, or a write address whose key this runtime knows:
+     * from presence, or from reply_to or channel in a verified message. A send
+     * and a handover find their recipient the same way.
+     *
+     * @return array{0: string, 1: string, 2: ?string}
+     */
+    private function recipient(string $to): array
+    {
         if (Codec::isKey($to)) {
             $partner = $this->partnerByKey($to);
             if ($partner === null) {
@@ -1874,14 +1971,14 @@ final class Runtime
                 // text or data is the dead end an agent on MCP walks into: the
                 // tool that opens a channel returns an address, and nothing here
                 // learns whose it is from reading it (item 5 of the round-2 list).
-                throw new \RuntimeException('no key known for address ' . $to . '. A runtime learns whose an address is from presence, or from reply_to or channel in a verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its reply_to, or ask the owner to hand the address over with aamio board channel KEY --reply-to ADDRESS');
+                throw new \RuntimeException('no key known for address ' . $to . '. A runtime learns whose an address is from presence, or from reply_to or channel in a verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its reply_to, or ask the owner to hand the address over: aamio_open_channel with to, or aamio board channel KEY --reply-to ADDRESS on the command line');
             }
 
-            return $this->sendSealed($to, $key, null, $text, $data, $replyTo, null, $answers);
+            return [$to, $key, null];
         }
         [$w, $key] = $this->addressFor($to);
 
-        return $this->sendSealed($w, $key, $to, $text, $data, $replyTo, null, $answers);
+        return [$w, $key, $to];
     }
 
     /**
@@ -3136,25 +3233,30 @@ final class Runtime
     }
 
     /**
-     * New messages on the inbox and every open channel; the first channel
-     * waits, the rest are read at once. So with a quiet first channel, mail
-     * already waiting on a later one is handed over when the wait ends. There
-     * is no listener in this runtime, and the command line, the MCP server and
-     * a controller all read this way; the README and aamio_read say so.
+     * New messages on the inbox and every open channel. Every channel is asked
+     * at once first, so mail already waiting on any of them comes now; only
+     * when nothing is waiting does the read wait, on the first channel that
+     * answered, usually the inbox, and the others are asked again when that
+     * wait ends. There is no listener in this runtime, and the command line,
+     * the MCP server and a controller all read this way; the README and
+     * aamio_read say so.
+     *
+     * Until 30 September 2026 the first channel got the wait before the others
+     * were asked, and a reply waiting on a private thread sat behind a quiet
+     * inbox for the whole wait.
      */
     public function read(int $wait = 0, int $limit = 50, ?int $maxBytes = null): array
     {
         $this->ensureInbox();
         $this->publishPresence();
         $collected = [];
-        $waited = false;
         $leftWaiting = 0;
         $heldBack = [];
         $notAsked = [];
-        foreach (array_values($this->channels) as $channel) {
-            if ($channel->muted) {
-                continue;
-            }
+        $notAskedAfter = [];
+
+        /** One channel asked, for what this call still has room for; how it answered, or null. */
+        $ask = function (Channel $channel, int $seconds, array &$passedOver) use (&$collected, &$leftWaiting, &$heldBack, $limit, $maxBytes): ?string {
             // A channel is only asked for what this call still has room for.
             // poll() moves the cursor and saves it before the caller sees a
             // message, so whatever was fetched beyond the limit and cut off
@@ -3162,23 +3264,20 @@ final class Runtime
             // waiting, 50 handed over, the last ten gone.
             $room = $limit - count($collected);
             if ($room <= 0) {
-                $notAsked[] = $channel->label;
-                continue;
+                $passedOver[] = $channel->label;
+
+                return null;
             }
             try {
                 // The whole budget goes to each channel in turn, as the count does:
                 // a budget divided between channels would refuse a message that fits,
                 // and the caller cannot know beforehand which channel holds the bytes.
-                [$state, $entries] = $this->poll($channel, $waited ? 0 : $wait, $room, $maxBytes);
+                [$state, $entries] = $this->poll($channel, $seconds, $room, $maxBytes);
             } catch (\Throwable $error) {
                 $this->note($channel, 'unread', 'this channel could not be read: ' . (new \ReflectionClass($error))->getShortName() . '. Messages from other channels are still returned.');
-                continue;
+
+                return null;
             }
-            // A channel that answered 410 or nothing at all used to eat the
-            // whole wait, so a read with wait 25 came back at once and the
-            // inbox was only ever asked with wait 0.
-            // A gone channel did wait: the service holds a read of a missing thread for a write.
-            $waited = $waited || $state === 'ok' || $state === 'gone';
             foreach ($entries as $entry) {
                 $collected[] = $entry;
             }
@@ -3187,21 +3286,50 @@ final class Runtime
             if ($channel->moreAtService) {
                 $heldBack[] = $channel->label;
             }
+
+            return $state;
+        };
+
+        $answered = [];
+        foreach (array_values($this->channels) as $channel) {
+            if ($channel->muted) {
+                continue;
+            }
+            // A channel that answered 410 or nothing at all never gets the
+            // wait: it used to eat it, so a read with wait 25 came back at once
+            // and the inbox was only ever asked with wait 0. A gone one does:
+            // the service holds a read of a missing thread for a write.
+            $state = $ask($channel, 0, $notAsked);
+            if ($state === 'ok' || $state === 'gone') {
+                $answered[] = $channel;
+            }
         }
+
+        // Only when nothing was waiting anywhere does the read wait, and only
+        // the first channel can end the wait early. What reached the others
+        // meanwhile comes with this answer, at the end of the wait.
+        if ($collected === [] && $wait > 0 && $answered !== []) {
+            $ask($answered[0], $wait, $notAskedAfter);
+            foreach (array_slice($answered, 1) as $channel) {
+                $ask($channel, 0, $notAskedAfter);
+            }
+        }
+
         if ($heldBack !== []) {
             // The service said it had more than the budget allowed. It was written
             // down on the channel and never said out loud, so a read that stopped
             // early looked exactly like one that had finished.
             $this->noteTrouble('read', 'more', 'the service had more waiting on '
-                . implode(', ', $heldBack)
+                . implode(', ', array_values(array_unique($heldBack)))
                 . ' than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over.');
         }
-        if ($leftWaiting > 0 || $notAsked !== []) {
+        if ($leftWaiting > 0 || $notAsked !== [] || $notAskedAfter !== []) {
             // Nothing is lost, and the caller still has to hear it: a read that
             // stopped at its limit is not a read of everything.
             $this->noteTrouble('read', 'more', 'this read stopped at its limit of ' . $limit . ' message(s). '
                 . ($leftWaiting > 0 ? $leftWaiting . ' more that the service had already returned were left where they are. ' : '')
                 . ($notAsked !== [] ? count($notAsked) . ' channel(s) were not asked this time: ' . implode(', ', $notAsked) . '. ' : '')
+                . ($notAskedAfter !== [] ? count($notAskedAfter) . ' channel(s) were asked before the wait and not after it: ' . implode(', ', $notAskedAfter) . '. ' : '')
                 . 'Nothing was passed over: every cursor stands at the last message this read dealt with, so read again for the rest.');
         }
 

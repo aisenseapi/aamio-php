@@ -10,6 +10,9 @@ namespace Aamio;
  */
 final class GateStop extends \RuntimeException
 {
+    /** The channel that is open although the message carrying its address was stopped, or null. */
+    public ?array $opened = null;
+
     public function __construct(string $reason, public readonly string $fix = 'Open an address whose conditions this client can meet, or update the client.')
     {
         parent::__construct($reason);
