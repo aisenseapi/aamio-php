@@ -455,7 +455,7 @@ Receipts compare all process-local observations, including kept-out ones. Fewer 
 
 ```
 php tests/run.php        # 89 offline checks: the shared vectors, sealing, receipts, gate, scopes
-php tests/runtime.php    # 543 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, one owner per home, the first exchange, and a partner added over MCP by the user
+php tests/runtime.php    # 551 offline checks of the runtime against a fake service: outbox, replay, gate, board, scopes, receipts, MCP, what a reader checks, what stays on this machine, one owner per home, the first exchange, and a partner added over MCP by the user
 php tests/live.php       # one thread end to end against aamio.at, gate, presence, the board's read side
 php tests/first-exchange.php   # two runtimes against aamio.at: partners added before and after the inbox opens, and a handoff that ends in a first send
 python tests/interop.py  # PHP and Python open each other's envelopes, verify each other's signatures, keep one count of what their live tests open, and keep each other out of a home the other holds

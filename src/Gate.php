@@ -218,10 +218,11 @@ final class Gate
 
     /**
      * What to do about an inbox's gate before writing. Returns
-     * ['bits' => int|null, 'stop' => string|null, 'notes' => string[],
-     * 'expected_seconds' => float]: bits to work for (null for none), stop
-     * with the reason when the send must not happen, notes for what was
-     * passed over, and how long the required work takes here.
+     * ['bits' => int|null, 'stop' => string|null, 'why' => string|null,
+     * 'notes' => string[], 'expected_seconds' => float]: bits to work for (null
+     * for none), stop with the reason when the send must not happen, why with
+     * the same reason and nothing about the message, notes for what was passed
+     * over, and how long the required work takes here.
      *
      * $secondsLeft is how long the inbox still takes writes, from
      * X-Seconds-Left on its gate: work that would not be done by then is not
@@ -231,7 +232,7 @@ final class Gate
      */
     public static function plan(?array $gate, ?float $secondsLeft = null, ?float $budget = null): array
     {
-        $plan = ['bits' => null, 'stop' => null, 'notes' => [], 'expected_seconds' => 0.0];
+        $plan = ['bits' => null, 'stop' => null, 'why' => null, 'notes' => [], 'expected_seconds' => 0.0];
         if ($gate === null || $gate === []) {
             return $plan;
         }
@@ -239,27 +240,19 @@ final class Gate
 
         foreach ((array) ($gate['require'] ?? []) as $condition => $value) {
             if (!in_array($condition, $known, true)) {
-                $plan['stop'] = 'the inbox requires "' . $condition . '", which this client does not know; nothing was sent';
-
-                return $plan;
+                return self::stopped($plan, 'the inbox requires "' . $condition . '", which this client does not know');
             }
             if ($condition === 'pow') {
                 $bits = (int) (((array) $value)['bits'] ?? 0);
                 if ($bits > self::REQUIRE_MAX_BITS) {
-                    $plan['stop'] = 'the inbox requires ' . $bits . ' bits of work, above the ' . self::REQUIRE_MAX_BITS . ' aamio lets an inbox ask for; nothing was sent';
-
-                    return $plan;
+                    return self::stopped($plan, 'the inbox requires ' . $bits . ' bits of work, above the ' . self::REQUIRE_MAX_BITS . ' aamio lets an inbox ask for');
                 }
                 $expected = $bits >= self::ESTIMATE_FROM_BITS ? self::expectedSeconds($bits) : 0.0;
                 if ($secondsLeft !== null && $expected > $secondsLeft) {
-                    $plan['stop'] = 'the inbox requires ' . $bits . ' bits of work, which takes about ' . self::describe($expected) . ' on this machine, and it takes writes for ' . self::describe($secondsLeft) . ' more. The work would not be done before it closes, so it was not started and nothing was sent. Ask the owner for a longer inbox or less work, or send from a machine with more compute';
-
-                    return $plan;
+                    return self::stopped($plan, 'the inbox requires ' . $bits . ' bits of work, which takes about ' . self::describe($expected) . ' on this machine, and it takes writes for ' . self::describe($secondsLeft) . ' more. The work would not be done before it closes, so it was not started', 'Ask the owner for a longer inbox or less work, or send from a machine with more compute');
                 }
                 if ($budget !== null && $expected > $budget) {
-                    $plan['stop'] = 'the inbox requires ' . $bits . ' bits of work, which takes about ' . self::describe($expected) . ' on this machine, longer than a tool call is given here, and this server cannot do it in the background. Nothing was sent. Send it from the command line with aamio send, where the work has the time it needs';
-
-                    return $plan;
+                    return self::stopped($plan, 'the inbox requires ' . $bits . ' bits of work, which takes about ' . self::describe($expected) . ' on this machine, longer than a tool call is given here, and this server cannot do it in the background', 'Send it from the command line with aamio send, where the work has the time it needs');
                 }
                 $plan['expected_seconds'] = $expected;
                 $plan['bits'] = max($plan['bits'] ?? 0, $bits);
@@ -278,6 +271,24 @@ final class Gate
             }
             $plan['bits'] = max($plan['bits'] ?? 0, $bits);
         }
+
+        return $plan;
+    }
+
+    /**
+     * A stop, told in two parts. why is only about the gate. stop adds what that
+     * meant for a message that had not left, nothing was sent, and is what a
+     * send before its first post reports. A send the inbox had already refused
+     * once with 428 is told from why (Client::refusedOnce), since it went once.
+     * The stop text carried nothing was sent inside it and a 428 reworded that
+     * one phrase, so any other wording would have come through saying it (a
+     * check of 30 September 2026).
+     */
+    private static function stopped(array $plan, string $why, ?string $advice = null): array
+    {
+        $then = $advice === null ? '' : '. ' . $advice;
+        $plan['why'] = $why . $then;
+        $plan['stop'] = $why . '; nothing was sent' . $then;
 
         return $plan;
     }

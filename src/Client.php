@@ -222,7 +222,7 @@ final class Client
                 $left = $this->secondsLeft($w);
                 $work = Gate::solve($w, $key, $bytes, $bits, $left === null ? null : microtime(true) + max(0.0, $left - 5));
                 if ($work === null) {
-                    return [0, ['error' => 'the proof of work of ' . $bits . ' bits was not done before the inbox stops taking writes, so the work was stopped and nothing was sent', 'fix' => 'The estimate before it started said it would fit, and this time it took longer, which happens: the work is a lottery. Ask the owner for a longer inbox, or send from a machine with more compute.'], null, true];
+                    return [0, ['error' => self::workRanOut($bits) . ' and nothing was sent', 'fix' => 'The estimate before it started said it would fit, and this time it took longer, which happens: the work is a lottery. Ask the owner for a longer inbox, or send from a machine with more compute.'], null, true];
                 }
                 $headers['X-Work'] = $work;
             }
@@ -241,7 +241,7 @@ final class Client
             $again = Gate::plan($this->gates[$w], $this->secondsLeft($w), $this->workBudget);
             $refusal = [$status, $answer, $work];
             if ($again['stop'] !== null) {
-                return self::refusedOnce($refusal, $again['stop'], $bytes, array_merge($plan['notes'], $again['notes']));
+                return self::refusedOnce($refusal, (string) $again['why'], $bytes, array_merge($plan['notes'], $again['notes']));
             }
             if ($again['bits'] !== null) {
                 [$status, $answer, $work, $stopped] = $attempt($again['bits']);
@@ -249,7 +249,7 @@ final class Client
                 if ($stopped) {
                     // The work for a second post ran out before it was done: the
                     // one post that went is the answer.
-                    return self::refusedOnce($refusal, (string) ($answer['error'] ?? 'the work was not done in time'), $bytes, $plan['notes']);
+                    return self::refusedOnce($refusal, self::workRanOut($again['bits']), $bytes, $plan['notes']);
                 }
             }
         }
@@ -270,13 +270,23 @@ final class Client
      * that refusal is the answer, with why the gate it named was not met. It
      * was returned as a stop before anything left, and the message was called
      * never sent though it had gone (a health check of 30 September 2026).
+     *
+     * $why is only about the gate or the work. It used to be the stop text with
+     * nothing was sent replaced, which held only for the wording it looked for
+     * (the check after it).
      */
     private static function refusedOnce(array $refusal, string $why, string $bytes, array $notes): array
     {
         [$status, $answer, $work] = $refusal;
-        $answer['fix'] = str_replace(['nothing was sent', 'Nothing was sent'], ['it was not sent again', 'It was not sent again'], $why);
+        $answer['fix'] = 'The message went once and the inbox refused it with 428, and it was not sent again. ' . ucfirst($why);
 
         return ['status' => $status, 'body' => $answer, 'sent' => $bytes, 'work' => $work, 'notes' => $notes];
+    }
+
+    /** Why work stopped before a nonce was found, which is only about the work. */
+    private static function workRanOut(int $bits): string
+    {
+        return 'the proof of work of ' . $bits . ' bits was not done before the inbox stops taking writes, so the work was stopped';
     }
 
     /**

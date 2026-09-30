@@ -126,6 +126,71 @@ try {
     $check($first?->outcome === 'unknown' && ($retried[0]['http'] ?? null) === 428 && Runtime::outboxOutcome($entry) === 'attempted' && in_array($first?->messageId, array_column($s->outboxPending(), 'id'), true), 'an earlier attempt left open stays open whatever the 428 after it', json_encode($entry['status'] ?? null));
     $s->close();
     $o->close();
+
+    // Every way the gate named by a 428 can stop the second post. The stop texts
+    // carried "nothing was sent" in more than one wording, and the 428 path
+    // reworded only one of them (a check of 30 September 2026).
+    $stopsAfter428 = [
+        'a requirement this client does not know' => [['gate' => ['require' => ['captcha' => ['site' => 'x']]]], null],
+        'more work than any inbox may ask for' => [['gate' => ['require' => ['pow' => ['bits' => 40]]]], null],
+        'work that would not be done in time' => [['gate' => ['require' => ['pow' => ['bits' => 32]]], 'seconds_left' => 1], null],
+        'work longer than a tool call is given' => [['gate' => ['require' => ['pow' => ['bits' => 24]]]], 0.001],
+    ];
+    foreach ($stopsAfter428 as $what => [$gate, $budget]) {
+        [$s, $o, $to] = $storyPair();
+        $s->client->workBudget = $budget;
+        $scriptedTo = $to;
+        $script = [[428, array_merge($refusedForWork[1], ['seconds_left' => 600], $gate), []]];
+        $scriptedPosts = 0;
+        try {
+            $s->send($to, 'hello');
+            $refusal = null;
+        } catch (\Throwable $notStored) {
+            $refusal = $notStored instanceof SendFailed ? $notStored : null;
+        }
+        $fix = (string) ($refusal?->detail['fix'] ?? '');
+        $check($refusal?->outcome === 'refused' && $refusal->status === 428 && $scriptedPosts === 1 && str_starts_with($fix, 'The message went once and the inbox refused it with 428, and it was not sent again.') && !str_contains(strtolower($fix), 'nothing'), 'after a 428, ' . $what . ' is told as sent once and never as nothing sent', $fix);
+        $s->close();
+        $o->close();
+    }
+
+    // Saved as an older version saved them, with no mark for an attempt left
+    // open: only a send in flight was marked on load. A 428 on the retry then
+    // called the message refused, and it left the pending list though the first
+    // attempt may have landed (a check of 30 September 2026).
+    $leftOpen = [
+        'unknown after a restart' => ['status' => 'unknown', 'note' => 'the process stopped while this was in flight', 'last_status' => null],
+        'attempted after a 500' => ['status' => 'attempted', 'last_status' => 500],
+        'refused after a 500, as before 20 September' => ['status' => 'refused', 'last_status' => 500],
+    ];
+    $settled = ['status' => 'refused', 'last_status' => 410];
+    [$s, $o, $to, $home] = $storyPair();
+    $envelope = $s->keys->seal($o->keys->public, '{"text":"x"}');
+    foreach ($leftOpen + ['settled by a 410' => $settled] as $what => $fields) {
+        $id = 'm-older-' . substr(md5($what), 0, 12);
+        $s->outbox[$id] = array_merge(['id' => $id, 'w' => $to, 'to_key' => $o->keys->public, 'envelope' => $envelope, 'summary' => [], 'created_at' => time(), 'attempts' => 1, 'replaces' => null, 'shape' => []], $fields);
+    }
+    (new \ReflectionMethod(Runtime::class, 'saveOutbox'))->invoke($s);
+    $s->close();
+    $again = new Runtime($home, 'https://fake.test', ['s'], false, $storyQuiet);
+    $scriptedTo = $to;
+    foreach ($leftOpen as $what => $fields) {
+        $id = 'm-older-' . substr(md5($what), 0, 12);
+        $loaded = $again->outbox[$id] ?? [];
+        $script = [$refusedForWork];
+        $scriptedPosts = 0;
+        try {
+            $retried = $again->outboxRetry($id);
+        } catch (\Throwable) {
+            $retried = [];
+        }
+        $entry = $again->outbox[$id] ?? null;
+        $check(($loaded['ever_open'] ?? false) === true && ($retried[0]['http'] ?? null) === 428 && $scriptedPosts === 1 && ($entry['status'] ?? null) === 'attempted' && Runtime::outboxOutcome($entry) === 'attempted' && in_array($id, array_column($again->outboxPending(), 'id'), true), 'an entry ' . $what . ', saved by an older version, stays open after a 428 on its retry', json_encode([$entry['status'] ?? null, $entry['ever_open'] ?? null]));
+    }
+    $settledEntry = $again->outbox['m-older-' . substr(md5('settled by a 410'), 0, 12)] ?? [];
+    $check(!array_key_exists('ever_open', $settledEntry) && Runtime::outboxOutcome($settledEntry) === 'refused', 'and one a refusal had settled is not reopened by the restart', json_encode($settledEntry));
+    $again->close();
+    $o->close();
 } finally {
     Http::$override = $storyHeld;
 }

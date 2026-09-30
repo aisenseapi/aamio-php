@@ -39,10 +39,16 @@ not what moved in the source.
   send again. One stored like that by an earlier version is settled as never
   sent when the client refuses it, unless an earlier attempt was left open.
 - A message that went once and was refused with 428 is refused, status 428,
-  when the client does not meet the gate the refusal names, with why in
-  `fix`. It was called never sent. An earlier attempt that got no answer
-  stays open whatever the 428 after it, and so does a send left in flight
-  when the process stopped.
+  when the client does not meet the gate the refusal names. Its `fix` says
+  the message went once and was not sent again, then why. It was called never
+  sent. Where a gate stops a send before anything leaves, the reason says
+  nothing was sent the same way in every case.
+- An attempt left open stays open whatever refusal comes after it, across a
+  restart too: an earlier attempt that got no answer, a send left in flight
+  when the process stopped, and one left `unknown` or `attempted` by an
+  earlier version. That last one carried no mark of it, and a 428 on its
+  retry called it refused and took it off the pending list, though the first
+  attempt may have landed. aamio-python 0.6.24 does the same.
 - A send whose outbox entry could not be written is taken out of the outbox
   again, and one whose save just before the post failed is settled as never
   sent. Either used to wait in memory as a send in flight until the next save

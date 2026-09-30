@@ -268,9 +268,15 @@ final class Runtime
             if (($entry['status'] ?? null) === 'sending') {
                 $entry['status'] = 'unknown';
                 $entry['note'] = 'the process stopped while this was in flight';
-                // It may have gone, so nothing later settles it as never sent:
-                // a stop or a refusal now says nothing about that attempt. The
-                // Python runtime keeps the same with its posting flag.
+            }
+            // An attempt left open before this process, by this version or an
+            // older one, stays open: a stop or a refusal from now on settles a
+            // later attempt, not that one. Only a send in flight was marked on
+            // load, so an unknown or attempted entry saved by an older version,
+            // which had no such mark, was called refused after a 428 on its
+            // retry and left the pending list though it may have landed (a check
+            // of 30 September 2026). The Python runtime does the same on load.
+            if (is_array($entry) && self::outboxOpen($entry)) {
                 $entry['ever_open'] = true;
             }
         }
