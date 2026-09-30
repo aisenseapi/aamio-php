@@ -33,6 +33,16 @@ not what moved in the source.
   `outbox_error` beside it. A note too long to go in one message with the
   address is refused before anything is opened, and a message the client
   refuses before it leaves is never taken for one that may have landed.
+- A message too large for any inbox is refused before it is stored or sent,
+  with its sealed size. It was stored, refused by the client afterwards, and
+  then waited as a send that might have landed, which a restart offered to
+  send again. One stored like that by an earlier version is settled as never
+  sent when the client refuses it, unless an earlier attempt was left open.
+- A message that went once and was refused with 428 is refused, status 428,
+  when the client does not meet the gate the refusal names, with why in
+  `fix`. It was called never sent. An earlier attempt that got no answer
+  stays open whatever the 428 after it, and so does a send left in flight
+  when the process stopped.
 - A send whose outbox entry could not be written is taken out of the outbox
   again, and one whose save just before the post failed is settled as never
   sent. Either used to wait in memory as a send in flight until the next save

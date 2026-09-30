@@ -278,6 +278,7 @@ $check(($fits['isError'] ?? true) === false && in_array(str_repeat('x', 40000), 
 // Refused here before anything left is not a post, however the handover got there.
 $handOver = new \ReflectionMethod(Runtime::class, 'handOver');
 $bare = $t->openChannelWith('U', 120, 'bare');
+$outboxBefore = array_keys($t->outbox);
 try {
     $handOver->invoke($t, $t->channels[$bare['label']], $u->keys->public, $uInbox->w, str_repeat('x', 70000));
     $refusedHere = null;
@@ -285,7 +286,26 @@ try {
     // Not $failed: the runner counts failures in that name.
     $refusedHere = $notSent;
 }
-$check($refusedHere !== null && $refusedHere->outcome === 'never_sent' && ($t->outbox[$refusedHere->messageId]['status'] ?? null) === 'stopped' && Runtime::outboxOutcome($t->outbox[$refusedHere->messageId]) === 'never_sent', 'a message the client refuses before it leaves is never sent, not unknown', $refusedHere === null ? 'no failure' : $refusedHere->outcome);
+$check($refusedHere !== null && $refusedHere->outcome === 'never_sent' && $refusedHere->messageId === null && array_keys($t->outbox) === $outboxBefore, 'a message too large for any inbox is never sent, and not stored either', $refusedHere === null ? 'no failure' : $refusedHere->outcome . ' ' . json_encode($refusedHere->messageId));
+
+// One stored by an older version, over the size: the client refuses it before
+// any byte leaves, and the attempt settles it as stopped, unless an earlier
+// attempt was left open (a health check of 30 September 2026).
+$postsTo = static fn (string $w): int => count(array_filter($fake->calls, static fn (array $call): bool => $call[0] === 'POST' && str_contains($call[1], '/' . $w)));
+$oversized = $t->keys->seal($u->keys->public, Codec::json(['text' => str_repeat('x', 70000)]));
+$storedBefore = static fn (string $id, bool $open): array => ['id' => $id, 'w' => $uInbox->w, 'to_key' => $u->keys->public, 'envelope' => $oversized, 'summary' => [], 'created_at' => time(), 'attempts' => 1, 'status' => 'unknown', 'last_status' => null, 'replaces' => null, 'shape' => []] + ($open ? ['ever_open' => true] : []);
+$t->outbox['m-old-oversized-a'] = $storedBefore('m-old-oversized-a', false);
+$t->outbox['m-old-oversized-b'] = $storedBefore('m-old-oversized-b', true);
+$postsBefore = $postsTo($uInbox->w);
+foreach (['m-old-oversized-a', 'm-old-oversized-b'] as $oldId) {
+    try {
+        $t->outboxRetry($oldId);
+    } catch (\InvalidArgumentException) {
+    }
+}
+$check(Runtime::outboxOutcome($t->outbox['m-old-oversized-a']) === 'never_sent' && !in_array('m-old-oversized-a', array_column($t->outboxPending(), 'id'), true) && $postsTo($uInbox->w) === $postsBefore, 'an older stored message the client refuses is settled as never sent, with nothing posted');
+$check(Runtime::outboxOutcome($t->outbox['m-old-oversized-b']) === 'unknown' && in_array('m-old-oversized-b', array_column($t->outboxPending(), 'id'), true), 'while one whose earlier attempt was left open stays unknown');
+unset($t->outbox['m-old-oversized-a'], $t->outbox['m-old-oversized-b']);
 $t->close();
 $u->close();
 

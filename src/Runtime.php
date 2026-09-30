@@ -268,6 +268,10 @@ final class Runtime
             if (($entry['status'] ?? null) === 'sending') {
                 $entry['status'] = 'unknown';
                 $entry['note'] = 'the process stopped while this was in flight';
+                // It may have gone, so nothing later settles it as never sent:
+                // a stop or a refusal now says nothing about that attempt. The
+                // Python runtime keeps the same with its posting flag.
+                $entry['ever_open'] = true;
             }
         }
         unset($entry);
@@ -2142,6 +2146,14 @@ final class Runtime
 
     private function outboxAdd(string $w, string $key, string $envelope, array $body, ?string $replaces = null): array
     {
+        // Every send passes here, so a message too large for any inbox stops
+        // here, before an entry exists, a byte leaves or a gate is worked for.
+        // It was stored first and refused by the client afterwards, which left a
+        // message that could never go looking as if it might have (a health
+        // check of 30 September 2026).
+        if (strlen($envelope) > Client::MAX_MESSAGE_BYTES) {
+            throw new \InvalidArgumentException('this message is ' . strlen($envelope) . ' bytes sealed, and a message is at most ' . Client::MAX_MESSAGE_BYTES . ', so nothing was stored or sent. Send a URL and a hash instead.');
+        }
         $entry = [
             'id' => 'm-' . substr(Codec::sha256hex($this->keys->public . '|' . $w . '|' . $envelope), 0, 16),
             'w' => $w, 'to_key' => $key, 'envelope' => $envelope,
@@ -2244,6 +2256,17 @@ final class Runtime
             $this->outbox[$id]['last_at'] = time();
             $this->saveOutbox();
             throw $stop;
+        } catch (\InvalidArgumentException | \LogicException $refused) {
+            // The client refused it before any byte left: a message stored by an
+            // older version, over the size an inbox takes. It is settled the way a
+            // stop is, or it waited as a send that might have landed and every
+            // retry met the same refusal (a health check of 30 September 2026).
+            // An earlier attempt left open stays open.
+            $this->outbox[$id]['status'] = ($this->outbox[$id]['ever_open'] ?? false) ? 'unknown' : 'stopped';
+            $this->outbox[$id]['error'] = $refused->getMessage();
+            $this->outbox[$id]['last_at'] = time();
+            $this->saveOutbox();
+            throw $refused;
         }
         if ($notes !== []) {
             $this->outbox[$id]['gate_notes'] = $notes;

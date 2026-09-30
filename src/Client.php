@@ -239,12 +239,18 @@ final class Client
                 $this->gateLeft[$w] = [$answer['seconds_left'], microtime(true)];
             }
             $again = Gate::plan($this->gates[$w], $this->secondsLeft($w), $this->workBudget);
+            $refusal = [$status, $answer, $work];
             if ($again['stop'] !== null) {
-                return ['status' => 0, 'stopped' => true, 'body' => ['error' => $again['stop'], 'fix' => 'Open an address whose conditions this client can meet, or update the client.'], 'sent' => null, 'work' => null, 'notes' => array_merge($plan['notes'], $again['notes'])];
+                return self::refusedOnce($refusal, $again['stop'], $bytes, array_merge($plan['notes'], $again['notes']));
             }
             if ($again['bits'] !== null) {
                 [$status, $answer, $work, $stopped] = $attempt($again['bits']);
                 $plan['notes'] = array_merge($plan['notes'], $again['notes']);
+                if ($stopped) {
+                    // The work for a second post ran out before it was done: the
+                    // one post that went is the answer.
+                    return self::refusedOnce($refusal, (string) ($answer['error'] ?? 'the work was not done in time'), $bytes, $plan['notes']);
+                }
             }
         }
         if ($stopped) {
@@ -257,6 +263,20 @@ final class Client
         }
 
         return ['status' => $status, 'body' => $answer, 'sent' => $bytes, 'work' => $work, 'notes' => $plan['notes']];
+    }
+
+    /**
+     * A message that went once and was refused with 428, and is not sent again:
+     * that refusal is the answer, with why the gate it named was not met. It
+     * was returned as a stop before anything left, and the message was called
+     * never sent though it had gone (a health check of 30 September 2026).
+     */
+    private static function refusedOnce(array $refusal, string $why, string $bytes, array $notes): array
+    {
+        [$status, $answer, $work] = $refusal;
+        $answer['fix'] = str_replace(['nothing was sent', 'Nothing was sent'], ['it was not sent again', 'It was not sent again'], $why);
+
+        return ['status' => $status, 'body' => $answer, 'sent' => $bytes, 'work' => $work, 'notes' => $notes];
     }
 
     /**
