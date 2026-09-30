@@ -22,9 +22,11 @@ declare(strict_types=1);
  * $check, $cliRun and $childPhp in scope.
  */
 
+use Aamio\Codec;
 use Aamio\Http;
 use Aamio\McpServer;
 use Aamio\Runtime;
+use Aamio\SendFailed;
 
 echo "the first exchange: what the texts say, and that it is so\n";
 
@@ -260,7 +262,83 @@ try {
 }
 $said = $unsure['structuredContent'] ?? [];
 $check(($said['outcome'] ?? null) === 'unknown' && ($said['opened']['label'] ?? null) === 'unsure' && isset($t->outbox[$said['message_id'] ?? '']) && str_contains((string) ($said['fix'] ?? ''), 'aamio_outbox_retry'), 'a handover whose post broke on the way is unknown, keeps its id, and says the channel is open', json_encode($said));
+
+// A note too long for one message opens nothing: asked before the channel is
+// opened, since the second look of 30 September 2026 found it opened, refused
+// here, and counted as a message that might have landed.
+$threadsBefore = count($fake->threads);
+$outboxBefore = array_keys($t->outbox);
+$long = $tMcp->dispatch('aamio_open_channel', ['label' => 'long', 'ttl' => 120, 'to' => 'U', 'note' => str_repeat('x', 70000)]);
+$said = (string) ($long['structuredContent']['error'] ?? '');
+$check(($long['isError'] ?? false) === true && str_contains($said, 'no channel was opened') && str_contains($said, '65536') && count($fake->threads) === $threadsBefore && !isset($t->channels['long']) && array_keys($t->outbox) === $outboxBefore, 'a note too long to carry the address opens no channel and stores nothing', $said);
+$fits = $tMcp->dispatch('aamio_open_channel', ['label' => 'short', 'ttl' => 120, 'to' => 'U', 'note' => str_repeat('x', 40000)]);
+[, $arrivedU] = $u->poll($uInbox);
+$check(($fits['isError'] ?? true) === false && in_array(str_repeat('x', 40000), array_map(static fn (array $e): mixed => $e['body']['text'] ?? null, $arrivedU), true), 'and one that fits goes with the address');
+
+// Refused here before anything left is not a post, however the handover got there.
+$handOver = new \ReflectionMethod(Runtime::class, 'handOver');
+$bare = $t->openChannelWith('U', 120, 'bare');
+try {
+    $handOver->invoke($t, $t->channels[$bare['label']], $u->keys->public, $uInbox->w, str_repeat('x', 70000));
+    $refusedHere = null;
+} catch (SendFailed $notSent) {
+    // Not $failed: the runner counts failures in that name.
+    $refusedHere = $notSent;
+}
+$check($refusedHere !== null && $refusedHere->outcome === 'never_sent' && ($t->outbox[$refusedHere->messageId]['status'] ?? null) === 'stopped' && Runtime::outboxOutcome($t->outbox[$refusedHere->messageId]) === 'never_sent', 'a message the client refuses before it leaves is never sent, not unknown', $refusedHere === null ? 'no failure' : $refusedHere->outcome);
 $t->close();
+$u->close();
+
+// The entry that could not be written is taken out again, and nothing is left
+// to be sent after a restart: the second look of 30 September 2026 found it
+// kept in memory, written by the next save that worked, made unknown by a
+// restart, and offered for a retry of a channel already closed.
+[$t, $u, $tInbox, $uInbox, $ghostHomes] = $exchangePair('ghost');
+$tMcp = new McpServer($t);
+$outboxFile = $t->home . DIRECTORY_SEPARATOR . 'outbox.json';
+@unlink($outboxFile);
+mkdir($outboxFile, 0700);
+try {
+    $partial = $tMcp->dispatch('aamio_open_channel', ['label' => 'partial', 'ttl' => 120, 'to' => 'U']);
+    try {
+        $t->send('U', 'not today either');
+        $sendRefused = false;
+    } catch (\RuntimeException) {
+        $sendRefused = true;
+    }
+} finally {
+    rmdir($outboxFile);
+}
+$check(($partial['structuredContent']['outcome'] ?? null) === 'never_sent' && $sendRefused && $t->outbox === [] && $t->outboxPending() === [], 'an entry whose outbox will not write is taken out again, for a handover and for a send');
+$tMcp->dispatch('aamio_close_channel', ['label' => 'partial']);
+$again = $tMcp->dispatch('aamio_open_channel', ['label' => 'again', 'ttl' => 120, 'to' => 'U']);
+$t->close();
+$restarted = new Runtime($ghostHomes['t'], 'https://fake.test', ['t'], false, $exchangeQuiet);
+$check(($again['isError'] ?? true) === false && $restarted->outboxPending() === [] && count($restarted->outbox) === 1, 'after the advice is followed and the process restarts, nothing waits to be sent again');
+
+// The save just before the post fails: the entry is stopped, and stays so.
+$outboxAdd = new \ReflectionMethod(Runtime::class, 'outboxAdd');
+$deliver = new \ReflectionMethod(Runtime::class, 'deliver');
+$envelope = $restarted->keys->seal($u->keys->public, Codec::json(['text' => 'held']));
+$held = $outboxAdd->invoke($restarted, $uInbox->w, $u->keys->public, $envelope, ['text' => 'held']);
+$outboxFile = $restarted->home . DIRECTORY_SEPARATOR . 'outbox.json';
+@unlink($outboxFile);
+mkdir($outboxFile, 0700);
+try {
+    $deliver->invoke($restarted, $held);
+    $stoppedHere = false;
+} catch (\RuntimeException) {
+    $stoppedHere = true;
+} finally {
+    rmdir($outboxFile);
+}
+$check($stoppedHere && ($restarted->outbox[$held['id']]['status'] ?? null) === 'stopped' && Runtime::outboxOutcome($restarted->outbox[$held['id']]) === 'never_sent' && !in_array($held['id'], array_column($restarted->outboxPending(), 'id'), true), 'a save that fails just before the post stops the message, and pending does not list it');
+// Written by the next save that works, as it would be.
+(new \ReflectionMethod(Runtime::class, 'saveOutbox'))->invoke($restarted);
+$restarted->close();
+$restartedAgain = new Runtime($ghostHomes['t'], 'https://fake.test', ['t'], false, $exchangeQuiet);
+$check($restartedAgain->outboxPending() === [] && Runtime::outboxOutcome($restartedAgain->outbox[$held['id']] ?? null) === 'never_sent', 'and a restart keeps it stopped rather than offering it again');
+$restartedAgain->close();
 $u->close();
 
 // ---------------------------------------------------------------- one owner per home

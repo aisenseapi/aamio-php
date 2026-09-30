@@ -30,7 +30,14 @@ not what moved in the source.
   the answer says the channel is open under `opened` and whether anything left
   this machine: `never_sent`, `refused` or `unknown`. A handover the service
   stored, whose record here could not be written, is a handover, with
-  `outbox_error` beside it.
+  `outbox_error` beside it. A note too long to go in one message with the
+  address is refused before anything is opened, and a message the client
+  refuses before it leaves is never taken for one that may have landed.
+- A send whose outbox entry could not be written is taken out of the outbox
+  again, and one whose save just before the post failed is settled as never
+  sent. Either used to wait in memory as a send in flight until the next save
+  that worked wrote it down, and a restart then called it unknown and offered
+  to send it again.
 - A read asks every channel at once before it waits. It used to spend the
   whole wait on the first channel, usually the inbox, and mail already waiting
   on a private thread came only when that wait ended, up to 25 seconds later,

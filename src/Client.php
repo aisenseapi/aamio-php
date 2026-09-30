@@ -15,6 +15,8 @@ final class Client
 {
     public const DEFAULT_HOST = Hosts::DEFAULT_HOST;
     public const DEFAULT_TTL = 600;
+    /** The most one message may be, as the service takes it. The service refuses more with 413. */
+    public const MAX_MESSAGE_BYTES = 65536;
 
     /** @var array<string, array|null> gates read, per address, once */
     private array $gates = [];
@@ -196,8 +198,8 @@ final class Client
             $bytes = $this->keys->seal($sealTo, $bytes);
             $contentType = 'application/json';
         }
-        if (strlen($bytes) > 65536) {
-            throw new \InvalidArgumentException('a message is at most 65536 bytes; send a URL and a hash instead');
+        if (strlen($bytes) > self::MAX_MESSAGE_BYTES) {
+            throw new \InvalidArgumentException('a message is at most ' . self::MAX_MESSAGE_BYTES . ' bytes; send a URL and a hash instead');
         }
         $signing = $sign && $this->keys !== null;
         $key = $signing ? $this->keys->public : '';

@@ -1358,6 +1358,7 @@ final class Runtime
             // left open behind it.
             [$replyTo, $key] = $this->recipient($to);
             $this->canHandOver($replyTo);
+            $this->handoverFits($key, $ttl, $note);
             if (!in_array($key, $keys, true)) {
                 $keys[] = $key;
             }
@@ -1415,6 +1416,35 @@ final class Runtime
     }
 
     /** The channel's address sent to $replyTo, sealed to $key and signed, through the outbox like any send. */
+    /** The body that carries a channel's address, and the envelope it is sealed in. */
+    private function invitation(string $key, string $w, int $expireAt, ?string $note): array
+    {
+        $body = ['channel' => $w, 'expire_at' => $expireAt];
+        if ($note !== null) {
+            $body['text'] = $note;
+        }
+        $body += $this->conversation($key);
+
+        return [$body, $this->keys->seal($key, Codec::json($body))];
+    }
+
+    /**
+     * Whether the message that will carry a channel's address fits in one
+     * message, asked before the channel is opened. The address and the expiry
+     * are not known yet. Both have a fixed length, so a stand-in of the same
+     * length seals to the same size. A note too long for it used to open the
+     * channel first, and the message carrying the address was then refused
+     * here and counted as one that might have landed (a review, 30 September
+     * 2026).
+     */
+    private function handoverFits(string $key, int $ttl, ?string $note): void
+    {
+        [, $envelope] = $this->invitation($key, str_repeat('a', 20), time() + $ttl, $note);
+        if (strlen($envelope) > Client::MAX_MESSAGE_BYTES) {
+            throw new \InvalidArgumentException('with this note the message carrying the address would be ' . strlen($envelope) . ' bytes, and a message is at most ' . Client::MAX_MESSAGE_BYTES . ', so no channel was opened. Shorten the note, and send the rest on the channel once it is open.');
+        }
+    }
+
     /**
      * The channel's address sent to $replyTo, sealed to $key and signed,
      * through the outbox like any send. Returns what the caller's answer should
@@ -1432,16 +1462,12 @@ final class Runtime
         $id = null;
         $posts = $this->posts;
         try {
-            $body = ['channel' => $channel->w, 'expire_at' => $channel->expireAt];
-            if ($note !== null) {
-                $body['text'] = $note;
-            }
-            $body += $this->conversation($key);
+            [$body, $envelope] = $this->invitation($key, $channel->w, $channel->expireAt, $note);
             // The message that carries the address is a send, and goes through
             // the outbox like one. It was posted directly, and a refusal was a
             // bare error: on the command line a traceback, with the channel
             // open and its address delivered to nobody.
-            $entry = $this->outboxAdd($replyTo, $key, $this->keys->seal($key, Codec::json($body)), $body);
+            $entry = $this->outboxAdd($replyTo, $key, $envelope, $body);
             $id = $entry['id'];
             [$status, $handed] = $this->deliver($entry);
         } catch (GateStop $stop) {
@@ -1904,6 +1930,9 @@ final class Runtime
         if (isset($this->channels[$label])) {
             $label .= '-' . time();
         }
+        if ($replyTo !== null) {
+            $this->handoverFits($key, $ttl, $note);
+        }
         $opened = $this->client->open($ttl, [$key]);
         if ($opened['status'] !== 201) {
             throw new \RuntimeException('could not open channel: ' . $opened['status'] . ' ' . json_encode($opened['body']));
@@ -2117,8 +2146,23 @@ final class Runtime
             // For the trace: what the message was made of, without what it said.
             'shape' => self::messageShape($body, $envelope),
         ];
+        $earlier = $this->outbox[$entry['id']] ?? null;
         $this->outbox[$entry['id']] = $entry;
-        $this->saveOutbox();
+        try {
+            $this->saveOutbox();
+        } catch (\Throwable $error) {
+            // An entry that could not be written is taken out again: nothing was
+            // sent for it, and left in memory the next save that worked wrote it
+            // as a send in flight, which a restart made unknown and offered to
+            // send again. A review of 30 September 2026.
+            if ($earlier === null) {
+                unset($this->outbox[$entry['id']]);
+            } else {
+                $this->outbox[$entry['id']] = $earlier;
+            }
+
+            throw $error;
+        }
 
         return $entry;
     }
@@ -2143,7 +2187,17 @@ final class Runtime
     private function post(string $w, string $envelope, array &$notes): array
     {
         $this->posts++;
-        $sent = $this->client->send($w, $envelope, true, null);
+        try {
+            $sent = $this->client->send($w, $envelope, true, null);
+        } catch (\InvalidArgumentException | \LogicException $refused) {
+            // Refused here before any byte left: an address that is not one, no
+            // keys, or a message over the size. Not a post, so a failure of this
+            // kind is never taken for one that may have landed (the second look
+            // of 30 September 2026).
+            $this->posts--;
+
+            throw $refused;
+        }
         $notes = array_values(array_unique(array_merge($notes, $sent['notes'])));
         if (!empty($sent['stopped'])) {
             throw new GateStop((string) ($sent['body']['error'] ?? 'the gate stopped the send'));
@@ -2158,7 +2212,20 @@ final class Runtime
         $id = $entry['id'];
         $this->outbox[$id]['attempts']++;
         $this->outbox[$id]['status'] = 'sending';
-        $this->saveOutbox();
+        try {
+            $this->saveOutbox();
+        } catch (\Throwable $error) {
+            // Nothing has left this machine, and nothing will: the send stops here
+            // with its reason, and the entry says so, as a stop at a gate does. As
+            // sending, the next save that worked wrote it as a send in flight, and
+            // a restart offered to send it again. Unless an earlier attempt is
+            // still open: a stop now settles this decision, not that one.
+            $this->outbox[$id]['status'] = ($this->outbox[$id]['ever_open'] ?? false) ? 'unknown' : 'stopped';
+            $this->outbox[$id]['error'] = $error->getMessage();
+            $this->outbox[$id]['last_at'] = time();
+
+            throw $error;
+        }
         $notes = [];
         try {
             [$status, $result] = $this->post($entry['w'], $entry['envelope'], $notes);
