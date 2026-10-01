@@ -16,7 +16,9 @@ declare(strict_types=1);
  * Included by tests/runtime.php, with $fake, $root and $check in scope.
  */
 
+use Aamio\Gate;
 use Aamio\Http;
+use Aamio\Keys;
 use Aamio\McpServer;
 use Aamio\Runtime;
 use Aamio\SendFailed;
@@ -191,6 +193,44 @@ try {
     $check(!array_key_exists('ever_open', $settledEntry) && Runtime::outboxOutcome($settledEntry) === 'refused', 'and one a refusal had settled is not reopened by the restart', json_encode($settledEntry));
     $again->close();
     $o->close();
+
+    // The work for a second post runs out in the real solver, so the one post
+    // that went is the answer. Key, address and message are fixed, and no nonce
+    // below 65536 reaches 17 bits for them: the solver looks at its deadline
+    // after the 65536th, and with five seconds left the deadline is already
+    // there. Until a review of 1 October 2026 this branch was tried only by
+    // hand, since Gate::solve cannot be replaced in a test.
+    $timeoutHome = $root . DIRECTORY_SEPARATOR . 'story-timeout';
+    mkdir($timeoutHome, 0700, true);
+    file_put_contents($timeoutHome . DIRECTORY_SEPARATOR . 'key', str_repeat('5a', 32) . "\n");
+    $timeoutRuntime = new Runtime($timeoutHome, 'https://fake.test', ['t'], false, $storyQuiet);
+    $timeoutTo = 'aamiotimeoutcheckaaa';
+    $timeoutMessage = 'a second post that never goes';
+    $timeoutPrefix = "aamio-pow-v1\n" . $timeoutTo . "\n" . $timeoutRuntime->keys->public . "\n" . hash('sha256', $timeoutMessage) . "\n";
+    $timeoutNonce = null;
+    for ($candidate = 0; $candidate < 65536 && $timeoutNonce === null; $candidate++) {
+        if (Gate::zeroBits(hash('sha256', $timeoutPrefix . $candidate, true)) >= 17) {
+            $timeoutNonce = $candidate;
+        }
+    }
+    $check($timeoutNonce === null, 'for the fixed key, address and message no nonce below 65536 reaches 17 bits', $timeoutNonce === null ? 'none found' : 'nonce ' . $timeoutNonce . ' does');
+    $check(Gate::expectedSeconds(17) < 4.0, 'and 17 bits is estimated to take less than the inbox gives, so the solver starts and no estimate stops it first', sprintf('%.2f s', Gate::expectedSeconds(17)));
+    $scriptedTo = $timeoutTo;
+    $script = [[428, ['error' => 'This inbox requires proof of work.', 'fix' => 'Compute the work the gate asks for and send again.', 'gate' => ['require' => ['pow' => ['bits' => 17, 'covers' => 1]]], 'seconds_left' => 5], []]];
+    $scriptedPosts = 0;
+    try {
+        $timeoutEntry = (new \ReflectionMethod(Runtime::class, 'outboxAdd'))->invoke($timeoutRuntime, $timeoutTo, Keys::fromSeedHex(str_repeat('a5', 32))->public, $timeoutMessage, ['text' => $timeoutMessage]);
+        [$timeoutStatus, $timeoutAnswer] = (new \ReflectionMethod(Runtime::class, 'deliver'))->invoke($timeoutRuntime, $timeoutEntry);
+    } catch (\Throwable $notStored) {
+        $timeoutEntry = $timeoutEntry ?? ['id' => ''];
+        [$timeoutStatus, $timeoutAnswer] = [null, ['error' => $notStored->getMessage()]];
+    }
+    $timeoutFix = (string) ($timeoutAnswer['fix'] ?? '');
+    $timeoutStored = $timeoutRuntime->outbox[$timeoutEntry['id']] ?? null;
+    $check($scriptedPosts === 1 && $timeoutStatus === 428, 'when the work for the second post runs out, one post went and its 428 is the answer', json_encode([$scriptedPosts, $timeoutStatus, $timeoutAnswer['error'] ?? null]));
+    $check(str_starts_with($timeoutFix, 'The message went once and the inbox refused it with 428, and it was not sent again.') && str_contains($timeoutFix, 'was not done before the inbox stops taking writes') && !str_contains($timeoutFix, 'not started') && !str_contains(strtolower($timeoutFix), 'nothing'), 'its fix says it went once and the work ran out, and never that nothing was sent', $timeoutFix);
+    $check(($timeoutStored['status'] ?? null) === 'refused' && Runtime::outboxOutcome($timeoutStored) === 'refused' && !in_array($timeoutEntry['id'], array_column($timeoutRuntime->outboxPending(), 'id'), true), 'and the outbox has it refused and off the pending list', json_encode($timeoutStored['status'] ?? null));
+    $timeoutRuntime->close();
 } finally {
     Http::$override = $storyHeld;
 }
