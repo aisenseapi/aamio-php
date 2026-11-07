@@ -25,7 +25,8 @@ declare(strict_types=1);
  *   scope share NAME PARTNER --access read|write | scope remove NAME
  *   (a key given to scope add stays in the shell history, so scope share from runtime to runtime is better)
  *   outbox pending | outbox retry [--id ID] | outbox forget ID | serve
- *   addon list                   (the add-ons this installation can run, each a package of its own)
+ *   addon list                   (the add-ons installed beside aamio, and which of them run here)
+ *   addon enable NAME            (let an installed add-on run here; disable takes it out again)
  *   addon NAME ...               (an add-on's commands: aamio addon domain --help with Domain Keys)
  */
 
@@ -104,23 +105,62 @@ if ($command === null || in_array($command, ['help', '-h'], true)) {
     fail(trim(preg_replace('/^ \* ?/m', '', (string) preg_replace('!^.*?/\*\*(.*?)\*/.*$!s', '$1', (string) file_get_contents(__FILE__)))), 0);
 }
 
-// What is installed beyond the core. An add-on that cannot be used stops here
-// with the reason, whatever the command: a broken install is not a quiet absence.
+// The add-ons: which of them run here is kept in the home the command line was
+// given. `addon disable` comes before they are loaded, so that a broken one can
+// be taken out again, and `addon enable` lets one in only once it loads clean.
+Addons::useHome(isset($opts['home']) && is_string($opts['home']) ? $opts['home'] : null);
+$addonChange = static function (string $verb, ?string $name): never {
+    if ($name === null) {
+        fail('aamio addon ' . $verb . ' NAME: an add-on\'s short name, or its package', 2);
+    }
+    try {
+        out($verb === 'enable' ? Addons::enable($name) : Addons::disable($name));
+    } catch (\RuntimeException $error) {
+        fail($error->getMessage(), 2);
+    }
+    exit(0);
+};
+if ($command === 'addon' && ($args[1] ?? null) === 'disable') {
+    $addonChange('disable', $args[2] ?? null);
+}
+// What runs beyond the core. An add-on that cannot be used stops here with the
+// reason, whatever the command: a broken install is not a quiet absence. The
+// list still answers, from the metadata, and says what is broken and how to
+// take it out.
 try {
     Addons::loaded();
 } catch (\RuntimeException $error) {
+    if ($command === 'addon' && ($args[1] ?? null) === 'list') {
+        try {
+            out(Addons::describe());
+            exit(1);
+        } catch (\RuntimeException $again) {
+            fail($again->getMessage());
+        }
+    }
     fail($error->getMessage());
 }
 // Before the runtime: creating one takes the home's lock and tidies the home.
 // Listing the add-ons reads nothing, and an add-on may have commands of its own
 // that need no home, as a check of a local file beside a running server.
 if ($command === 'addon') {
-    $which = $args[1] ?? fail('aamio addon list, or aamio addon NAME ... for an installed add-on', 2);
+    $which = $args[1] ?? fail('aamio addon list, enable NAME, disable NAME, or aamio addon NAME ... for an enabled add-on', 2);
     if ($which === 'list') {
         out(Addons::describe());
         exit(0);
     }
-    $addon = Addons::byName($which) ?? fail('no add-on is called ' . $which . '. aamio addon list says which are installed.', 2);
+    if ($which === 'enable') {
+        $addonChange('enable', $args[2] ?? null);
+    }
+    $addon = Addons::byName($which);
+    if ($addon === null) {
+        foreach (Addons::installed() as $row) {
+            if ($row['name'] === $which) {
+                fail('the add-on ' . $which . ' is installed and not enabled. aamio addon enable ' . $which . ' lets it run here.', 2);
+            }
+        }
+        fail('no add-on is called ' . $which . '. aamio addon list says which are installed.', 2);
+    }
     $code = $addon->early(array_slice($args, 2), $opts);
     if ($code !== null) {
         exit($code);

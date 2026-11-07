@@ -15,8 +15,14 @@ not what moved in the source.
   commands sit under `aamio addon NAME`, its tools beside the core's. Two
   add-ons with one name, or a tool with a name already taken, stop the start
   and say so, rather than let the order they were found in decide; so does an
-  add-on that cannot be loaded. For a checkout that is not installed,
-  `AAMIO_ADDONS` names the files.
+  add-on that cannot be loaded. Installed is not enabled: nothing of an add-on
+  runs until `aamio addon enable NAME` names it, recorded by package in
+  `addons.json` in the home, so a second package with the same short name does
+  not inherit the choice; `aamio addon disable NAME` takes it out again, broken
+  or not, and `aamio addon list` says what is installed and what runs, from the
+  metadata, without running what is not enabled. An enabled add-on runs in
+  aamio's own process, with its key and home. For a checkout that is not
+  installed, `AAMIO_ADDONS` names the files.
 - Domain Keys is the first add-on, `aisenseapi/aamio-domain-keys`, built in
   `addons/domain-keys` of this repository, the same as in aamio-python. A
   website can publish the public keys of its agents at

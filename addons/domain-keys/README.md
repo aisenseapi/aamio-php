@@ -4,6 +4,7 @@ Domain Keys, an add-on to [aamio](https://aamio.at) for PHP. A website can list 
 
 ```bash
 composer require aisenseapi/aamio-domain-keys
+vendor/bin/aamio addon enable domain                             # installed is not enabled: this lets it run here
 vendor/bin/aamio addon domain allow example.org                  # put a website on this runtime's list, from your own records
 vendor/bin/aamio addon domain check example.org --partner NAME   # read the list once and compare
 ```

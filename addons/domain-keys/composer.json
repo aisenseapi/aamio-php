@@ -21,5 +21,8 @@
   "autoload": {
     "psr-4": {"Aamio\\DomainKeys\\": "src/"}
   },
+  "extra": {
+    "aamio-addon": {"name": "domain"}
+  },
   "minimum-stability": "stable"
 }
