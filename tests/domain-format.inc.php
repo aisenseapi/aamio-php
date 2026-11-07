@@ -28,7 +28,7 @@ $addressVectors = json_decode((string) file_get_contents(__DIR__ . '/domain_fetc
 foreach (['domain_keys_vectors.json', 'domain_fetch_vectors.json'] as $file) {
     $there = dirname(__DIR__, 2) . '/aamio-python/tests/' . $file;
     if (is_file($there)) {
-        $check(file_get_contents($there) === file_get_contents(__DIR__ . '/' . $file), $file . ' is byte for byte the one aamio-python keeps');
+        $check(str_replace("\r\n", "\n", (string) file_get_contents($there)) === str_replace("\r\n", "\n", (string) file_get_contents(__DIR__ . '/' . $file)), $file . ' is the one aamio-python keeps, whichever way git wrote the line breaks');
     } else {
         echo "  skip  $file against aamio-python's: no checkout beside this one\n";
     }
