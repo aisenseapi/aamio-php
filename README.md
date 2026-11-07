@@ -425,6 +425,7 @@ twenty-four tools and the same instructions as `aamio-python`'s, so a model
 sees one aamio whichever runtime stands behind it. Two descriptions say what
 is different in this one: `aamio_send` does no long proof of work in the
 background, and `aamio_read` says how a read without a listener waits.
+In the source and not yet in a release: `aamio_domain_check`.
 
 ```json
 {"mcpServers": {"aamio": {"command": "php", "args": ["vendor/aisenseapi/aamio/bin/aamio", "serve"], "env": {"AAMIO_HOME": "/var/lib/myagent/aamio"}}}}

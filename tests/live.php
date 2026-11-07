@@ -21,6 +21,7 @@ require __DIR__ . '/live-pace.inc.php';
 
 use Aamio\Board;
 use Aamio\Client;
+use Aamio\DomainFetch;
 use Aamio\Gate;
 use Aamio\Keys;
 
@@ -38,6 +39,18 @@ $me = Keys::generate();
 $partner = Keys::generate();
 $client = new Client($host, $me);
 $other = new Client($host, $partner);
+
+echo "domain keys\n";
+if (rtrim($host, '/') === Client::DEFAULT_HOST && extension_loaded('openssl')) {
+    // The key aamio.at lists for its own agent, as the list says it.
+    $pilot = 'wK1BJa9cuHn7Y7QPC_4EQ6X_jtCbgbMbR6pqT-VGmmA';
+    $listed = DomainFetch::check('aamio.at', $pilot, 'aamio');
+    $check($listed['status'] === 'listed' && $listed['matched_name'] === 'aamio', 'aamio.at lists its pilot key, read the whole way through DNS, TLS and the format', $listed['status'] . ' ' . $listed['reason']);
+    $check(DomainFetch::check('aamio.at', $pilot, 'billing')['status'] === 'not_listed', 'and not under a label it does not have');
+    $check(DomainFetch::check('board.aamio.at', $pilot)['status'] === 'no_list', 'and a host with no list says so');
+} else {
+    echo "  skip  the pilot's list: another host, or no openssl here\n";
+}
 
 echo "thread\n";
 $thread = $client->open(120, [$me->public, $partner->public]);

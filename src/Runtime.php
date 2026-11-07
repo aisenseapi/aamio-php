@@ -830,6 +830,17 @@ final class Runtime
         return $outcome + $this->rotateInbox($reason);
     }
 
+    /** Where the user's list of websites is. The file belongs to DomainRuntime, and the home to this class. */
+    public function domainListFile(): string
+    {
+        return $this->path(DomainRuntime::POLICY_FILE);
+    }
+
+    public function saveDomainList(array $rows): void
+    {
+        $this->saveJson(DomainRuntime::POLICY_FILE, $rows);
+    }
+
     public function partnerList(): array
     {
         return array_map(static fn (array $p): array => ['name' => $p['name'], 'key' => $p['key'], 'hash_prefix' => Keys::hashPrefixOf($p['key'])], $this->partners);

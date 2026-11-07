@@ -4,6 +4,27 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## Unreleased
+
+- `aamio domain` and `aamio_domain_check` check a key against a website from
+  inside the runtime, the same as in aamio-python. A site can publish the public
+  keys of its agents at `/.well-known/aamio-keys.json`, and the key compared comes
+  from the address book or from the signature this process checked itself, and
+  never from whoever asks, so a message cannot pick it. Only websites on the
+  user's own list are read, in `domains.json` in the home: `aamio domain allow`
+  on the command line, or a form over MCP where the user types the domain
+  themselves and a lookalike stops at what they type. `aamio domain file` writes
+  your public key as the list a site publishes, and `aamio domain validate`
+  checks a file without touching a home. `check` has an exit code per answer. A
+  read goes only to public addresses, connects to the address that was checked,
+  follows no redirect, and takes five seconds and 16 KiB at most. Twenty checks
+  start per minute in one process, and `AAMIO_DOMAIN_DENY` keeps an operator's
+  own networks out. A result is a dated observation and changes nothing. Nothing
+  is read until a domain is on the list, there is no background work, and a
+  `domains.json` that cannot be read stops domain checks and nothing else. The
+  read needs ext-openssl, and a process of its own for the lookup, since PHP's
+  lookups take no timeout. A lookup that cannot be started answers unreachable.
+
 ## 0.3.10 - 2026-10-01
 
 - A partner can be added over MCP, and only by the user. `aamio_partner_add`

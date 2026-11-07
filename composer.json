@@ -19,6 +19,9 @@
     "ext-curl": "*",
     "ext-json": "*"
   },
+  "suggest": {
+    "ext-openssl": "for aamio domain check, which reads a website's key list over TLS on a connection of its own"
+  },
   "autoload": {
     "psr-4": {"Aamio\\": "src/"}
   },
