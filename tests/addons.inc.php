@@ -431,6 +431,18 @@ return new ThrowsInCommands();
     $check(str_contains($said['note'], 'start it again'), 'a running server keeps its tools: said on enable');
     $said = Addons::disable('demo');
     $check(str_contains($said['note'], 'demo is disabled') && str_contains($said['note'], 'start it again'), 'and on disable');
+
+    // `--home` without a folder is not the default home: refused before anything is written.
+    Addons::enable('demo');
+    $before = (string) file_get_contents($home . '/addons.json');
+    $defaultHome = $root . DIRECTORY_SEPARATOR . 'default-home';
+    putenv('AAMIO_HOME=' . $defaultHome);
+    [$code, , $err] = $cliRun(array_merge($child, [dirname(__DIR__) . '/bin/aamio', '--no-archive', 'addon', 'disable', 'demo', '--home']));
+    $check($code === 2 && str_contains($err, '--home needs a value') && file_get_contents($home . '/addons.json') === $before && !is_dir($defaultHome), '--home without a folder refuses the change, and the default home is not touched');
+    [$code, , $err] = $cliRun(array_merge($child, [dirname(__DIR__) . '/bin/aamio', '--host', '--no-archive', 'addon', 'list']));
+    $check($code === 2 && str_contains($err, '--host needs a value'), 'the same for --host, before any command');
+    putenv('AAMIO_HOME');
+    Addons::disable('demo');
     putenv('AAMIO_TEST_INSTALLED');
 
     Addons::useInstalled(null);

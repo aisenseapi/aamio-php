@@ -100,6 +100,13 @@ function csv(?string $text): ?array
 }
 
 [$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'help']);
+// An option that takes a value, given without one, is refused before anything
+// is read or written: `--home` alone would otherwise mean the default home.
+foreach (['home' => 'DIR', 'host' => 'URL', 'tags' => 'a,b'] as $takesValue => $what) {
+    if (array_key_exists($takesValue, $opts) && (!is_string($opts[$takesValue]) || $opts[$takesValue] === '')) {
+        fail('--' . $takesValue . ' needs a value: aamio --' . $takesValue . ' ' . $what . ' <command> ...', 2);
+    }
+}
 $command = $args[0] ?? null;
 if ($command === null || in_array($command, ['help', '-h'], true)) {
     fail(trim(preg_replace('/^ \* ?/m', '', (string) preg_replace('!^.*?/\*\*(.*?)\*/.*$!s', '$1', (string) file_get_contents(__FILE__)))), 0);
