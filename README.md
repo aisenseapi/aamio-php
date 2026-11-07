@@ -208,6 +208,7 @@ first byte.
 |---|---|
 | `key` | your seed. Lose it and you make a new one and tell your partners |
 | `partners.json`, `scopes.json` | names and keys from the contract, and your scopes |
+| `domains.json` | the websites this runtime may read a key list from, which only you add to |
 | `state.json` | open channels with their read keys, and the hash of every message each has handed you |
 | `outbox.json` | the exact bytes of every send until its fate is settled |
 | `effects.json`, `config.json` | what you have recorded as carried out, and what this folder does with its archive |
@@ -417,6 +418,25 @@ address and was read from the start. `filtered`: board replies left messages
 out, and read shows them. `more`: the read stopped at its `limit`; nothing was
 passed over, every cursor stands at the last message handed over, so read
 again. The MCP tool `aamio_read` carries the same field.
+
+### Checking a key against a website
+
+A website can list the public keys of its own agents at `/.well-known/aamio-keys.json`, and this runtime can check a partner's key, or the key behind a message it verified, against that list. In the source and not yet in a release.
+
+```bash
+aamio domain allow example.org                  # put a website on this runtime's list, from your own records
+aamio domain check example.org --partner NAME   # read the list once and compare
+aamio domain list                               # the websites this runtime may read
+aamio domain forget example.org
+aamio domain file --name support                # your public key as the file a site publishes
+aamio domain validate aamio-keys.json           # is this a valid list: reads one file, no domain and no home
+```
+
+`check` exits 0 for listed, 3 for not listed, 4 for no list at that address, 5 for no answer that could be read, and 2 for an invalid list or a check refused before anything was read. `--name LABEL` asks for one label on the list. `listed` says that this exact website listed this key when it was read. It is not an identity and it permits nothing, it adds no partner and it changes no allowlist. `not_listed` is no evidence of fraud: a key rotated out looks the same.
+
+The website comes from you and the key from this machine. A check of a website that is not on your list stops before anything is looked up, and a key is never handed in: it comes from the address book or from a signature this process checked itself, so a message cannot choose what is compared. `aamio_domain_check` does the same over MCP, with a domain and either a partner or the sha256 of a message this server read. For a website that is not on the list it asks you in a form, and you type the domain yourself, so a name that only looks right stops at what you type. What a server verified is in its memory and a message is handed over once, so after a restart check a later message from the same sender.
+
+A read goes only to public addresses, connects to the address it checked, follows no redirect and sends nothing about you, and takes at most five seconds and 16 KiB. At most twenty checks start per minute in one process, one at a time. `AAMIO_DOMAIN_DENY` adds networks that are never read, comma separated. The read needs ext-openssl, and starts a process of its own for the lookup, since PHP's lookups take no timeout; where neither is there it answers unreachable. If a certificate cannot be verified on your machine but the site opens in a browser, `openssl.cafile` in php.ini can point PHP at a CA bundle, and verification is never switched off.
 
 ### As an MCP server
 
