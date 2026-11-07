@@ -345,7 +345,7 @@ final class Runtime
         return sprintf('%s could not be read (%s), so this runtime stops here rather than save over it. Repair the file, or move it away to start without what was in it.', $this->path($name), $why);
     }
 
-    private function saveJson(string $name, mixed $value): void
+    public function saveJson(string $name, mixed $value): void
     {
         if ($this->homeReleased) {
             // After close the home may be another process's. Writing here
@@ -830,15 +830,39 @@ final class Runtime
         return $outcome + $this->rotateInbox($reason);
     }
 
-    /** Where the user's list of websites is. The file belongs to DomainRuntime, and the home to this class. */
-    public function domainListFile(): string
+    // ------------------------------------------------ what an add-on may use --
+    //
+    // An add-on keeps what it keeps in this home and asks this runtime which key
+    // it means. These are the ways in, so that an add-on never reaches into
+    // channels and files by their private names. saveJson is the third.
+
+    /** The path of a file of that name in this home. */
+    public function homeFile(string $name): string
     {
-        return $this->path(DomainRuntime::POLICY_FILE);
+        return $this->path($name);
     }
 
-    public function saveDomainList(array $rows): void
+    /**
+     * The keys that signed a message this process read and verified, by its
+     * hash. The same bytes may carry more than one. What this process checked
+     * lives in its memory and not in state.json, so a message read by an
+     * earlier process is not here. An observation the channel's allowlist kept
+     * out is: a signature that checked is not a permission.
+     *
+     * @return list<string>
+     */
+    public function verifiedSigners(string $sha256): array
     {
-        $this->saveJson(DomainRuntime::POLICY_FILE, $rows);
+        $keys = [];
+        foreach ($this->channels as $channel) {
+            foreach ($channel->observed as $row) {
+                if (($row['sha256'] ?? null) === $sha256 && ($row['verified'] ?? null) === true && !in_array($row['from_key'] ?? null, $keys, true)) {
+                    $keys[] = $row['from_key'] ?? null;
+                }
+            }
+        }
+
+        return $keys;
     }
 
     public function partnerList(): array

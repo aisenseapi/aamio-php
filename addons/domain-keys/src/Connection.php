@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-namespace Aamio;
+namespace Aamio\DomainKeys;
+
 
 /**
  * One TLS connection to an address that was checked, for one read of a domain
@@ -14,7 +15,7 @@ namespace Aamio;
  * at, and treats a body that is shorter or longer than announced in ways of its
  * own. This reads the bytes as they come and counts them, as aamio-python does.
  */
-final class DomainConnection
+final class Connection
 {
     /** @param resource $stream */
     private function __construct(private $stream, private $clock)
@@ -26,13 +27,13 @@ final class DomainConnection
      * before each step, so each step gets what the one before it left. $port is
      * for the local tests of this class: a read goes to 443 and nowhere else.
      *
-     * @throws DomainRefused
+     * @throws Refused
      */
-    public static function open(string $address, string $domain, float $remaining, ?callable $clock = null, int $port = DomainFetch::PORT): self
+    public static function open(string $address, string $domain, float $remaining, ?callable $clock = null, int $port = Fetch::PORT): self
     {
         $clock ??= static fn (): float => hrtime(true) / 1e9;
         if (!extension_loaded('openssl')) {
-            throw new DomainRefused('tls_unavailable', null, 'unreachable');
+            throw new Refused('tls_unavailable', null, 'unreachable');
         }
         $limit = $clock() + $remaining;
         $target = 'tcp://' . (str_contains($address, ':') ? '[' . $address . ']' : $address) . ':' . $port;
@@ -43,7 +44,7 @@ final class DomainConnection
         $errstr = '';
         $stream = @stream_socket_client($target, $errno, $errstr, max($limit - $clock(), 0.001), STREAM_CLIENT_CONNECT, $context);
         if ($stream === false) {
-            throw new DomainRefused($clock() >= $limit - 0.01 ? 'timeout' : 'connect', null, 'unreachable');
+            throw new Refused($clock() >= $limit - 0.01 ? 'timeout' : 'connect', null, 'unreachable');
         }
         $connection = new self($stream, $clock);
         stream_set_blocking($stream, false);
@@ -54,7 +55,7 @@ final class DomainConnection
                     return $connection;
                 }
                 if ($done === false) {
-                    throw new DomainRefused('tls', null, 'unreachable');
+                    throw new Refused('tls', null, 'unreachable');
                 }
                 $connection->wait($limit, true);
             }
@@ -69,7 +70,7 @@ final class DomainConnection
     {
         $left = $limit - ($this->clock)();
         if ($left <= 0) {
-            throw new DomainRefused('timeout', null, 'unreachable');
+            throw new Refused('timeout', null, 'unreachable');
         }
         $read = [$this->stream];
         $write = $writing ? [$this->stream] : null;
@@ -78,18 +79,18 @@ final class DomainConnection
         // has buffered does not always show up here.
         $slice = min($left, 0.05);
         if (@stream_select($read, $write, $except, 0, (int) ceil($slice * 1000000)) === false) {
-            throw new DomainRefused('network', null, 'unreachable');
+            throw new Refused('network', null, 'unreachable');
         }
     }
 
-    /** @throws DomainRefused */
+    /** @throws Refused */
     public function send(string $bytes, float $left): void
     {
         $limit = ($this->clock)() + $left;
         while ($bytes !== '') {
             $written = @fwrite($this->stream, $bytes);
             if ($written === false) {
-                throw new DomainRefused('network', null, 'unreachable');
+                throw new Refused('network', null, 'unreachable');
             }
             if ($written > 0) {
                 $bytes = (string) substr($bytes, $written);
@@ -102,7 +103,7 @@ final class DomainConnection
     /**
      * What has arrived, up to 4096 bytes, or '' when the other side has closed.
      *
-     * @throws DomainRefused
+     * @throws Refused
      */
     public function receive(float $left): string
     {

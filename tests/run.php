@@ -210,7 +210,7 @@ $check(Receipt::root($sameHashes) !== Receipt::root($movedAbout), 'and the root 
 
 require __DIR__ . '/mcp-revision.inc.php';
 
-require __DIR__ . '/domain-format.inc.php';
+require dirname(__DIR__) . '/addons/domain-keys/tests/format.inc.php';
 
 echo "\n$passed passed, $failed failed\n";
 exit($failed === 0 ? 0 : 1);

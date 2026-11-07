@@ -1,0 +1,25 @@
+{
+  "name": "aisenseapi/aamio-domain-keys",
+  "description": "Domain Keys for aamio: check a partner's key, or the key behind a message your runtime verified, against the list a website publishes at /.well-known/aamio-keys.json. Adds aamio addon domain and the MCP tool aamio_addon_domain_check.",
+  "type": "aamio-addon",
+  "license": "MIT",
+  "homepage": "https://aamio.at/docs/domain-keys",
+  "keywords": ["aamio", "agents", "mcp", "domain", "well-known", "ed25519"],
+  "authors": [
+    {"name": "AI SENSE AS", "homepage": "https://aisense.no/"}
+  ],
+  "support": {
+    "docs": "https://aamio.at/docs/domain-keys",
+    "source": "https://github.com/aisenseapi/aamio-php",
+    "email": "abuse@aisense.no"
+  },
+  "require": {
+    "php": ">=8.1",
+    "ext-openssl": "*",
+    "aisenseapi/aamio": ">=0.3.11"
+  },
+  "autoload": {
+    "psr-4": {"Aamio\\DomainKeys\\": "src/"}
+  },
+  "minimum-stability": "stable"
+}

@@ -20,7 +20,7 @@
     "ext-json": "*"
   },
   "suggest": {
-    "ext-openssl": "for aamio domain check, which reads a website's key list over TLS on a connection of its own"
+    "aisenseapi/aamio-domain-keys": "Domain Keys, an add-on: aamio addon domain checks a key against the list a website publishes"
   },
   "autoload": {
     "psr-4": {"Aamio\\": "src/"}

@@ -6,24 +6,41 @@ not what moved in the source.
 
 ## Unreleased
 
-- `aamio domain` and `aamio_domain_check` check a key against a website from
-  inside the runtime, the same as in aamio-python. A site can publish the public
-  keys of its agents at `/.well-known/aamio-keys.json`, and the key compared comes
-  from the address book or from the signature this process checked itself, and
-  never from whoever asks, so a message cannot pick it. Only websites on the
-  user's own list are read, in `domains.json` in the home: `aamio domain allow`
-  on the command line, or a form over MCP where the user types the domain
-  themselves and a lookalike stops at what they type. `aamio domain file` writes
-  your public key as the list a site publishes, and `aamio domain validate`
-  checks a file without touching a home. `check` has an exit code per answer. A
-  read goes only to public addresses, connects to the address that was checked,
-  follows no redirect, and takes five seconds and 16 KiB at most. Twenty checks
-  start per minute in one process, and `AAMIO_DOMAIN_DENY` keeps an operator's
-  own networks out. A result is a dated observation and changes nothing. Nothing
+- Add-ons. The core is the rendezvous, and what a runtime can do beyond it
+  comes in add-ons, each a Composer package of its own of type `aamio-addon`
+  that depends on this one and has an `aamio-addon.php` at its root returning
+  an `Aamio\Addon`, so that installing one is the user's choice and
+  `composer require aisenseapi/aamio` stays what it was: twenty-four tools.
+  `aamio addon list` says what this installation can run, and an add-on's
+  commands sit under `aamio addon NAME`, its tools beside the core's. Two
+  add-ons with one name, or a tool with a name already taken, stop the start
+  and say so, rather than let the order they were found in decide; so does an
+  add-on that cannot be loaded. For a checkout that is not installed,
+  `AAMIO_ADDONS` names the files.
+- Domain Keys is the first add-on, `aisenseapi/aamio-domain-keys`, built in
+  `addons/domain-keys` of this repository, the same as in aamio-python. A
+  website can publish the public keys of its agents at
+  `/.well-known/aamio-keys.json`, and `aamio addon domain check` and the tool
+  `aamio_addon_domain_check` check a key against that list from inside the
+  runtime. The key comes from the address book or from the signature this
+  process checked itself, and never from whoever asks, so a message cannot
+  pick it. Only websites on the user's own list are read, in `domains.json` in
+  the home: `aamio addon domain allow` on the command line, or a form over MCP
+  where the user types the domain themselves and a lookalike stops at what
+  they type. `aamio addon domain file` writes your public key as the list a
+  site publishes, and `aamio addon domain validate` checks a file without
+  touching a home. `check` has an exit code per answer. A read goes only to
+  public addresses, connects to the address that was checked, follows no
+  redirect, and takes five seconds and 16 KiB at most. Twenty checks start per
+  minute in one process, and `AAMIO_DOMAIN_DENY` keeps an operator's own
+  networks out. A result is a dated observation and changes nothing. Nothing
   is read until a domain is on the list, there is no background work, and a
   `domains.json` that cannot be read stops domain checks and nothing else. The
   read needs ext-openssl, and a process of its own for the lookup, since PHP's
   lookups take no timeout. A lookup that cannot be started answers unreachable.
+- The runtime gives an add-on three ways in and no more: `homeFile` and
+  `saveJson` for a file of its own in the home, and `verifiedSigners` for the
+  keys behind a message this process read and verified.
 
 ## 0.3.10 - 2026-10-01
 

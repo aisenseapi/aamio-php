@@ -2,13 +2,14 @@
 
 declare(strict_types=1);
 
-namespace Aamio;
+namespace Aamio\DomainKeys;
+
 
 /**
  * Reading a domain key list from the domain itself, so that a stranger cannot
  * turn the read on anyone else.
  *
- * DomainKeys is the format. This is the one way this client reads a list from a
+ * Lists is the format. This is the one way this client reads a list from a
  * website, and it is built for the case where the domain came from a message:
  * whatever it names, the read reaches only the public internet, only that host,
  * only once and only for a few seconds.
@@ -48,7 +49,7 @@ namespace Aamio;
  * unreachable is never not_listed, and not_listed is no evidence of fraud.
  * listed says what this site listed when it was read, and grants nothing.
  */
-final class DomainFetch
+final class Fetch
 {
     public const PORT = 443;
     public const DEADLINE_SECONDS = 5.0;
@@ -164,12 +165,12 @@ final class DomainFetch
      * prints fits the pipe by the limit on addresses.
      *
      * @return list<string>
-     * @throws DomainRefused
+     * @throws Refused
      */
     public static function resolve(string $domain, float $remaining): array
     {
         if (!function_exists('proc_open') || PHP_BINARY === '') {
-            throw new DomainRefused('dns_unavailable', null, 'unreachable');
+            throw new Refused('dns_unavailable', null, 'unreachable');
         }
         $limit = hrtime(true) / 1e9 + $remaining;
         // -n: no php.ini, so nothing else is loaded. dns_get_record is in PHP's core.
@@ -179,13 +180,13 @@ final class DomainFetch
         $pipes = [];
         $process = @proc_open([PHP_BINARY, '-n', '-r', $code, '--', $domain], [0 => ['file', $nowhere, 'r'], 1 => ['pipe', 'w'], 2 => ['file', $nowhere, 'w']], $pipes);
         if (!is_resource($process)) {
-            throw new DomainRefused('dns_unavailable', null, 'unreachable');
+            throw new Refused('dns_unavailable', null, 'unreachable');
         }
         try {
             while (proc_get_status($process)['running']) {
                 if (hrtime(true) / 1e9 >= $limit) {
                     proc_terminate($process, 9);
-                    throw new DomainRefused('timeout', null, 'unreachable');
+                    throw new Refused('timeout', null, 'unreachable');
                 }
                 usleep(5000);
             }
@@ -196,7 +197,7 @@ final class DomainFetch
         }
         $addresses = is_string($said) ? json_decode($said, true) : null;
         if ($said === 'many' || !is_array($addresses)) {
-            throw new DomainRefused('dns', null, 'unreachable');
+            throw new Refused('dns', null, 'unreachable');
         }
 
         return array_values(array_filter($addresses, static fn (mixed $address): bool => is_string($address) && $address !== ''));
@@ -206,14 +207,14 @@ final class DomainFetch
      * Status, headers and body, within the limits.
      *
      * @return array{0:int,1:array<string,string>,2:string}
-     * @throws DomainRefused
+     * @throws Refused
      */
     private static function readResponse(mixed $connection, float $deadline, callable $clock): array
     {
         $receive = static function () use ($connection, $deadline, $clock): string {
             $left = $deadline - $clock();
             if ($left <= 0) {
-                throw new DomainRefused('timeout', null, 'unreachable');
+                throw new Refused('timeout', null, 'unreachable');
             }
 
             return $connection->receive($left);
@@ -221,22 +222,22 @@ final class DomainFetch
         $buffer = '';
         while (!str_contains($buffer, "\r\n\r\n")) {
             if (strlen($buffer) > self::MAX_HEADER_BYTES) {
-                throw new DomainRefused('header_limit');
+                throw new Refused('header_limit');
             }
             $chunk = $receive();
             if ($chunk === '') {
-                throw new DomainRefused('connection_closed', null, 'unreachable');
+                throw new Refused('connection_closed', null, 'unreachable');
             }
             $buffer .= $chunk;
         }
         [$head, $body] = explode("\r\n\r\n", $buffer, 2);
         if (strlen($head) > self::MAX_HEADER_BYTES) {
-            throw new DomainRefused('header_limit');
+            throw new Refused('header_limit');
         }
         $lines = explode("\r\n", $head);
         $parts = explode(' ', $lines[0], 3);
         if (count($parts) < 2 || !str_starts_with($parts[0], 'HTTP/1.') || preg_match('/^[0-9]{3}$/D', $parts[1]) !== 1) {
-            throw new DomainRefused('not_http');
+            throw new Refused('not_http');
         }
         $status = (int) $parts[1];
         $headers = [];
@@ -245,7 +246,7 @@ final class DomainFetch
             $colon = strpos($line, ':');
             $name = $colon === false ? '' : substr($line, 0, $colon);
             if ($name === '' || $name !== trim($name, $blank)) {
-                throw new DomainRefused('bad_header');
+                throw new Refused('bad_header');
             }
             $headers[strtr($name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')] = trim(substr($line, $colon + 1), $blank);
         }
@@ -253,8 +254,8 @@ final class DomainFetch
             return [$status, $headers, ''];
         }
         while (true) {
-            if (strlen($body) > DomainKeys::MAX_BYTES) {
-                throw new DomainRefused('body_limit');
+            if (strlen($body) > Lists::MAX_BYTES) {
+                throw new Refused('body_limit');
             }
             $chunk = $receive();
             if ($chunk === '') {
@@ -300,15 +301,15 @@ final class DomainFetch
         $answer = static function (string $status, string $reason, array $extra = []) use (&$result): array {
             return ['status' => $status, 'reason' => $reason] + $extra + $result;
         };
-        $host = DomainKeys::normaliseDomain($domain);
+        $host = Lists::normaliseDomain($domain);
         if ($host === null) {
             return $answer('invalid', 'invalid_domain');
         }
         $result['domain'] = $host;
-        if (!DomainKeys::canonicalKey($key)) {
+        if (!Lists::canonicalKey($key)) {
             return $answer('invalid', 'invalid_subject_key');
         }
-        if ($name !== null && !DomainKeys::validName($name)) {
+        if ($name !== null && !Lists::validName($name)) {
             return $answer('invalid', 'invalid_requested_name');
         }
         if ($allowed !== null && !in_array($host, $allowed, true)) {
@@ -317,10 +318,10 @@ final class DomainFetch
 
         $deadline = $clock() + $deadlineSeconds;
         $resolve ??= self::resolve(...);
-        $connect ??= static fn (string $address, string $server, float $remaining): DomainConnection => DomainConnection::open($address, $server, $remaining, $clock);
+        $connect ??= static fn (string $address, string $server, float $remaining): Connection => Connection::open($address, $server, $remaining, $clock);
         try {
             $addresses = $resolve($host, $deadline - $clock());
-        } catch (DomainRefused $refused) {
+        } catch (Refused $refused) {
             return $answer($refused->status, $refused->reason);
         }
         if ($addresses === []) {
@@ -345,7 +346,7 @@ final class DomainFetch
             try {
                 $connection = $connect($address, $host, $left / (count($addresses) - $index));
                 break;
-            } catch (DomainRefused $refused) {
+            } catch (Refused $refused) {
                 if ($refused->reason === 'tls' || $refused->reason === 'tls_unavailable') {
                     return $answer('unreachable', $refused->reason);
                 }
@@ -357,10 +358,10 @@ final class DomainFetch
         }
 
         try {
-            $request = 'GET ' . DomainKeys::PATH . " HTTP/1.0\r\nHost: " . $host . "\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nUser-Agent: " . self::USER_AGENT . "\r\nConnection: close\r\n\r\n";
+            $request = 'GET ' . Lists::PATH . " HTTP/1.0\r\nHost: " . $host . "\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nUser-Agent: " . self::USER_AGENT . "\r\nConnection: close\r\n\r\n";
             $connection->send($request, max($deadline - $clock(), 0.001));
             [$status, $headers, $body] = self::readResponse($connection, $deadline, $clock);
-        } catch (DomainRefused $refused) {
+        } catch (Refused $refused) {
             return $answer($refused->status, $refused->reason);
         } finally {
             $connection->close();
@@ -388,7 +389,7 @@ final class DomainFetch
             return $answer('invalid', 'length_mismatch');
         }
 
-        $found = DomainKeys::match($body, $key, $name);
+        $found = Lists::match($body, $key, $name);
         if ($found['status'] === 'invalid') {
             return $answer('invalid', 'invalid_document', ['detail' => $found['detail'] ?? null]);
         }

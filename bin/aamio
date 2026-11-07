@@ -25,15 +25,8 @@ declare(strict_types=1);
  *   scope share NAME PARTNER --access read|write | scope remove NAME
  *   (a key given to scope add stays in the shell history, so scope share from runtime to runtime is better)
  *   outbox pending | outbox retry [--id ID] | outbox forget ID | serve
- *   domain file [--name NAME]    (your public key as the list a website publishes)
- *   domain validate FILE         (is this a valid list: reads one file, no domain and no home)
- *   domain allow DOMAIN | domain forget DOMAIN | domain list
- *   domain check DOMAIN --partner NAME [--name LABEL]
- *   (check exits 0 listed, 3 not_listed, 4 no_list, 5 unreachable and 2 invalid or refused here before
- *   anything was read. listed says this site listed this key when it was read, and permits nothing. The
- *   domain comes from your own records, never from a message. A message can only be checked from inside
- *   aamio serve, through aamio_domain_check: what a process verified is not kept for the next one.
- *   AAMIO_DOMAIN_DENY: comma separated networks a domain check never reads.)
+ *   addon list                   (the add-ons this installation can run, each a package of its own)
+ *   addon NAME ...               (an add-on's commands: aamio addon domain --help with Domain Keys)
  */
 
 // Diagnostics to stderr from here on, so stdout carries the JSON and nothing
@@ -51,13 +44,10 @@ foreach ([__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php
     }
 }
 
+use Aamio\Addons;
 use Aamio\Compat;
-use Aamio\DomainKeys;
-use Aamio\DomainRefused;
-use Aamio\DomainRuntime;
 use Aamio\GateStop;
 use Aamio\Http;
-use Aamio\InvalidDomainList;
 use Aamio\McpServer;
 use Aamio\Runtime;
 use Aamio\SendFailed;
@@ -108,68 +98,33 @@ function csv(?string $text): ?array
     return array_values(array_filter(array_map('trim', explode(',', $text)), static fn (string $t): bool => $t !== ''));
 }
 
-/** The commands about a website's list of keys, with their exit code. Adding a website is the user's word, here or in a form over MCP. */
-function domainCommand(array $args, array $opts, Runtime $runtime): int
-{
-    $action = $args[1] ?? '';
-    try {
-        switch ($action) {
-            case 'file':
-                try {
-                    $raw = DomainKeys::make([['key' => $runtime->keys->public, 'name' => $opts['name'] ?? null]]);
-                } catch (InvalidDomainList $error) {
-                    // To stderr: standard output here is the file, and
-                    // `aamio domain file > aamio-keys.json` would publish the complaint.
-                    fwrite(STDERR, json_encode(['error' => $error->reason, 'fix' => '--name is a label of 1 to 64 characters of a-z, 0-9, dot, underscore and dash.']) . "\n");
-
-                    return 2;
-                }
-                fwrite(STDOUT, $raw);
-                fwrite(STDERR, 'aamio: this holds your public key and nothing secret. Publish it at https://YOUR-DOMAIN' . DomainKeys::PATH . ", with no login and no redirect, on a domain you already control.\n");
-
-                return 0;
-            case 'allow':
-                out(DomainRuntime::allow($runtime, $args[2] ?? fail('domain allow DOMAIN', 2)) + ['note' => "This runtime may now read this website's key list when a check asks for it. Nothing was read now, and a key it lists permits nothing."]);
-
-                return 0;
-            case 'forget':
-                out(DomainRuntime::forget($runtime, $args[2] ?? fail('domain forget DOMAIN', 2)));
-
-                return 0;
-            case 'list':
-                out(['domains' => DomainRuntime::allowedDomains($runtime)]);
-
-                return 0;
-            case 'check':
-                if (!isset($args[2]) || !is_string($opts['partner'] ?? null)) {
-                    fail('domain check DOMAIN --partner NAME [--name LABEL]', 2);
-                }
-                $found = DomainRuntime::check($runtime, $args[2], $opts['partner'], null, $opts['name'] ?? null);
-                out($found);
-
-                return DomainRuntime::EXIT_CODES[$found['status']];
-        }
-    } catch (DomainRefused $refused) {
-        out(DomainRuntime::refusal($refused));
-
-        return 2;
-    }
-    fail('domain file|validate|allow|forget|list|check', 2);
-}
-
-[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor']);
+[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'help']);
 $command = $args[0] ?? null;
 if ($command === null || in_array($command, ['help', '-h'], true)) {
     fail(trim(preg_replace('/^ \* ?/m', '', (string) preg_replace('!^.*?/\*\*(.*?)\*/.*$!s', '$1', (string) file_get_contents(__FILE__)))), 0);
 }
 
-// Before the runtime: creating one takes the home's lock and tidies the home,
-// and this reads one file. It works beside a running server and on a machine
-// with no home at all, and it cannot make a key by accident.
-if ($command === 'domain' && ($args[1] ?? null) === 'validate') {
-    [$checked, $code] = DomainKeys::checkFile((string) ($args[2] ?? fail('domain validate FILE', 2)));
-    out($checked);
-    exit($code);
+// What is installed beyond the core. An add-on that cannot be used stops here
+// with the reason, whatever the command: a broken install is not a quiet absence.
+try {
+    Addons::loaded();
+} catch (\RuntimeException $error) {
+    fail($error->getMessage());
+}
+// Before the runtime: creating one takes the home's lock and tidies the home.
+// Listing the add-ons reads nothing, and an add-on may have commands of its own
+// that need no home, as a check of a local file beside a running server.
+if ($command === 'addon') {
+    $which = $args[1] ?? fail('aamio addon list, or aamio addon NAME ... for an installed add-on', 2);
+    if ($which === 'list') {
+        out(Addons::describe());
+        exit(0);
+    }
+    $addon = Addons::byName($which) ?? fail('no add-on is called ' . $which . '. aamio addon list says which are installed.', 2);
+    $code = $addon->early(array_slice($args, 2), $opts);
+    if ($code !== null) {
+        exit($code);
+    }
 }
 
 try {
@@ -398,8 +353,8 @@ try {
                 fail('outbox pending|retry|forget');
             }
             break;
-        case 'domain':
-            exit(domainCommand($args, $opts, $runtime));
+        case 'addon':
+            exit(Addons::byName((string) $args[1])->command(array_slice($args, 2), $opts, $runtime));
         case 'serve':
             (new McpServer($runtime))->serve();
             break;

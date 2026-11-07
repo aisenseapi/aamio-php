@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-namespace Aamio;
+namespace Aamio\DomainKeys;
+
 
 /**
  * Domain keys: which public aamio keys a website says are its own.
@@ -16,7 +17,7 @@ namespace Aamio;
  * whether the key behind a message it checked is on that list. This class is
  * the format and nothing else: a strict parser, the match, a generator for the
  * file, and the syntax of a domain. It opens no connection. Fetching the list
- * is the separate, hardened step in DomainFetch, and nothing here may be taken
+ * is the separate, hardened step in Fetch, and nothing here may be taken
  * for it.
  *
  * A listed key says that this exact site listed this key when it was read. It
@@ -43,7 +44,7 @@ namespace Aamio;
  * tests/domain_keys_vectors.json holds what every client has to answer, and is
  * the same file aamio-python keeps.
  */
-final class DomainKeys
+final class Lists
 {
     public const VERSION = 1;
     public const PATH = '/.well-known/aamio-keys.json';
@@ -114,49 +115,49 @@ final class DomainKeys
      * The entries of a version 1 list, as ['key' => ...] or ['key' => ..., 'name' => ...].
      *
      * @return list<array{key:string,name?:string}>
-     * @throws InvalidDomainList
+     * @throws InvalidList
      */
     public static function parse(mixed $raw): array
     {
         if (!is_string($raw)) {
-            throw new InvalidDomainList('not_bytes');
+            throw new InvalidList('not_bytes');
         }
         if (strlen($raw) > self::MAX_BYTES) {
-            throw new InvalidDomainList('body_limit');
+            throw new InvalidList('body_limit');
         }
         // PCRE refuses overlong forms and surrogates, as a strict decoder does.
         if (preg_match('//u', $raw) !== 1) {
-            throw new InvalidDomainList('not_utf8');
+            throw new InvalidList('not_utf8');
         }
         if (str_starts_with($raw, "\xEF\xBB\xBF")) {
-            throw new InvalidDomainList('byte_order_mark');
+            throw new InvalidList('byte_order_mark');
         }
         $at = 0;
         $value = self::value($raw, $at, 1);
         self::skip($raw, $at);
         if ($at !== strlen($raw)) {
-            throw new InvalidDomainList('invalid_json');
+            throw new InvalidList('invalid_json');
         }
         if (!$value instanceof \ArrayObject) {
-            throw new InvalidDomainList('object_required');
+            throw new InvalidList('object_required');
         }
         // === 1 and nothing looser: 1.0, 1e0 and true are not the integer 1.
         if (($value['aamio_keys'] ?? null) !== self::VERSION) {
-            throw new InvalidDomainList('unsupported_version');
+            throw new InvalidList('unsupported_version');
         }
         $rows = $value['keys'] ?? null;
         if (!is_array($rows) || count($rows) > self::MAX_KEYS) {
-            throw new InvalidDomainList('invalid_keys');
+            throw new InvalidList('invalid_keys');
         }
         $seen = [];
         $entries = [];
         foreach ($rows as $row) {
             if (!$row instanceof \ArrayObject || !self::canonicalKey($row['key'] ?? null)) {
-                throw new InvalidDomainList('invalid_key');
+                throw new InvalidList('invalid_key');
             }
             $key = $row['key'];
             if (isset($seen[$key])) {
-                throw new InvalidDomainList('duplicate_key');
+                throw new InvalidList('duplicate_key');
             }
             $seen[$key] = true;
             $entry = ['key' => $key];
@@ -164,7 +165,7 @@ final class DomainKeys
             // of null is a bad name and not a missing one.
             if ($row->offsetExists('name')) {
                 if (!self::validName($row['name'])) {
-                    throw new InvalidDomainList('invalid_name');
+                    throw new InvalidList('invalid_name');
                 }
                 $entry['name'] = $row['name'];
             }
@@ -192,7 +193,7 @@ final class DomainKeys
         }
         try {
             $entries = self::parse($raw);
-        } catch (InvalidDomainList $error) {
+        } catch (InvalidList $error) {
             return ['status' => 'invalid', 'reason' => 'invalid_document', 'detail' => $error->reason];
         }
         $digest = hash('sha256', $raw);
@@ -215,7 +216,7 @@ final class DomainKeys
      * A list this would refuse to read is refused here as well.
      *
      * @param list<array{key:mixed,name?:mixed}> $entries
-     * @throws InvalidDomainList
+     * @throws InvalidList
      */
     public static function make(array $entries): string
     {
@@ -223,23 +224,23 @@ final class DomainKeys
         $seen = [];
         foreach ($entries as $entry) {
             if (!is_array($entry) || !self::canonicalKey($entry['key'] ?? null)) {
-                throw new InvalidDomainList('invalid_key');
+                throw new InvalidList('invalid_key');
             }
             if (isset($seen[$entry['key']])) {
-                throw new InvalidDomainList('duplicate_key');
+                throw new InvalidList('duplicate_key');
             }
             $seen[$entry['key']] = true;
             $row = '    {' . "\n" . '      "key": "' . $entry['key'] . '"';
             if (($entry['name'] ?? null) !== null) {
                 if (!self::validName($entry['name'])) {
-                    throw new InvalidDomainList('invalid_name');
+                    throw new InvalidList('invalid_name');
                 }
                 $row .= ',' . "\n" . '      "name": "' . $entry['name'] . '"';
             }
             $rows[] = $row . "\n" . '    }';
         }
         if (count($rows) > self::MAX_KEYS) {
-            throw new InvalidDomainList('invalid_keys');
+            throw new InvalidList('invalid_keys');
         }
         $list = $rows === [] ? '[]' : "[\n" . implode(",\n", $rows) . "\n  ]";
         $raw = '{' . "\n" . '  "aamio_keys": ' . self::VERSION . ',' . "\n" . '  "keys": ' . $list . "\n" . '}' . "\n";
@@ -267,7 +268,7 @@ final class DomainKeys
         try {
             $result = ['format_valid' => true, 'keys' => count(self::parse($raw))];
             $code = 0;
-        } catch (InvalidDomainList $error) {
+        } catch (InvalidList $error) {
             $result = ['format_valid' => false, 'reason' => 'invalid_document', 'detail' => $error->reason];
             $code = 2;
         }
@@ -311,7 +312,7 @@ final class DomainKeys
     private static function members(string $text, int &$at, int $level): \ArrayObject
     {
         if ($level > self::MAX_DEPTH) {
-            throw new InvalidDomainList('depth_limit');
+            throw new InvalidList('depth_limit');
         }
         $at++;
         $found = [];
@@ -324,15 +325,15 @@ final class DomainKeys
         while (true) {
             self::skip($text, $at);
             if (($text[$at] ?? '') !== '"') {
-                throw new InvalidDomainList('invalid_json');
+                throw new InvalidList('invalid_json');
             }
             $name = self::string($text, $at);
             if (array_key_exists($name, $found)) {
-                throw new InvalidDomainList('duplicate_member');
+                throw new InvalidList('duplicate_member');
             }
             self::skip($text, $at);
             if (($text[$at] ?? '') !== ':') {
-                throw new InvalidDomainList('invalid_json');
+                throw new InvalidList('invalid_json');
             }
             $at++;
             $found[$name] = self::value($text, $at, $level + 1);
@@ -343,7 +344,7 @@ final class DomainKeys
                 return new \ArrayObject($found);
             }
             if ($next !== ',') {
-                throw new InvalidDomainList('invalid_json');
+                throw new InvalidList('invalid_json');
             }
         }
     }
@@ -352,7 +353,7 @@ final class DomainKeys
     private static function rows(string $text, int &$at, int $level): array
     {
         if ($level > self::MAX_DEPTH) {
-            throw new InvalidDomainList('depth_limit');
+            throw new InvalidList('depth_limit');
         }
         $at++;
         $found = [];
@@ -371,7 +372,7 @@ final class DomainKeys
                 return $found;
             }
             if ($next !== ',') {
-                throw new InvalidDomainList('invalid_json');
+                throw new InvalidList('invalid_json');
             }
         }
     }
@@ -400,7 +401,7 @@ final class DomainKeys
                 return $out;
             }
             if ($stop !== '\\') {
-                throw new InvalidDomainList('invalid_json');
+                throw new InvalidList('invalid_json');
             }
             $escape = $text[$at + 1] ?? '';
             $at += 2;
@@ -409,7 +410,7 @@ final class DomainKeys
                 continue;
             }
             if ($escape !== 'u') {
-                throw new InvalidDomainList('invalid_json');
+                throw new InvalidList('invalid_json');
             }
             $unit = self::unit($text, $at);
             if ($unit >= 0xD800 && $unit <= 0xDBFF && substr($text, $at, 2) === '\\u') {
@@ -429,7 +430,7 @@ final class DomainKeys
     {
         $digits = substr($text, $at, 4);
         if (strlen($digits) !== 4 || strspn($digits, '0123456789abcdefABCDEF') !== 4) {
-            throw new InvalidDomainList('invalid_json');
+            throw new InvalidList('invalid_json');
         }
         $at += 4;
 
@@ -455,21 +456,21 @@ final class DomainKeys
     private static function number(string $text, int &$at): int|float
     {
         if (preg_match('/\G-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/', $text, $found, 0, $at) !== 1) {
-            throw new InvalidDomainList('invalid_json');
+            throw new InvalidList('invalid_json');
         }
         $token = $found[0];
         $at += strlen($token);
         if (strpbrk($token, '.eE') !== false) {
             $value = (float) $token;
             if (!is_finite($value)) {
-                throw new InvalidDomainList('non_finite_number');
+                throw new InvalidList('non_finite_number');
             }
 
             return $value;
         }
         $digits = ltrim($token, '-');
         if (strlen($digits) > 16 || (strlen($digits) === 16 && strcmp($digits, self::MAX_INTEGER) > 0)) {
-            throw new InvalidDomainList('integer_range');
+            throw new InvalidList('integer_range');
         }
 
         return (int) $token;

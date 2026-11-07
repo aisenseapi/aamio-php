@@ -8,16 +8,18 @@ declare(strict_types=1);
  * test_domain_fetch.py as far as they carry over: threads and sockets differ, so
  * the lookup and the connection have checks of their own at the end.
  *
- * Included by tests/run.php, with $check in scope.
+ * Included by the core's tests/run.php, with $check in scope.
  */
 
-require_once __DIR__ . '/domain-fake.inc.php';
+require_once dirname(__DIR__) . '/aamio-addon.php';
 
-use Aamio\DomainConnection;
-use Aamio\DomainFetch;
-use Aamio\DomainKeys;
-use Aamio\DomainRefused;
-use Aamio\InvalidDomainList;
+require_once __DIR__ . '/fake.inc.php';
+
+use Aamio\DomainKeys\Connection;
+use Aamio\DomainKeys\Fetch;
+use Aamio\DomainKeys\Lists;
+use Aamio\DomainKeys\Refused;
+use Aamio\DomainKeys\InvalidList;
 
 echo "domain keys: the format\n";
 
@@ -26,7 +28,7 @@ $addressVectors = json_decode((string) file_get_contents(__DIR__ . '/domain_fetc
 
 // The same two files, where aamio-python's checkout is beside this one.
 foreach (['domain_keys_vectors.json', 'domain_fetch_vectors.json'] as $file) {
-    $there = dirname(__DIR__, 2) . '/aamio-python/tests/' . $file;
+    $there = dirname(__DIR__, 4) . '/aamio-python/tests/' . $file;
     if (is_file($there)) {
         $check(str_replace("\r\n", "\n", (string) file_get_contents($there)) === str_replace("\r\n", "\n", (string) file_get_contents(__DIR__ . '/' . $file)), $file . ' is the one aamio-python keeps, whichever way git wrote the line breaks');
     } else {
@@ -38,11 +40,11 @@ $wrong = [];
 foreach ($vectors['documents'] as $case) {
     $raw = isset($case['b64']) ? (string) base64_decode($case['b64'], true) : $case['text'];
     try {
-        $entries = DomainKeys::parse($raw);
+        $entries = Lists::parse($raw);
         if (!$case['valid'] || count($entries) !== $case['keys']) {
             $wrong[] = $case['case'];
         }
-    } catch (InvalidDomainList) {
+    } catch (InvalidList) {
         if ($case['valid']) {
             $wrong[] = $case['case'];
         }
@@ -52,7 +54,7 @@ $check($wrong === [], count($vectors['documents']) . ' documents answer as the v
 
 $wrong = [];
 foreach ($vectors['matches'] as $case) {
-    $found = DomainKeys::match($case['text'], $case['key'], $case['name'] ?? null);
+    $found = Lists::match($case['text'], $case['key'], $case['name'] ?? null);
     $right = $found['status'] === $case['status'] && (!isset($case['reason']) || $found['reason'] === $case['reason'])
         && (!array_key_exists('matched_name', $case) || $found['matched_name'] === $case['matched_name'])
         && (!isset($case['document_sha256']) || $found['document_sha256'] === $case['document_sha256']);
@@ -62,34 +64,34 @@ foreach ($vectors['matches'] as $case) {
 }
 $check($wrong === [], count($vectors['matches']) . ' matches answer as the vectors say', implode('; ', $wrong));
 
-$wrong = array_filter($vectors['domains']['valid'], static fn (array $pair): bool => DomainKeys::normaliseDomain($pair[0]) !== $pair[1]);
+$wrong = array_filter($vectors['domains']['valid'], static fn (array $pair): bool => Lists::normaliseDomain($pair[0]) !== $pair[1]);
 $check($wrong === [], count($vectors['domains']['valid']) . ' domains come out in their exact form');
-$wrong = array_filter($vectors['domains']['invalid'], static fn (string $domain): bool => DomainKeys::normaliseDomain($domain) !== null);
+$wrong = array_filter($vectors['domains']['invalid'], static fn (string $domain): bool => Lists::normaliseDomain($domain) !== null);
 $check($wrong === [], count($vectors['domains']['invalid']) . ' domains are refused');
-$check(DomainKeys::normaliseDomain(null) === null && DomainKeys::normaliseDomain(7) === null, 'and what is no string is no domain');
+$check(Lists::normaliseDomain(null) === null && Lists::normaliseDomain(7) === null, 'and what is no string is no domain');
 
-$wrong = array_filter($vectors['generated'], static fn (array $case): bool => DomainKeys::make($case['entries']) !== $case['text']);
+$wrong = array_filter($vectors['generated'], static fn (array $case): bool => Lists::make($case['entries']) !== $case['text']);
 $check($wrong === [], 'the generator writes the bytes every generator writes');
 $wrong = [];
 foreach ($vectors['refused'] as $case) {
     try {
-        DomainKeys::make($case['entries']);
+        Lists::make($case['entries']);
         $wrong[] = $case['case'];
-    } catch (InvalidDomainList) {
+    } catch (InvalidList) {
     }
 }
 $check($wrong === [], 'and refuses what the parser would refuse', implode('; ', $wrong));
-$check(DomainKeys::urlFor('Example.ORG') === 'https://example.org/.well-known/aamio-keys.json' && DomainKeys::urlFor('https://example.org') === null, 'the address is built here and from a host alone');
+$check(Lists::urlFor('Example.ORG') === 'https://example.org/.well-known/aamio-keys.json' && Lists::urlFor('https://example.org') === null, 'the address is built here and from a host alone');
 
 $doc = (string) tempnam(sys_get_temp_dir(), 'aamio-domain-');
 file_put_contents($doc, $vectors['generated'][0]['text']);
-[$said, $code] = DomainKeys::checkFile($doc);
+[$said, $code] = Lists::checkFile($doc);
 $check($code === 0 && $said === ['format_valid' => true, 'keys' => 2, 'source' => 'local_file', 'domain_checked' => false], 'a file is checked against the format, and says no domain was');
 file_put_contents($doc, '{"aamio_keys":2,"keys":[]}');
-[$said, $code] = DomainKeys::checkFile($doc);
+[$said, $code] = Lists::checkFile($doc);
 $check($code === 2 && $said['format_valid'] === false && $said['detail'] === 'unsupported_version' && $said['domain_checked'] === false, 'a file that is not version 1 says why');
 unlink($doc);
-[$said, $code] = DomainKeys::checkFile($doc);
+[$said, $code] = Lists::checkFile($doc);
 $check($code === 2 && $said === ['error' => 'local_file_unreadable'], 'and one that cannot be read says that');
 
 echo "domain keys: the read\n";
@@ -97,7 +99,7 @@ echo "domain keys: the read\n";
 $dKey = 'c3lrmIg_bOnE-fQyMRpxvqoeXAhkBGqDHCD9LXKWSnc';
 $dOther = 'wK1BJa9cuHn7Y7QPC_4EQ6X_jtCbgbMbR6pqT-VGmmA';
 $dPublic = '93.184.216.34';
-$dList = DomainKeys::make([['key' => $dKey, 'name' => 'support']]);
+$dList = Lists::make([['key' => $dKey, 'name' => 'support']]);
 $dPage = fakeDomainHttp(200, null, $dList);
 $noon = gmmktime(12, 0, 0, 11, 7, 2026);
 /** One read against stand-ins: the answer, what was asked for, and the connection. */
@@ -124,7 +126,7 @@ $dRun = static function (mixed $chunks, array $options = []) use ($dKey, $dPubli
         return $connection;
     };
     $shares = [];
-    $result = DomainFetch::check($options['domain'] ?? 'example.org', $options['key'] ?? $dKey, $options['name'] ?? null, $options['allowed'] ?? null, $options['deny'] ?? [], $resolve, $connect, $options['clock'] ?? null, static fn (): int => $noon, $options['deadline'] ?? DomainFetch::DEADLINE_SECONDS);
+    $result = Fetch::check($options['domain'] ?? 'example.org', $options['key'] ?? $dKey, $options['name'] ?? null, $options['allowed'] ?? null, $options['deny'] ?? [], $resolve, $connect, $options['clock'] ?? null, static fn (): int => $noon, $options['deadline'] ?? Fetch::DEADLINE_SECONDS);
 
     return [$result, $asked, $connection, $shares];
 };
@@ -178,50 +180,50 @@ foreach (["\xB2\xB2\xB2", 'abc', '20', '2000', '+20'] as $status) {
 $check($dRun("HTTP/1.1 200 OK\r\nno colon here\r\n\r\n")[0]['reason'] === 'bad_header', 'a header with no colon');
 $result = $dRun("HTTP/1.1 200 OK\r\n")[0];
 $check($result['status'] === 'unreachable' && $result['reason'] === 'connection_closed', 'a connection closed before the headers are done');
-$result = $dRun([new DomainRefused('timeout', null, 'unreachable')])[0];
+$result = $dRun([new Refused('timeout', null, 'unreachable')])[0];
 $check($result['status'] === 'unreachable' && $result['reason'] === 'timeout', 'a read that times out');
 
 $tick = 0.0;
 $slow = new FakeDomainConnection(array_fill(0, 50, 'x'), static function () use (&$tick): void {
     $tick += 2.0;
 });
-$result = DomainFetch::check('example.org', $dKey, null, null, [], static fn (): array => [$dPublic], static fn (): FakeDomainConnection => $slow, static function () use (&$tick): float {
+$result = Fetch::check('example.org', $dKey, null, null, [], static fn (): array => [$dPublic], static fn (): FakeDomainConnection => $slow, static function () use (&$tick): float {
     return $tick;
 });
 $check($result['status'] === 'unreachable' && $result['reason'] === 'timeout' && $slow->reads <= 3, 'five seconds are for everything, and a server that drips is no answer');
 
 [$result, $asked] = $dRun($dPage, ['addresses' => [$dPublic, '10.0.0.5']]);
 $check($result['status'] === 'invalid' && $result['reason'] === 'target_not_public' && $asked['connect'] === [], 'one address that is not public refuses the whole read before connecting');
-$wrong = array_filter($addressVectors['refused'], static fn (string $address): bool => DomainFetch::publicAddress($address));
+$wrong = array_filter($addressVectors['refused'], static fn (string $address): bool => Fetch::publicAddress($address));
 $check($wrong === [], count($addressVectors['refused']) . ' addresses are never reached', implode(', ', $wrong));
-$wrong = array_filter($addressVectors['public'], static fn (string $address): bool => !DomainFetch::publicAddress($address));
+$wrong = array_filter($addressVectors['public'], static fn (string $address): bool => !Fetch::publicAddress($address));
 $check($wrong === [], count($addressVectors['public']) . ' addresses are', implode(', ', $wrong));
-$check(DomainFetch::publicAddress(7) === false && DomainFetch::publicAddress(null) === false, 'and what is no string is no address');
-$check(DomainFetch::ADDRESS_POLICY === $addressVectors['address_policy'] && DomainFetch::IPV6_GLOBAL === $addressVectors['ipv6_global'], 'the address policy is the shared one');
-$same = array_map(DomainFetch::network(...), DomainFetch::DENIED_NETWORKS) == array_map(DomainFetch::network(...), $addressVectors['denied_networks']);
+$check(Fetch::publicAddress(7) === false && Fetch::publicAddress(null) === false, 'and what is no string is no address');
+$check(Fetch::ADDRESS_POLICY === $addressVectors['address_policy'] && Fetch::IPV6_GLOBAL === $addressVectors['ipv6_global'], 'the address policy is the shared one');
+$same = array_map(Fetch::network(...), Fetch::DENIED_NETWORKS) == array_map(Fetch::network(...), $addressVectors['denied_networks']);
 $check($same, 'and so are the denied ranges, whichever way they are written');
-$keptOut = [DomainFetch::network('93.184.216.0/24')];
-$check(!DomainFetch::publicAddress($dPublic, $keptOut) && DomainFetch::publicAddress('1.1.1.1', $keptOut), 'an operator can keep more networks out');
+$keptOut = [Fetch::network('93.184.216.0/24')];
+$check(!Fetch::publicAddress($dPublic, $keptOut) && Fetch::publicAddress('1.1.1.1', $keptOut), 'an operator can keep more networks out');
 [$result, $asked] = $dRun($dPage, ['deny' => $keptOut]);
 $check($result['reason'] === 'target_not_public' && $asked['connect'] === [], 'and the read holds to them');
-$check(DomainFetch::network('203.0.113.7') !== null && DomainFetch::network('2001:db8::/32') !== null && DomainFetch::network('1.2.3.0/33') === null && DomainFetch::network('1.2.3.0/x') === null && DomainFetch::network('nonsense') === null && DomainFetch::network('1.2.3.0/24/1') === null, 'a network parses or it does not');
+$check(Fetch::network('203.0.113.7') !== null && Fetch::network('2001:db8::/32') !== null && Fetch::network('1.2.3.0/33') === null && Fetch::network('1.2.3.0/x') === null && Fetch::network('nonsense') === null && Fetch::network('1.2.3.0/24/1') === null, 'a network parses or it does not');
 
 [$result, $asked] = $dRun($dPage, ['addresses' => ['2606:4700:4700::1111', $dPublic]]);
 $check($result['status'] === 'listed' && $asked['connect'] === [['2606:4700:4700::1111', 'example.org']], 'the first checked address is the one connected');
-[$result, $asked] = $dRun($dPage, ['addresses' => [$dPublic, '1.1.1.1'], 'connect_errors' => [new DomainRefused('connect', null, 'unreachable')]]);
+[$result, $asked] = $dRun($dPage, ['addresses' => [$dPublic, '1.1.1.1'], 'connect_errors' => [new Refused('connect', null, 'unreachable')]]);
 $check($result['status'] === 'listed' && array_column($asked['connect'], 0) === [$dPublic, '1.1.1.1'], 'the next checked address when one will not connect');
 foreach (['connect', 'timeout'] as $why) {
-    $result = $dRun($dPage, ['connect_errors' => [new DomainRefused($why, null, 'unreachable')]])[0];
+    $result = $dRun($dPage, ['connect_errors' => [new Refused($why, null, 'unreachable')]])[0];
     $check($result['status'] === 'unreachable' && $result['reason'] === $why, 'no address that connects: ' . $why);
 }
-$result = $dRun($dPage, ['addresses' => [$dPublic, '1.1.1.1'], 'connect_errors' => [new DomainRefused('tls', null, 'unreachable')]]);
+$result = $dRun($dPage, ['addresses' => [$dPublic, '1.1.1.1'], 'connect_errors' => [new Refused('tls', null, 'unreachable')]]);
 $check($result[0]['status'] === 'unreachable' && $result[0]['reason'] === 'tls' && count($result[1]['connect']) === 1, 'a certificate that does not fit stops the read, on the first address that shows it');
-$shares = $dRun($dPage, ['addresses' => [$dPublic, '1.1.1.1', '8.8.8.8'], 'deadline' => 3.0, 'connect_errors' => [new DomainRefused('timeout', null, 'unreachable'), new DomainRefused('timeout', null, 'unreachable')]])[3];
+$shares = $dRun($dPage, ['addresses' => [$dPublic, '1.1.1.1', '8.8.8.8'], 'deadline' => 3.0, 'connect_errors' => [new Refused('timeout', null, 'unreachable'), new Refused('timeout', null, 'unreachable')]])[3];
 $check(count($shares) === 3 && abs($shares[0] - 1.0) < 0.1, 'each address gets its share of the time, and a silent one does not take it all');
 
-$result = $dRun($dPage, ['addresses' => new DomainRefused('dns', null, 'unreachable')])[0];
+$result = $dRun($dPage, ['addresses' => new Refused('dns', null, 'unreachable')])[0];
 $check($result['status'] === 'unreachable' && $result['reason'] === 'dns', 'a name that does not resolve');
-$result = $dRun($dPage, ['addresses' => new DomainRefused('timeout', null, 'unreachable')])[0];
+$result = $dRun($dPage, ['addresses' => new Refused('timeout', null, 'unreachable')])[0];
 $check($result['status'] === 'unreachable' && $result['reason'] === 'timeout', 'a lookup that takes too long');
 $result = $dRun($dPage, ['addresses' => []])[0];
 $check($result['status'] === 'unreachable' && $result['reason'] === 'dns', 'a name with no address');
@@ -238,16 +240,16 @@ echo "domain keys: the lookup and the connection\n";
 $began = hrtime(true);
 $threw = null;
 try {
-    DomainFetch::resolve('nothing.invalid', 0.0);
-} catch (DomainRefused $refused) {
+    Fetch::resolve('nothing.invalid', 0.0);
+} catch (Refused $refused) {
     $threw = $refused;
 }
 $check($threw !== null && $threw->status === 'unreachable' && $threw->reason === 'timeout' && (hrtime(true) - $began) / 1e9 < 2.0, 'a lookup is given up on time, and its process is ended');
 
 $threw = null;
 try {
-    DomainConnection::open('127.0.0.1', 'example.org', 0.5, null, 1);
-} catch (DomainRefused $refused) {
+    Connection::open('127.0.0.1', 'example.org', 0.5, null, 1);
+} catch (Refused $refused) {
     $threw = $refused;
 }
 $check($threw !== null && $threw->status === 'unreachable' && in_array($threw->reason, ['connect', 'timeout', 'tls_unavailable'], true), 'a port nobody answers on is no connection');
@@ -260,8 +262,8 @@ if (extension_loaded('openssl')) {
     $began = hrtime(true);
     $threw = null;
     try {
-        DomainConnection::open('127.0.0.1', 'example.org', 0.3, null, $port);
-    } catch (DomainRefused $refused) {
+        Connection::open('127.0.0.1', 'example.org', 0.3, null, $port);
+    } catch (Refused $refused) {
         $threw = $refused;
     }
     $took = (hrtime(true) - $began) / 1e9;

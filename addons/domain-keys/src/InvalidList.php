@@ -2,10 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Aamio;
+namespace Aamio\DomainKeys;
+
 
 /** A domain key list that is not version 1. $reason says why, without echoing the content. */
-final class InvalidDomainList extends \RuntimeException
+final class InvalidList extends \RuntimeException
 {
     public function __construct(public readonly string $reason)
     {

@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
-namespace Aamio;
+namespace Aamio\DomainKeys;
+
+use Aamio\Runtime;
 
 /**
  * Checking a key against a website, from inside a runtime.
  *
- * DomainKeys is the format and DomainFetch is the read. This is the part that
+ * Lists is the format and Fetch is the read. This is the part that
  * decides what is asked: which key, and which websites may be read at all.
  *
  * The key never comes from whoever asks. For a partner it comes from the address
@@ -40,11 +42,9 @@ namespace Aamio;
  * A result is a dated observation and it changes nothing here: no partner, no
  * allowlist, no permission and nothing in the outbox.
  */
-final class DomainRuntime
+final class Policy
 {
     public const POLICY_FILE = 'domains.json';
-    /** One exit code per answer, so a script need not read the JSON to tell a key that is not listed from a list it could not read. */
-    public const EXIT_CODES = ['listed' => 0, 'not_listed' => 3, 'no_list' => 4, 'unreachable' => 5, 'invalid' => 2];
     public const MAX_PER_WINDOW = 20;
     public const WINDOW_SECONDS = 60.0;
 
@@ -79,24 +79,24 @@ final class DomainRuntime
     public static $clock = null;
     /**
      * A stand-in for the network, for tests: what check() passes on to
-     * DomainFetch::check when it is given nothing itself. Empty in production.
+     * Fetch::check when it is given nothing itself. Empty in production.
      */
     public static array $standIn = [];
 
-    private static function unreadable(Runtime $runtime): DomainRefused
+    private static function unreadable(Runtime $runtime): Refused
     {
-        return new DomainRefused('domain_policy_unreadable', $runtime->domainListFile() . ' could not be read as a list of domains, so no website is read. Repair the file, or move it away and add the domains again with aamio domain allow.');
+        return new Refused('domain_policy_unreadable', $runtime->homeFile(self::POLICY_FILE) . ' could not be read as a list of domains, so no website is read. Repair the file, or move it away and add the domains again with aamio addon domain allow.');
     }
 
     /**
      * The websites the user has agreed to, from the file as it is now. A file that cannot be read is refused, never an empty list.
      *
      * @return list<string>
-     * @throws DomainRefused
+     * @throws Refused
      */
     public static function allowedDomains(Runtime $runtime): array
     {
-        $path = $runtime->domainListFile();
+        $path = $runtime->homeFile(self::POLICY_FILE);
         if (!file_exists($path)) {
             return [];
         }
@@ -107,7 +107,7 @@ final class DomainRuntime
             throw self::unreadable($runtime);
         }
         foreach ($rows as $row) {
-            if (DomainKeys::normaliseDomain($row) !== $row) {
+            if (Lists::normaliseDomain($row) !== $row) {
                 throw self::unreadable($runtime);
             }
         }
@@ -117,9 +117,9 @@ final class DomainRuntime
 
     private static function host(mixed $domain): string
     {
-        $host = DomainKeys::normaliseDomain($domain);
+        $host = Lists::normaliseDomain($domain);
         if ($host === null) {
-            throw new DomainRefused('invalid_domain', 'A domain is a plain host name of two labels or more, as example.org, with no https://, port or path. www.example.org and example.org are different places. Internationalised names are not read yet.');
+            throw new Refused('invalid_domain', 'A domain is a plain host name of two labels or more, as example.org, with no https://, port or path. www.example.org and example.org are different places. Internationalised names are not read yet.');
         }
 
         return $host;
@@ -131,15 +131,15 @@ final class DomainRuntime
      */
     public static function isSameHost(mixed $typed, string $host): bool
     {
-        return is_string($typed) && DomainKeys::normaliseDomain(trim($typed, " \t\r\n\x0B\x0C")) === $host;
+        return is_string($typed) && Lists::normaliseDomain(trim($typed, " \t\r\n\x0B\x0C")) === $host;
     }
 
     private static function write(Runtime $runtime, array $rows): void
     {
         try {
-            $runtime->saveDomainList($rows);
+            $runtime->saveJson(self::POLICY_FILE, $rows);
         } catch (\RuntimeException) {
-            throw new DomainRefused('domain_policy_unwritable', $runtime->domainListFile() . " could not be written, so the list is as it was. Check the disk and the home's permissions.");
+            throw new Refused('domain_policy_unwritable', $runtime->homeFile(self::POLICY_FILE) . " could not be written, so the list is as it was. Check the disk and the home's permissions.");
         }
     }
 
@@ -156,7 +156,7 @@ final class DomainRuntime
         self::write($runtime, $rows);
         // Read back, since a save after close writes nothing and says so only to the log.
         if (!in_array($host, self::allowedDomains($runtime), true)) {
-            throw new DomainRefused('domain_policy_unwritable', $runtime->domainListFile() . ' was not written, so the list is as it was.');
+            throw new Refused('domain_policy_unwritable', $runtime->homeFile(self::POLICY_FILE) . ' was not written, so the list is as it was.');
         }
 
         return ['domain' => $host, 'added' => true, 'domains' => $rows];
@@ -175,7 +175,7 @@ final class DomainRuntime
         // Read back, as allow does: a website called gone and still on the list
         // would go on being read by the next runtime.
         if (in_array($host, self::allowedDomains($runtime), true)) {
-            throw new DomainRefused('domain_policy_unwritable', $runtime->domainListFile() . ' was not written, so the list is as it was.');
+            throw new Refused('domain_policy_unwritable', $runtime->homeFile(self::POLICY_FILE) . ' was not written, so the list is as it was.');
         }
 
         return ['domain' => $host, 'removed' => true, 'domains' => $left];
@@ -187,66 +187,61 @@ final class DomainRuntime
      * An observation can be a message the channel's allowlist kept out: a
      * signature that checked is not a permission, and this reads only the signature.
      *
-     * @throws DomainRefused
+     * @throws Refused
      */
     public static function subjectSnapshot(Runtime $runtime, mixed $partner = null, mixed $message = null): array
     {
         if (($partner === null) === ($message === null)) {
-            throw new DomainRefused('choose_partner_or_message', 'Name exactly one: partner, a name in the address book, or message, the sha256 of a message this process read and verified. A key is never given here.');
+            throw new Refused('choose_partner_or_message', 'Name exactly one: partner, a name in the address book, or message, the sha256 of a message this process read and verified. A key is never given here.');
         }
         if ($partner !== null) {
             if (!is_string($partner) || $partner === '') {
-                throw new DomainRefused('invalid_partner', 'partner is a name in the address book.');
+                throw new Refused('invalid_partner', 'partner is a name in the address book.');
             }
             $row = $runtime->partnerByName($partner);
-            if ($row === null || !DomainKeys::canonicalKey($row['key'] ?? null)) {
-                throw new DomainRefused('partner_unavailable', 'No partner by that name with a usable key is in the address book. aamio_partners or aamio partner list shows who is.');
+            if ($row === null || !Lists::canonicalKey($row['key'] ?? null)) {
+                throw new Refused('partner_unavailable', 'No partner by that name with a usable key is in the address book. aamio_partners or aamio partner list shows who is.');
             }
 
             return ['key' => $row['key'], 'subject_source' => 'partner', 'partner' => $row['name'], 'signature_checked_locally' => null];
         }
         if (!is_string($message) || preg_match('/^[0-9a-f]{64}$/D', $message) !== 1) {
-            throw new DomainRefused('invalid_message_hash', 'message is the sha256 of a message as read shows it: 64 lowercase hexadecimal characters.');
+            throw new Refused('invalid_message_hash', 'message is the sha256 of a message as read shows it: 64 lowercase hexadecimal characters.');
         }
-        $keys = [];
-        foreach ($runtime->channels as $channel) {
-            foreach ($channel->observed as $row) {
-                if (($row['sha256'] ?? null) === $message && ($row['verified'] ?? null) === true) {
-                    if (!DomainKeys::canonicalKey($row['from_key'] ?? null)) {
-                        throw new DomainRefused('invalid_local_observation', 'The message is recorded here without a usable signing key, so it cannot be checked.');
-                    }
-                    $keys[$row['from_key']] = true;
-                }
+        $keys = $runtime->verifiedSigners($message);
+        foreach ($keys as $key) {
+            if (!Lists::canonicalKey($key)) {
+                throw new Refused('invalid_local_observation', 'The message is recorded here without a usable signing key, so it cannot be checked.');
             }
         }
         if ($keys === []) {
-            throw new DomainRefused('source_unavailable', 'This process holds no verified message with that hash. Only a message this process read itself and whose signature checked out can be used: an unsigned one has no key to check, and what an earlier process read is not kept and cannot be read again. Check a later message from the same sender, or the partner by name.');
+            throw new Refused('source_unavailable', 'This process holds no verified message with that hash. Only a message this process read itself and whose signature checked out can be used: an unsigned one has no key to check, and what an earlier process read is not kept and cannot be read again. Check a later message from the same sender, or the partner by name.');
         }
         if (count($keys) !== 1) {
-            throw new DomainRefused('ambiguous_signer', 'Different keys signed the same bytes, so the hash does not say which one to check. Check the partner by name.');
+            throw new Refused('ambiguous_signer', 'Different keys signed the same bytes, so the hash does not say which one to check. Check the partner by name.');
         }
 
-        return ['key' => (string) array_key_first($keys), 'subject_source' => 'message', 'message_sha256' => $message, 'signature_checked_locally' => true];
+        return ['key' => (string) $keys[0], 'subject_source' => 'message', 'message_sha256' => $message, 'signature_checked_locally' => true];
     }
 
     /**
      * The exact host and the subject. Everything that can be settled here is settled before anyone is asked anything.
      *
      * @return array{0:string,1:array}
-     * @throws DomainRefused
+     * @throws Refused
      */
     public static function prepare(Runtime $runtime, mixed $domain, mixed $partner = null, mixed $message = null, mixed $name = null): array
     {
         $host = self::host($domain);
-        if ($name !== null && !DomainKeys::validName($name)) {
-            throw new DomainRefused('invalid_requested_name', 'name is the label on the list: 1 to 64 characters of a-z, 0-9, dot, underscore and dash. Leave it out to look for the key under any label.');
+        if ($name !== null && !Lists::validName($name)) {
+            throw new Refused('invalid_requested_name', 'name is the label on the list: 1 to 64 characters of a-z, 0-9, dot, underscore and dash. Leave it out to look for the key under any label.');
         }
 
         return [$host, self::subjectSnapshot($runtime, $partner, $message)];
     }
 
     /** What a refusal looks like as an answer. Nothing was read, so it carries no time and no statement. */
-    public static function refusal(DomainRefused $refused, ?string $host = null, ?array $subject = null, mixed $name = null): array
+    public static function refusal(Refused $refused, ?string $host = null, ?array $subject = null, mixed $name = null): array
     {
         $answer = ['status' => $refused->status, 'reason' => $refused->reason, 'domain' => $host, 'fix' => $refused->fix] + ($subject ?? []);
         if ($name !== null) {
@@ -260,7 +255,7 @@ final class DomainRuntime
      * The networks an operator keeps out, from AAMIO_DOMAIN_DENY.
      *
      * @return list<array{0:string,1:int}>
-     * @throws DomainRefused
+     * @throws Refused
      */
     public static function denyNetworks(): array
     {
@@ -270,9 +265,9 @@ final class DomainRuntime
             if ($part === '') {
                 continue;
             }
-            $network = DomainFetch::network($part);
+            $network = Fetch::network($part);
             if ($network === null) {
-                throw new DomainRefused('domain_deny_invalid', 'AAMIO_DOMAIN_DENY holds something that is not a network, so no website is read until it is put right. It takes a comma separated list such as 203.0.113.0/24,2001:db8::/32.');
+                throw new Refused('domain_deny_invalid', 'AAMIO_DOMAIN_DENY holds something that is not a network, so no website is read until it is put right. It takes a comma separated list such as 203.0.113.0/24,2001:db8::/32.');
             }
             $networks[] = $network;
         }
@@ -311,7 +306,7 @@ final class DomainRuntime
      *
      * Refused before anything is looked up: a bad domain or name, no such
      * subject, a domain that is not on the list, a list that cannot be read, and
-     * a process at its limit. $network is passed to DomainFetch::check, for tests.
+     * a process at its limit. $network is passed to Fetch::check, for tests.
      */
     public static function check(Runtime $runtime, mixed $domain, mixed $partner = null, mixed $message = null, mixed $name = null, array $network = []): array
     {
@@ -320,16 +315,16 @@ final class DomainRuntime
         try {
             [$host, $subject] = self::prepare($runtime, $domain, $partner, $message, $name);
             if (!in_array($host, self::allowedDomains($runtime), true)) {
-                throw new DomainRefused('domain_not_allowed', 'This runtime reads only websites the user has put on its list, and this one is not there. The user adds it with aamio domain allow ' . $host . ', from their own records and never from the message being checked. Over MCP aamio_domain_check asks them.');
+                throw new Refused('domain_not_allowed', 'This runtime reads only websites the user has put on its list, and this one is not there. The user adds it with aamio addon domain allow ' . $host . ', from their own records and never from the message being checked. Over MCP aamio_addon_domain_check asks them.');
             }
             $deny = self::denyNetworks();
-        } catch (DomainRefused $refused) {
+        } catch (Refused $refused) {
             return self::refusal($refused, $host, $subject, $name);
         }
         if (!self::take()) {
-            return self::refusal(new DomainRefused('local_rate_limit', 'At most ' . self::MAX_PER_WINDOW . ' checks start per minute here. Nothing was read. Try again shortly.', 'unreachable'), $host, $subject, $name);
+            return self::refusal(new Refused('local_rate_limit', 'At most ' . self::MAX_PER_WINDOW . ' checks start per minute here. Nothing was read. Try again shortly.', 'unreachable'), $host, $subject, $name);
         }
-        $found = DomainFetch::check($host, $subject['key'], $name, [$host], $deny, ...($network === [] ? self::$standIn : $network));
+        $found = Fetch::check($host, $subject['key'], $name, [$host], $deny, ...($network === [] ? self::$standIn : $network));
         unset($subject['key']);
         $answer = $subject + $found;
         $answer['statement'] = self::statement($found, $name);

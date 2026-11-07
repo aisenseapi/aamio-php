@@ -421,22 +421,26 @@ again. The MCP tool `aamio_read` carries the same field.
 
 ### Checking a key against a website
 
-A website can list the public keys of its own agents at `/.well-known/aamio-keys.json`, and this runtime can check a partner's key, or the key behind a message it verified, against that list. In the source and not yet in a release.
+A website can list the public keys of its own agents at `/.well-known/aamio-keys.json`, and the Domain Keys add-on lets this runtime check a partner's key, or the key behind a message it verified, against that list. It is a Composer package of its own, so installing it is your choice and `composer require aisenseapi/aamio` stays what it was. In the source and not yet in a release.
 
 ```bash
-aamio domain allow example.org                  # put a website on this runtime's list, from your own records
-aamio domain check example.org --partner NAME   # read the list once and compare
-aamio domain list                               # the websites this runtime may read
-aamio domain forget example.org
-aamio domain file --name support                # your public key as the file a site publishes
-aamio domain validate aamio-keys.json           # is this a valid list: reads one file, no domain and no home
+composer require aisenseapi/aamio-domain-keys                    # the add-on, beside the core
+vendor/bin/aamio addon list                                      # what this installation can run beyond the core
+vendor/bin/aamio addon domain allow example.org                  # put a website on this runtime's list, from your own records
+vendor/bin/aamio addon domain check example.org --partner NAME   # read the list once and compare
+vendor/bin/aamio addon domain list                               # the websites this runtime may read
+vendor/bin/aamio addon domain forget example.org
+vendor/bin/aamio addon domain file --name support                # your public key as the file a site publishes
+vendor/bin/aamio addon domain validate aamio-keys.json           # is this a valid list: reads one file, no domain and no home
 ```
 
 `check` exits 0 for listed, 3 for not listed, 4 for no list at that address, 5 for no answer that could be read, and 2 for an invalid list or a check refused before anything was read. `--name LABEL` asks for one label on the list. `listed` says that this exact website listed this key when it was read. It is not an identity and it permits nothing, it adds no partner and it changes no allowlist. `not_listed` is no evidence of fraud: a key rotated out looks the same.
 
-The website comes from you and the key from this machine. A check of a website that is not on your list stops before anything is looked up, and a key is never handed in: it comes from the address book or from a signature this process checked itself, so a message cannot choose what is compared. `aamio_domain_check` does the same over MCP, with a domain and either a partner or the sha256 of a message this server read. For a website that is not on the list it asks you in a form, and you type the domain yourself, so a name that only looks right stops at what you type. What a server verified is in its memory and a message is handed over once, so after a restart check a later message from the same sender.
+The website comes from you and the key from this machine. A check of a website that is not on your list stops before anything is looked up, and a key is never handed in: it comes from the address book or from a signature this process checked itself, so a message cannot choose what is compared. `aamio_addon_domain_check` does the same over MCP, with a domain and either a partner or the sha256 of a message this server read. For a website that is not on the list it asks you in a form, and you type the domain yourself, so a name that only looks right stops at what you type. What a server verified is in its memory and a message is handed over once, so after a restart check a later message from the same sender.
 
-A read goes only to public addresses, connects to the address it checked, follows no redirect and sends nothing about you, and takes at most five seconds and 16 KiB. At most twenty checks start per minute in one process, one at a time. `AAMIO_DOMAIN_DENY` adds networks that are never read, comma separated. The read needs ext-openssl, and starts a process of its own for the lookup, since PHP's lookups take no timeout; where neither is there it answers unreachable. If a certificate cannot be verified on your machine but the site opens in a browser, `openssl.cafile` in php.ini can point PHP at a CA bundle, and verification is never switched off.
+A read goes only to public addresses, connects to the address it checked, follows no redirect and sends nothing about you, and takes at most five seconds and 16 KiB. Twenty checks start per minute in one process, one at a time. `AAMIO_DOMAIN_DENY` adds networks that are never read, comma separated. The read needs ext-openssl, and starts a process of its own for the lookup, since PHP's lookups take no timeout; where neither is there it answers unreachable. If a certificate cannot be verified on your machine but the site opens in a browser, `openssl.cafile` in php.ini can point PHP at a CA bundle, and verification is never switched off.
+
+An add-on is a Composer package of type `aamio-addon` that depends on this one and has an `aamio-addon.php` at its root returning an `Aamio\Addon`; the core finds it through Composer, puts its commands under `aamio addon NAME` and its tools beside its own, and stops with the reason when two add-ons share a name or one cannot be loaded. `addons/domain-keys` in this repository is the first, tested with the core, and does the same as aamio-python's `aamio-domain-keys`.
 
 ### As an MCP server
 
@@ -445,7 +449,7 @@ twenty-four tools and the same instructions as `aamio-python`'s, so a model
 sees one aamio whichever runtime stands behind it. Two descriptions say what
 is different in this one: `aamio_send` does no long proof of work in the
 background, and `aamio_read` says how a read without a listener waits.
-In the source and not yet in a release: `aamio_domain_check`.
+In the source and not yet in a release: `aamio_addon_domain_check`, which the Domain Keys add-on brings, see *Checking a key against a website*.
 
 ```json
 {"mcpServers": {"aamio": {"command": "php", "args": ["vendor/aisenseapi/aamio/bin/aamio", "serve"], "env": {"AAMIO_HOME": "/var/lib/myagent/aamio"}}}}
