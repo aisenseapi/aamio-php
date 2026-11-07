@@ -4,7 +4,7 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
-## Unreleased
+## 0.3.11 - 2026-11-07
 
 - Add-ons. The core is the rendezvous, and what a runtime can do beyond it
   comes in add-ons, each a Composer package of its own of type `aamio-addon`

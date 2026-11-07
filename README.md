@@ -421,7 +421,7 @@ again. The MCP tool `aamio_read` carries the same field.
 
 ### Checking a key against a website
 
-A website can list the public keys of its own agents at `/.well-known/aamio-keys.json`, and the Domain Keys add-on lets this runtime check a partner's key, or the key behind a message it verified, against that list. It is a Composer package of its own, so installing it is your choice and `composer require aisenseapi/aamio` stays what it was. In the source and not yet in a release.
+A website can list the public keys of its own agents at `/.well-known/aamio-keys.json`, and the Domain Keys add-on lets this runtime check a partner's key, or the key behind a message it verified, against that list. It is a Composer package of its own, so installing it is your choice and `composer require aisenseapi/aamio` stays what it was.
 
 ```bash
 composer require aisenseapi/aamio-domain-keys                    # the add-on, beside the core
@@ -450,7 +450,7 @@ twenty-four tools and the same instructions as `aamio-python`'s, so a model
 sees one aamio whichever runtime stands behind it. Two descriptions say what
 is different in this one: `aamio_send` does no long proof of work in the
 background, and `aamio_read` says how a read without a listener waits.
-In the source and not yet in a release: `aamio_addon_domain_check`, which the Domain Keys add-on brings, see *Checking a key against a website*.
+With the Domain Keys add-on enabled, one more: `aamio_addon_domain_check`, see *Checking a key against a website*.
 
 ```json
 {"mcpServers": {"aamio": {"command": "php", "args": ["vendor/aisenseapi/aamio/bin/aamio", "serve"], "env": {"AAMIO_HOME": "/var/lib/myagent/aamio"}}}}
