@@ -109,19 +109,30 @@ if ($command === null || in_array($command, ['help', '-h'], true)) {
 // given. `addon disable` comes before they are loaded, so that a broken one can
 // be taken out again, and `addon enable` lets one in only once it loads clean.
 Addons::useHome(isset($opts['home']) && is_string($opts['home']) ? $opts['home'] : null);
-$addonChange = static function (string $verb, ?string $name): never {
-    if ($name === null) {
-        fail('aamio addon ' . $verb . ' NAME: an add-on\'s short name, or its package', 2);
+$addonChange = static function (string $verb, array $args, array $opts): never {
+    // The whole command line is judged before anything is written: help is
+    // help, and a word or an option that does not belong refuses the change.
+    $usage = 'aamio addon ' . $verb . ' NAME: an add-on\'s short name, or its package';
+    if (isset($opts['help'])) {
+        fwrite(STDOUT, $usage . "\n");
+        exit(0);
+    }
+    $unknown = array_diff(array_keys($opts), ['home', 'host', 'tags', 'no-archive', 'anchor']);
+    if ($unknown !== []) {
+        fail('unknown option --' . implode(', --', $unknown) . '. ' . $usage, 2);
+    }
+    if (count($args) !== 3 || !is_string($args[2]) || $args[2] === '' || str_starts_with($args[2], '-')) {
+        fail($usage, 2);
     }
     try {
-        out($verb === 'enable' ? Addons::enable($name) : Addons::disable($name));
+        out($verb === 'enable' ? Addons::enable($args[2]) : Addons::disable($args[2]));
     } catch (\RuntimeException $error) {
         fail($error->getMessage(), 2);
     }
     exit(0);
 };
 if ($command === 'addon' && ($args[1] ?? null) === 'disable') {
-    $addonChange('disable', $args[2] ?? null);
+    $addonChange('disable', $args, $opts);
 }
 // What runs beyond the core. An add-on that cannot be used stops here with the
 // reason, whatever the command: a broken install is not a quiet absence. The
@@ -150,7 +161,7 @@ if ($command === 'addon') {
         exit(0);
     }
     if ($which === 'enable') {
-        $addonChange('enable', $args[2] ?? null);
+        $addonChange('enable', $args, $opts);
     }
     $addon = Addons::byName($which);
     if ($addon === null) {

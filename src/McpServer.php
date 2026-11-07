@@ -75,8 +75,8 @@ final class McpServer
     public function __construct(private readonly Runtime $runtime)
     {
         $spec = json_decode((string) file_get_contents(__DIR__ . '/mcp-tools.json'), true, 512, JSON_THROW_ON_ERROR);
-        // The core's tools, and the ones installed add-ons bring beside them.
-        $this->tools = array_merge(self::objects($spec['tools']), self::objects(Addons::tools($spec['tools'])));
+        // The core's tools, and the ones the add-ons enabled in this runtime's home bring beside them.
+        $this->tools = array_merge(self::objects($spec['tools']), self::objects(Addons::tools($spec['tools'], null, $runtime->home)));
         $this->instructions = $spec['instructions'];
         $this->supported = $spec['protocol_versions'];
         $this->secret = random_bytes(32);

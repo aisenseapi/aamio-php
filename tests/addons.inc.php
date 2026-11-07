@@ -260,19 +260,29 @@ return new ' . $class . '();
     $check(count($said['addons']) === 1 && $said['addons'][0]['enabled'] === true && ($said['addons'][0]['named_in'] ?? null) === 'AAMIO_ADDONS' && $said['addons'][0]['package'] === 'acme/fresh' && $said['addons'][0]['commands'] === ['ping', 'dry'], 'a checkout that is also installed: running because it was named, said once');
     putenv('AAMIO_ADDONS');
 
-    // Composer's own answer, through the three calls the registry makes, where
-    // Composer itself is not in this process.
-    if (!class_exists(\Composer\InstalledVersions::class)) {
-        file_put_contents($folder . '/InstalledVersions.php', '<?php
+    // Composer's own answer, through the three calls the registry makes. Where
+    // Composer itself is not in a process, a stand-in answers from a list: set
+    // here, or read from AAMIO_TEST_INSTALLED by a child that prepends the file.
+    $standIn = $folder . DIRECTORY_SEPARATOR . 'InstalledVersions.php';
+    file_put_contents($standIn, '<?php
 namespace Composer;
-final class InstalledVersions {
-    public static array $packages = [];
-    public static function getInstalledPackagesByType(string $type): array { return array_keys(array_filter(self::$packages, static fn (array $p): bool => $p["type"] === $type)); }
-    public static function getInstallPath(string $name): ?string { return self::$packages[$name]["path"] ?? null; }
-    public static function getPrettyVersion(string $name): ?string { return self::$packages[$name]["version"] ?? null; }
+if (!class_exists(InstalledVersions::class, false)) {
+    final class InstalledVersions {
+        public static array $packages = [];
+        public static function getInstalledPackagesByType(string $type): array { return array_keys(array_filter(self::$packages, static fn (array $p): bool => $p["type"] === $type)); }
+        public static function getInstallPath(string $name): ?string { return self::$packages[$name]["path"] ?? null; }
+        public static function getPrettyVersion(string $name): ?string { return self::$packages[$name]["version"] ?? null; }
+    }
+    (static function (): void {
+        $json = getenv("AAMIO_TEST_INSTALLED");
+        if (is_string($json) && $json !== "") {
+            InstalledVersions::$packages = json_decode($json, true) ?: [];
+        }
+    })();
 }
 ');
-        require $folder . '/InstalledVersions.php';
+    if (!class_exists(\Composer\InstalledVersions::class)) {
+        require $standIn;
         \Composer\InstalledVersions::$packages = ['acme/fresh' => ['type' => 'aamio-addon', 'path' => $fresh['path'], 'version' => 'v0.0.1'], 'acme/lib' => ['type' => 'library', 'path' => $folder, 'version' => '1.0.0']];
         Addons::useInstalled(null);
         Addons::reset();
@@ -298,6 +308,130 @@ final class InstalledVersions {
     [$code, , $err] = $cli(['whoami']);
     $check($code === 1 && str_contains($err, 'addons.json could not be read as JSON'), 'and an unreadable file stops every command with the reason');
     unlink($home . '/addons.json');
+
+    // The review of the enable step: a server on another home, help, two
+    // changes at once, what does not build, and what the environment holds.
+    $quiet = static function (string $line): void {
+    };
+    $pa = $pkg('cli-demo', 'acme/cli-demo', 'demo', 'demo');
+    $pb = $pkg('cli-other', 'acme/cli-other', 'other', 'other', 'aamio_addon_other_ping');
+    Addons::useInstalled([$pa, $pb]);
+    Addons::useHome($home);
+    Addons::reset();
+
+    Addons::enable('demo');
+    $homeB = $root . DIRECTORY_SEPARATOR . 'enable-home-b2';
+    $rtA = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    $rtB = new Runtime($homeB, 'https://fake.test', null, false, $quiet);
+    $serverA = new McpServer($rtA);
+    $serverB = new McpServer($rtB);
+    $listing = ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list'];
+    $call = ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/call', 'params' => ['name' => 'aamio_addon_demo_ping', 'arguments' => []]];
+    $ok = true;
+    for ($i = 0; $i < 2; $i++) {
+        $ok = $ok && count($serverB->handle($listing)['result']['tools']) === 24 && ($serverA->handle($listing)['result']['tools'][24]['name'] ?? null) === 'aamio_addon_demo_ping';
+    }
+    $check($ok, 'a server on home b, where nothing is enabled, offers the core alone, whatever home the command line had; the one on a offers the add-on, in alternation');
+    $check(($serverB->handle($call)['error']['code'] ?? null) === -32602 && ($serverA->handle($call)['result']['structuredContent']['pong'] ?? null) === true, 'and a call through b is refused as a tool nobody has, while a answers');
+    $rtA->close();
+    $rtB->close();
+
+    $child = array_merge($childPhp, ['-d', 'auto_prepend_file=' . $standIn]);
+    putenv('AAMIO_TEST_INSTALLED=' . json_encode(['acme/cli-demo' => ['type' => 'aamio-addon', 'path' => $pa['path'], 'version' => 'v0.0.1'], 'acme/cli-other' => ['type' => 'aamio-addon', 'path' => $pb['path'], 'version' => 'v0.0.1']]));
+    $cliI = static fn (array $words): array => $cliRun(array_merge($child, [dirname(__DIR__) . '/bin/aamio', '--home', $home, '--no-archive'], $words));
+    $before = (string) file_get_contents($home . '/addons.json');
+    [$code, $out] = $cliI(['addon', 'disable', 'demo', '--help']);
+    $check($code === 0 && str_contains($out, 'aamio addon disable NAME') && file_get_contents($home . '/addons.json') === $before, 'help is help, not a disable, and the bytes are the same');
+    [$code, , $err] = $cliI(['addon', 'disable', 'demo', 'extra']);
+    $check($code === 2 && str_contains($err, 'aamio addon disable NAME') && file_get_contents($home . '/addons.json') === $before, 'a word too many refuses the change');
+    [$code, , $err] = $cliI(['addon', 'disable', 'demo', '--bogus']);
+    $check($code === 2 && str_contains($err, 'unknown option --bogus') && file_get_contents($home . '/addons.json') === $before, 'so does an option that does not belong');
+    [$code, $out] = $cliI(['addon', 'enable', 'other', '--help']);
+    $check($code === 0 && str_contains($out, 'aamio addon enable NAME') && file_get_contents($home . '/addons.json') === $before, 'the same for enable');
+    [$code, , $err] = $cliI(['addon', 'enable', 'other', '--bogus']);
+    $check($code === 2 && file_get_contents($home . '/addons.json') === $before, 'and for its options');
+    [$code, $out] = $cliI(['addon', 'list']);
+    $check($code === 0 && (json_decode($out, true)['addons'][0]['enabled'] ?? null) === true, 'the child sees what Composer, standing in, says is installed');
+
+    $concurrently = static function (array ...$commands) use ($child, $home): array {
+        $running = [];
+        foreach ($commands as $words) {
+            $pipes = [];
+            $process = proc_open(array_merge($child, [dirname(__DIR__) . '/bin/aamio', '--home', $home, '--no-archive'], $words), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+            $running[] = [$process, $pipes];
+        }
+        $results = [];
+        foreach ($running as [$process, $pipes]) {
+            stream_get_contents($pipes[1]);
+            $err = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $results[] = [proc_close($process), $err];
+        }
+
+        return $results;
+    };
+    $ok = true;
+    $why = '';
+    for ($round = 0; $round < 3 && $ok; $round++) {
+        Addons::disable('demo');
+        Addons::disable('other');
+        $results = $concurrently(['addon', 'enable', 'demo'], ['addon', 'enable', 'other']);
+        Addons::reset();
+        $now = Addons::enabled();
+        sort($now);
+        $ok = $results[0][0] === 0 && $results[1][0] === 0 && $now === ['acme/cli-demo', 'acme/cli-other'];
+        $why = json_encode([$results, $now]);
+    }
+    $check($ok, 'two changes at once both stand: each took its turn', $why);
+
+    $held = fopen($home . '/addons.json.lock', 'c+b');
+    flock($held, LOCK_EX);
+    Addons::$lockWait = 0.3;
+    $threw = $refused(static fn () => Addons::enable('demo'));
+    Addons::$lockWait = 10.0;
+    flock($held, LOCK_UN);
+    fclose($held);
+    $check($threw !== null && str_contains($threw, 'addons.json is being changed by another aamio') && str_contains($threw, 'Nothing changed'), 'a change that waits too long for another says so and changes nothing');
+
+    $throws = $pkg('throws', 'acme/throws', 'throws', 'throws', 'aamio_addon_throws_ping');
+    file_put_contents($throws['path'] . DIRECTORY_SEPARATOR . 'aamio-addon.php', '<?php
+if (!class_exists(ThrowsInCommands::class, false)) {
+final class ThrowsInCommands implements \Aamio\Addon {
+    public function name(): string { return "throws"; }
+    public function version(): string { return "0.0.1"; }
+    public function commands(): array { throw new \LogicException("no commands today"); }
+    public function early(array $args, array $opts): ?int { return null; }
+    public function command(array $args, array $opts, \Aamio\Runtime $runtime): int { return 0; }
+    public function tools(): array { return []; }
+    public function dispatch(\Aamio\Runtime $runtime, string $name, array $arguments, ?callable $ask): ?array { return null; }
+}
+}
+return new ThrowsInCommands();
+');
+    $nameless = $pkg('nameless', 'acme/nameless', 'nameless', 'nameless', '');
+    Addons::useInstalled([$pa, $pb, $throws, $nameless]);
+    Addons::disable('demo');
+    Addons::disable('other');
+    $before = $enabledFile();
+    $threw = $refused(static fn () => Addons::enable('throws'));
+    $check($threw !== null && str_contains($threw, 'could not build its commands or tools: LogicException: no commands today') && str_contains($threw, 'aamio addon disable acme/throws'), 'an add-on whose commands do not build is refused');
+    $threw = $refused(static fn () => Addons::enable('nameless'));
+    $check($threw !== null && str_contains($threw, 'a tool of its has no name'), 'so is one with a tool without a name');
+    $check($enabledFile() === $before && Addons::tools(McpServer::coreTools()) === [], 'and nothing was recorded');
+
+    putenv('AAMIO_ADDONS=' . $pa['path'] . DIRECTORY_SEPARATOR . 'aamio-addon.php');
+    Addons::reset();
+    $said = Addons::disable('demo');
+    $check(str_contains($said['note'], 'demo was not enabled') && str_contains($said['note'], 'demo still runs: AAMIO_ADDONS names its file') && str_contains($said['note'], 'Unset AAMIO_ADDONS'), 'disabling what AAMIO_ADDONS holds says the variable still holds it');
+    $check($said['addons'][0]['enabled'] === true && ($said['addons'][0]['named_in'] ?? null) === 'AAMIO_ADDONS', 'and it does run');
+    putenv('AAMIO_ADDONS');
+    Addons::reset();
+    $said = Addons::enable('demo');
+    $check(str_contains($said['note'], 'start it again'), 'a running server keeps its tools: said on enable');
+    $said = Addons::disable('demo');
+    $check(str_contains($said['note'], 'demo is disabled') && str_contains($said['note'], 'start it again'), 'and on disable');
+    putenv('AAMIO_TEST_INSTALLED');
 
     Addons::useInstalled(null);
     Addons::useHome(null);

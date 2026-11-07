@@ -18,15 +18,18 @@ namespace Aamio;
  * user has named it: with `aamio addon enable NAME`, kept in addons.json in the
  * home, or in AAMIO_ADDONS for a checkout that is not installed. What is
  * installed and not enabled is listed from the package's metadata, without
- * running any of it, with the command that enables it. An add-on that runs here
- * runs in this process, with the key and the home: enabling says which code
- * runs, it is not a boundary around what that code can do.
+ * running any of it, with the command that enables it. The choice is read in
+ * the home a runtime runs in, so a server built on a runtime for another home
+ * does not see it. An add-on that runs here runs in this process, with the key
+ * and the home: enabling says which code runs, it is not a boundary around what
+ * that code can do.
  *
  * The core owns the names. Two add-ons with one short name, or two tools with
  * one name, stop the start and say so, rather than let the order they were found
- * in decide which one runs. An add-on whose file does not return an Addon stops
- * the start too: a broken install is not a quiet absence. `aamio addon disable
- * NAME` takes a broken one out again.
+ * in decide which one runs. An add-on whose file does not return an Addon, or
+ * whose commands and tools do not build, stops the start too: a broken install
+ * is not a quiet absence, and nothing of the kind is recorded as enabled.
+ * `aamio addon disable NAME` takes a broken one out again.
  */
 final class Addons
 {
@@ -34,13 +37,14 @@ final class Addons
     public const FILE = 'aamio-addon.php';
     public const ENABLED_FILE = 'addons.json';
     public const RESERVED = ['list', 'enable', 'disable'];
+    public const RESTART = 'A local MCP server already running keeps the tools it started with: start it again to see the change.';
 
-    /** @var list<Addon>|null */
-    private static ?array $loaded = null;
-    private static ?string $key = null;
+    /** How long a change waits for another aamio that is changing the same list, in seconds. */
+    public static float $lockWait = 10.0;
+
+    /** @var array<string, array{0: list<Addon>, 1: array<string, Addon>}> what is loaded, by AAMIO_ADDONS and home: two runtimes on two homes in one process each see their own home's choice */
+    private static array $cache = [];
     private static ?string $home = null;
-    /** @var array<string, Addon> the loaded add-ons by the real path of their file */
-    private static array $byFile = [];
     /** @var list<array{package: string, version: ?string, path: string}>|null */
     private static ?array $installedOverride = null;
 
@@ -48,25 +52,25 @@ final class Addons
     public static function useHome(?string $home): void
     {
         self::$home = $home;
-        self::$loaded = null;
+        self::$cache = [];
     }
 
-    public static function home(): string
+    public static function home(?string $given = null): string
     {
-        return self::$home ?? Runtime::homeDir();
+        return $given ?? self::$home ?? Runtime::homeDir();
     }
 
     // ------------------------------------------------------------------ enabled
 
-    public static function enabledFile(): string
+    public static function enabledFile(?string $home = null): string
     {
-        return self::home() . DIRECTORY_SEPARATOR . self::ENABLED_FILE;
+        return self::home($home) . DIRECTORY_SEPARATOR . self::ENABLED_FILE;
     }
 
     /** @return list<string> the packages enabled in this home, in the order they were enabled, as the file spells them */
-    public static function enabled(): array
+    public static function enabled(?string $home = null): array
     {
-        $path = self::enabledFile();
+        $path = self::enabledFile($home);
         if (!is_file($path)) {
             return [];
         }
@@ -83,20 +87,67 @@ final class Addons
         return array_values($names);
     }
 
-    /** @param list<string> $names */
-    private static function writeEnabled(array $names): void
+    /**
+     * The enabled list's lock, one per home, held from reading the list to writing it back.
+     *
+     * The operating system holds it, as it holds a home's owner lock, so two
+     * commands at once, from this runtime or from aamio-python on the same
+     * home, take turns rather than each writing over the other's change.
+     *
+     * @return resource
+     */
+    private static function lock(?string $home)
     {
-        $home = self::home();
-        if (!is_dir($home) && !@mkdir($home, 0700, true) && !is_dir($home)) {
-            throw new \RuntimeException('the home ' . $home . ' could not be made, so nothing changed.');
+        $folder = self::home($home);
+        if (!is_dir($folder) && !@mkdir($folder, 0700, true) && !is_dir($folder)) {
+            throw new \RuntimeException('the home ' . $folder . ' could not be made, so nothing changed.');
         }
-        $path = self::enabledFile();
+        $path = self::enabledFile($home) . '.lock';
+        $handle = @fopen($path, 'c+b');
+        if ($handle === false) {
+            throw new \RuntimeException($path . ' could not be opened: ' . (error_get_last()['message'] ?? 'no reason given') . '. Nothing changed; restore file access, or use a home on a local disk.');
+        }
+        $deadline = microtime(true) + self::$lockWait;
+        while (!@flock($handle, LOCK_EX | LOCK_NB)) {
+            if (microtime(true) >= $deadline) {
+                fclose($handle);
+                throw new \RuntimeException(self::enabledFile($home) . ' is being changed by another aamio, which did not finish in ' . (int) self::$lockWait . ' seconds. Nothing changed; try again.');
+            }
+            usleep(50000);
+        }
+
+        return $handle;
+    }
+
+    /** @param resource $handle */
+    private static function unlock($handle): void
+    {
+        @flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+
+    /**
+     * Writes the list, under the lock the caller holds: a file of this process's own first, then one rename.
+     *
+     * @param list<string> $names
+     */
+    private static function writeEnabled(?string $home, array $names): void
+    {
+        $path = self::enabledFile($home);
+        $tmp = $path . '.' . getmypid() . '.tmp';
         $json = json_encode(['enabled' => $names], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
-        if (@file_put_contents($path . '.tmp', $json) === false || !@rename($path . '.tmp', $path)) {
-            @unlink($path . '.tmp');
+        if (@file_put_contents($tmp, $json) === false) {
             throw new \RuntimeException($path . ' could not be written, so nothing changed.');
         }
-        self::$loaded = null;
+        for ($attempt = 0; !@rename($tmp, $path); $attempt++) {
+            // Windows: a reader holds the file for a moment.
+            if ($attempt >= 19) {
+                @unlink($tmp);
+                throw new \RuntimeException($path . ' could not be replaced: another program holds it. Nothing changed; try again.');
+            }
+            usleep(50000);
+        }
+        self::$cache = [];
     }
 
     // ---------------------------------------------------------------- installed
@@ -109,7 +160,7 @@ final class Addons
     public static function useInstalled(?array $packages): void
     {
         self::$installedOverride = $packages;
-        self::$loaded = null;
+        self::$cache = [];
     }
 
     /**
@@ -179,6 +230,27 @@ final class Addons
 
     // ------------------------------------------------------------------- loaded
 
+    /** What the hooks produce, tried before the add-on is used or recorded: its commands are a map of name to help, and its tools have names. */
+    private static function wellFormed(Addon $addon, string $fix): void
+    {
+        try {
+            $commands = $addon->commands();
+            $tools = $addon->tools();
+        } catch (\Throwable $failure) {
+            throw new \RuntimeException('the add-on ' . get_class($addon) . ' could not build its commands or tools: ' . get_class($failure) . ': ' . $failure->getMessage() . '. Reinstall it, or ' . $fix . ' to go on without it.');
+        }
+        foreach ($commands as $name => $help) {
+            if (!is_string($name) || $name === '' || !is_string($help)) {
+                throw new \RuntimeException(get_class($addon) . ' cannot be used as an add-on: commands() is not a map of command name to help. Reinstall it, or ' . $fix . ' to go on without it.');
+            }
+        }
+        foreach ($tools as $tool) {
+            if (!is_array($tool) || !is_string($tool['name'] ?? null) || $tool['name'] === '') {
+                throw new \RuntimeException(get_class($addon) . ' cannot be used as an add-on: a tool of its has no name. Reinstall it, or ' . $fix . ' to go on without it.');
+            }
+        }
+    }
+
     /**
      * The add-ons of the enabled packages and of what AAMIO_ADDONS names, each checked; nothing cached.
      *
@@ -222,6 +294,7 @@ final class Addons
             if (in_array($addon->name(), self::RESERVED, true)) {
                 throw new \RuntimeException(get_class($addon) . ' cannot be called ' . $addon->name() . ': that is a command of aamio addon itself. To go on without it: ' . $fix . '.');
             }
+            self::wellFormed($addon, $fix);
             foreach ($found as $other) {
                 if ($other->name() === $addon->name()) {
                     throw new \RuntimeException('two add-ons are called ' . $addon->name() . ': ' . get_class($other) . ' and ' . get_class($addon) . '. Uninstall one, or the order they were found in would decide which one runs.');
@@ -237,25 +310,27 @@ final class Addons
         return [$found, $byFile];
     }
 
-    /** @return list<Addon> every add-on this installation runs: the enabled ones and what AAMIO_ADDONS names, checked once */
-    public static function loaded(): array
+    /** @return array{0: list<Addon>, 1: array<string, Addon>} */
+    private static function loadedFor(?string $home): array
     {
         $env = (string) getenv('AAMIO_ADDONS');
-        $key = $env . "\0" . self::home();
-        if (self::$loaded !== null && self::$key === $key) {
-            return self::$loaded;
+        $key = $env . "\0" . self::home($home);
+        if (!isset(self::$cache[$key])) {
+            self::$cache[$key] = self::load($env, self::enabled($home));
         }
-        [$found, $byFile] = self::load($env, self::enabled());
-        self::$loaded = $found;
-        self::$byFile = $byFile;
-        self::$key = $key;
 
-        return $found;
+        return self::$cache[$key];
     }
 
-    public static function byName(string $name): ?Addon
+    /** @return list<Addon> every add-on this installation runs in this home: the enabled ones and what AAMIO_ADDONS names, checked once */
+    public static function loaded(?string $home = null): array
     {
-        foreach (self::loaded() as $addon) {
+        return self::loadedFor($home)[0];
+    }
+
+    public static function byName(string $name, ?string $home = null): ?Addon
+    {
+        foreach (self::loaded($home) as $addon) {
             if ($addon->name() === $name) {
                 return $addon;
             }
@@ -267,22 +342,27 @@ final class Addons
     // ---------------------------------------------------------- enable, disable
 
     /** Lets an installed add-on run here, once it has been loaded clean: a broken one is refused, not recorded. */
-    public static function enable(string $which): array
+    public static function enable(string $which, ?string $home = null): array
     {
         $package = self::pick($which);
-        $names = self::enabled();
-        if (!in_array(strtolower($package), array_map('strtolower', $names), true)) {
-            self::load((string) getenv('AAMIO_ADDONS'), array_merge($names, [$package]));
-            self::writeEnabled(array_merge($names, [$package]));
+        $lock = self::lock($home);
+        try {
+            $names = self::enabled($home);
+            if (!in_array(strtolower($package), array_map('strtolower', $names), true)) {
+                self::load((string) getenv('AAMIO_ADDONS'), array_merge($names, [$package]));
+                self::writeEnabled($home, array_merge($names, [$package]));
+            }
+        } finally {
+            self::unlock($lock);
         }
-        $answer = self::describe();
-        $answer['note'] = $package . " runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can.";
+        $answer = self::describe($home);
+        $answer['note'] = $package . " runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. " . self::RESTART;
 
         return $answer;
     }
 
     /** Takes an add-on out of the enabled list, by short name or by package, loading nothing to do it. */
-    public static function disable(string $which): array
+    public static function disable(string $which, ?string $home = null): array
     {
         $packages = [strtolower($which)];
         foreach (self::installed() as $row) {
@@ -290,15 +370,26 @@ final class Addons
                 $packages[] = strtolower($row['package']);
             }
         }
-        $names = self::enabled();
-        $kept = array_values(array_filter($names, static fn (string $name): bool => !in_array(strtolower($name), $packages, true)));
-        if (count($kept) !== count($names)) {
-            self::writeEnabled($kept);
+        $lock = self::lock($home);
+        try {
+            $names = self::enabled($home);
+            $kept = array_values(array_filter($names, static fn (string $name): bool => !in_array(strtolower($name), $packages, true)));
+            if (count($kept) !== count($names)) {
+                self::writeEnabled($home, $kept);
+            }
+        } finally {
+            self::unlock($lock);
         }
-        $answer = self::describe();
-        if (count($kept) === count($names)) {
-            $answer['note'] = $which . ' was not enabled; nothing changed.';
+        $answer = self::describe($home);
+        $notes = [count($kept) === count($names) ? $which . ' was not enabled; nothing on disk changed.' : $which . ' is disabled. ' . self::RESTART];
+        // What AAMIO_ADDONS names runs whatever the file says, and goes on running.
+        foreach ($answer['addons'] as $row) {
+            $meant = in_array($which, [$row['name'], $row['class'] ?? null], true) || (($row['package'] ?? null) !== null && strtolower($row['package']) === strtolower($which));
+            if (($row['named_in'] ?? null) === 'AAMIO_ADDONS' && $meant) {
+                $notes[] = $row['name'] . ' still runs: AAMIO_ADDONS names its file. Unset AAMIO_ADDONS, or take the file out of it, to stop it.';
+            }
         }
+        $answer['note'] = implode(' ', $notes);
 
         return $answer;
     }
@@ -317,18 +408,17 @@ final class Addons
      * metadata, with the error and the command that takes the add-on out: a
      * broken add-on must not hide itself or the others.
      */
-    public static function describe(): array
+    public static function describe(?string $home = null): array
     {
         $error = null;
         try {
-            $running = self::loaded();
-            $byFile = self::$byFile;
+            [$running, $byFile] = self::loadedFor($home);
         } catch (\RuntimeException $failure) {
             $running = [];
             $byFile = [];
             $error = $failure->getMessage();
         }
-        $wanted = self::enabled();
+        $wanted = self::enabled($home);
         $installed = self::installed();
         $rows = [];
         $seen = [];
@@ -379,20 +469,20 @@ final class Addons
     // ------------------------------------------------------------------- tools
 
     /**
-     * Every tool the add-ons bring, refused when a name is taken already.
+     * Every tool the add-ons bring, in the given home, refused when a name is taken already.
      *
      * @param list<array> $core the core's tools
      * @param list<Addon>|null $among the add-ons to take them from; the loaded ones when null
      * @return list<array>
      */
-    public static function tools(array $core, ?array $among = null): array
+    public static function tools(array $core, ?array $among = null, ?string $home = null): array
     {
         $taken = [];
         foreach ($core as $tool) {
             $taken[$tool['name']] = 'the core';
         }
         $found = [];
-        foreach ($among ?? self::loaded() as $addon) {
+        foreach ($among ?? self::loaded($home) as $addon) {
             foreach ($addon->tools() as $tool) {
                 $name = (string) ($tool['name'] ?? '');
                 if (isset($taken[$name])) {
@@ -406,10 +496,10 @@ final class Addons
         return $found;
     }
 
-    /** One tool call, to the add-on that has the tool, or null when none does. */
+    /** One tool call, to the add-on that has the tool in the runtime's home, or null when none does. */
     public static function dispatch(Runtime $runtime, string $name, array $arguments, ?callable $ask): ?array
     {
-        foreach (self::loaded() as $addon) {
+        foreach (self::loaded($runtime->home) as $addon) {
             if (in_array($name, array_column($addon->tools(), 'name'), true)) {
                 return $addon->dispatch($runtime, $name, $arguments, $ask);
             }
@@ -421,8 +511,6 @@ final class Addons
     /** Forget what was loaded, for a test that changes AAMIO_ADDONS, the home, or the files behind them. */
     public static function reset(): void
     {
-        self::$loaded = null;
-        self::$key = null;
-        self::$byFile = [];
+        self::$cache = [];
     }
 }
