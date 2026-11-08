@@ -892,7 +892,7 @@ require __DIR__ . '/cli-stdout.inc.php';
 require __DIR__ . '/first-exchange.inc.php';
 require __DIR__ . '/partner-add.inc.php';
 require __DIR__ . '/addons.inc.php';
-require dirname(__DIR__) . '/addons/domain-keys/tests/runtime.inc.php';
+require dirname(__DIR__) . '/addons/domain-keys/tests/process.inc.php';
 require __DIR__ . '/send-story.inc.php';
 require __DIR__ . '/runtime-lock-status.inc.php';
 require __DIR__ . '/owner-lock.inc.php';

@@ -16,6 +16,7 @@ declare(strict_types=1);
  * Included by tests/runtime.php, with $root, $check, $childPhp and $cliRun in scope.
  */
 
+use Aamio\AddonProcess;
 use Aamio\Addons;
 use Aamio\Channel;
 use Aamio\McpServer;
@@ -182,7 +183,7 @@ return new ' . $class . '();
     $one = $pkg('demo', 'acme/demo', 'demo', 'demo');
     Addons::useInstalled([$one]);
     $said = Addons::describe();
-    $check($said['addons'] === [['name' => 'demo', 'version' => '0.0.1', 'package' => 'acme/demo', 'enabled' => false, 'fix' => 'aamio addon enable demo']] && !isset($said['note']), 'installed is listed from its metadata, not enabled');
+    $check($said['addons'] === [['name' => 'demo', 'version' => '0.0.1', 'package' => 'acme/demo', 'enabled' => false, 'contract' => 1, 'fix' => 'aamio addon enable demo']] && !isset($said['note']), 'installed is listed from its metadata, not enabled');
     $check(!is_file($one['path'] . '/ran') && Addons::byName('demo') === null && Addons::tools(McpServer::coreTools()) === [], 'and nothing of it ran: the core alone');
 
     $said = Addons::enable('demo');
@@ -446,6 +447,283 @@ return new ThrowsInCommands();
     putenv('AAMIO_TEST_INSTALLED');
 
     Addons::useInstalled(null);
+    Addons::useHome(null);
+    Addons::reset();
+})();
+
+// ------------------------------------------------------------- contract 2 --
+//
+// An add-on in a process of its own: the manifest says what it offers, the
+// core reads it without running anything, and each call is a child process
+// with one request and one answer. The same checks as aamio-python's
+// tests/test_addons.py, contract 2.
+(static function () use ($root, $check, $childPhp, $cliRun): void {
+    $folder = $root . DIRECTORY_SEPARATOR . 'contract2';
+    $home = $folder . DIRECTORY_SEPARATOR . 'home';
+    mkdir($folder, 0700, true);
+    $quiet = static function (string $line): void {
+    };
+    $manifestFor = static function (string $name, int $contract = 2, string $version = '0.0.2', int $deadline = 2): array {
+        return [
+            'aamio_addon' => $contract,
+            'name' => $name,
+            'version' => $version,
+            'process' => ['php' => 'process.php'],
+            'deadline_seconds' => $deadline,
+            'hosts' => ['legacy_file' => 'old-hosts.json'],
+            'commands' => [
+                'ping' => ['help' => 'answers pong', 'arguments' => [['name' => '--word', 'help' => 'a word to carry']]],
+                'check' => ['help' => 'a website and a partner', 'arguments' => [['name' => 'site', 'help' => 'the website', 'host' => true], ['name' => '--partner', 'help' => 'a name in the address book', 'required' => true, 'subject' => 'partner']]],
+                'file' => ['help' => "the runtime's own key", 'needs' => ['own_key']],
+                'local' => ['help' => 'no home needed', 'runtime' => false, 'arguments' => [['name' => 'path']]],
+                'sleep' => ['help' => 'never answers'],
+                'crash' => ['help' => 'dies'],
+                'garbage' => ['help' => 'talks nonsense'],
+                'bytes' => ['help' => 'raw bytes'],
+                'fail' => ['help' => 'a refusal'],
+            ],
+            'tools' => [
+                ['name' => 'aamio_addon_' . $name . '_ping', 'description' => 'answers pong', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
+                ['name' => 'aamio_addon_' . $name . '_check', 'description' => 'a website and a subject', 'inputSchema' => ['type' => 'object', 'properties' => ['site' => ['type' => 'string'], 'partner' => ['type' => 'string'], 'message' => ['type' => 'string']], 'required' => ['site'], 'additionalProperties' => false], 'host' => 'site', 'subject' => ['partner' => 'partner', 'message' => 'message']],
+                ['name' => 'aamio_addon_' . $name . '_sleep', 'description' => 'never answers', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
+            ],
+        ];
+    };
+    /** A package as Composer leaves it: composer.json, the manifest, and a process that answers the protocol and leaves a marker of what it was asked. */
+    $pkg = static function (string $dir, string $package, string $name, ?array $manifest = null, string $version = '0.0.2') use ($folder, $manifestFor): array {
+        $path = $folder . DIRECTORY_SEPARATOR . $dir;
+        @mkdir($path, 0700, true);
+        file_put_contents($path . DIRECTORY_SEPARATOR . 'composer.json', json_encode(['name' => $package, 'type' => 'aamio-addon', 'extra' => ['aamio-addon' => ['name' => $name, 'contract' => 2]]]));
+        file_put_contents($path . DIRECTORY_SEPARATOR . 'aamio-addon.json', json_encode($manifest ?? $manifestFor($name, 2, $version)));
+        file_put_contents($path . DIRECTORY_SEPARATOR . 'process.php', '<?php
+$request = json_decode((string) stream_get_contents(STDIN), true);
+file_put_contents(__DIR__ . "/process.ran", $request["kind"] . " " . $request["name"] . "\n", FILE_APPEND);
+if ($request["kind"] === "probe") {
+    echo json_encode(["result" => ["ok" => true, "name" => ' . var_export($name, true) . ', "version" => ' . var_export($version, true) . ', "aamio_addon" => 2]]);
+    exit(0);
+}
+$parts = explode("_", $request["name"]);
+$short = end($parts);
+if ($short === "sleep") { sleep(30); }
+if ($short === "crash") { exit(3); }
+if ($short === "garbage") { echo "not json"; exit(0); }
+if ($short === "bytes") { echo json_encode(["raw" => base64_encode("raw\n")]); exit(0); }
+if ($short === "fail") { echo json_encode(["result" => ["status" => "no", "fix" => "x"], "exit_code" => 3, "is_error" => true, "stderr" => "a note from the add-on"]); exit(3); }
+$env = static fn (string $key) => getenv($key) === false ? null : getenv($key);
+echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "arguments" => $request["arguments"], "subject" => $request["subject"], "own_key" => $request["own_key"], "state_dir" => $request["state_dir"], "home_env" => $env("AAMIO_HOME"), "addon_env" => $env("AAMIO_ADDON"), "secret_env" => $env("AAMIO_TEST_SECRET"), "path_env" => getenv("PATH") !== false]]);
+');
+
+        return ['package' => $package, 'version' => $version, 'path' => $path];
+    };
+    $ran = static fn (string $dir): string => is_file($folder . DIRECTORY_SEPARATOR . $dir . DIRECTORY_SEPARATOR . 'process.ran') ? (string) file_get_contents($folder . DIRECTORY_SEPARATOR . $dir . DIRECTORY_SEPARATOR . 'process.ran') : '';
+    $enabledFile = static fn (): mixed => is_file($home . '/addons.json') ? json_decode((string) file_get_contents($home . '/addons.json'), true) : null;
+    $refused = static function (callable $try): ?string {
+        try {
+            $try();
+        } catch (\RuntimeException $error) {
+            return $error->getMessage();
+        }
+
+        return null;
+    };
+    putenv('AAMIO_ADDONS');
+    putenv('AAMIO_TEST_SECRET=not for the add-on');
+    Addons::useHome($home);
+    Addons::reset();
+    AddonProcess::resetLimits();
+
+    $two = $pkg('demo2', 'acme/demo2', 'demo2');
+    Addons::useInstalled([$two]);
+    $said = Addons::describe();
+    $check($said['addons'] === [['name' => 'demo2', 'version' => '0.0.2', 'package' => 'acme/demo2', 'enabled' => false, 'contract' => 2, 'fix' => 'aamio addon enable demo2']] && $ran('demo2') === '', 'a contract-2 add-on is listed from its manifest, and nothing of it ran');
+    $check(Addons::tools(McpServer::coreTools()) === [], 'and the local MCP has the core alone');
+
+    $said = Addons::enable('demo2');
+    $row = $said['addons'][0];
+    $commands = $row['commands'];
+    sort($commands);
+    $check($ran('demo2') === "probe probe\n", 'enable asked the process who it is, and nothing else of it ran');
+    $check($row['enabled'] === true && $row['contract'] === 2 && $commands === ['allow', 'bytes', 'check', 'crash', 'fail', 'file', 'forget', 'garbage', 'list', 'local', 'ping', 'sleep'] && $row['mcp_tools'] === ['aamio_addon_demo2_ping', 'aamio_addon_demo2_check', 'aamio_addon_demo2_sleep'], "the manifest's commands and the three the core gives an add-on with hosts, and its tools");
+    $check(str_contains($said['note'], 'a process of its own') && str_contains($said['note'], "never the home's key") && $enabledFile() === ['enabled' => ['acme/demo2']], 'the note says what it means, and the choice is recorded by package');
+
+    // The command line, from a process of its own, with Composer standing in.
+    $standIn = $folder . DIRECTORY_SEPARATOR . 'InstalledVersions.php';
+    file_put_contents($standIn, '<?php
+namespace Composer;
+if (!class_exists(InstalledVersions::class, false)) {
+    final class InstalledVersions {
+        public static array $packages = [];
+        public static function getInstalledPackagesByType(string $type): array { return array_keys(array_filter(self::$packages, static fn (array $p): bool => $p["type"] === $type)); }
+        public static function getInstallPath(string $name): ?string { return self::$packages[$name]["path"] ?? null; }
+        public static function getPrettyVersion(string $name): ?string { return self::$packages[$name]["version"] ?? null; }
+    }
+    (static function (): void {
+        $json = getenv("AAMIO_TEST_INSTALLED");
+        if (is_string($json) && $json !== "") {
+            InstalledVersions::$packages = json_decode($json, true) ?: [];
+        }
+    })();
+}
+');
+    $child = array_merge($childPhp, ['-d', 'auto_prepend_file=' . $standIn]);
+    putenv('AAMIO_TEST_INSTALLED=' . json_encode(['acme/demo2' => ['type' => 'aamio-addon', 'path' => $two['path'], 'version' => '0.0.2']]));
+    $cli = static fn (array $words, ?string $where = null): array => $cliRun(array_merge($child, [dirname(__DIR__) . '/bin/aamio', '--home', $where ?? $home, '--host', 'https://fake.test', '--no-archive'], $words));
+
+    [$code, $out] = $cli(['addon', 'demo2', '--help']);
+    $check($code === 0 && str_contains($out, 'ping') && str_contains($out, 'allow') && $ran('demo2') === "probe probe\n", 'help comes from the manifest');
+    [$code, $out] = $cli(['addon', 'demo2', 'ping', '--word', 'hi']);
+    $got = json_decode($out, true) ?? [];
+    $check($code === 0 && ($got['pong'] ?? null) === true && ($got['arguments'] ?? null) === ['word' => 'hi'] && array_key_exists('subject', $got) && $got['subject'] === null && array_key_exists('own_key', $got) && $got['own_key'] === null, 'a command goes through the process with its arguments');
+    $check(($got['state_dir'] ?? null) === $home . DIRECTORY_SEPARATOR . 'addons' . DIRECTORY_SEPARATOR . 'demo2' && is_dir((string) ($got['state_dir'] ?? '')), 'a directory of its own under the home');
+    $check(array_key_exists('home_env', $got) && $got['home_env'] === null && ($got['addon_env'] ?? null) === '2' && array_key_exists('secret_env', $got) && $got['secret_env'] === null && ($got['path_env'] ?? null) === true, "the process sees no AAMIO_HOME and no token from the user's environment; the path it gets");
+    $check($ran('demo2') === "probe probe\ncommand ping\n", 'and the process was asked exactly that');
+    $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    $own = $runtime->keys->public;
+    $runtime->close();
+    [$code, $out] = $cli(['addon', 'demo2', 'file']);
+    $check($code === 0 && (json_decode($out, true)['own_key'] ?? null) === $own, 'needs own_key gives the public key, and nothing else of the key');
+    [$code, $out, $err] = $cli(['addon', 'demo2', 'fail']);
+    $check($code === 3 && json_decode($out, true) === ['status' => 'no', 'fix' => 'x'] && str_contains($err, 'a note from the add-on'), "the add-on's result, code and note come back as they are");
+    [$code, $out] = $cli(['addon', 'demo2', 'bytes']);
+    $check($code === 0 && $out === "raw\n", 'raw bytes reach standard output as they are');
+    [$code, $out] = $cli(['addon', 'demo2', 'local', 'somewhere']);
+    $got = json_decode($out, true) ?? [];
+    $check($code === 0 && array_key_exists('state_dir', $got) && $got['state_dir'] === null && ($got['arguments'] ?? null) === ['path' => 'somewhere'], 'a command that needs no home runs in the process too, with no directory');
+
+    $started = microtime(true);
+    [$code, $out] = $cli(['addon', 'demo2', 'sleep']);
+    $said = json_decode($out, true) ?? [];
+    $check($code === 5 && ($said['status'] ?? null) === 'unreachable' && ($said['reason'] ?? null) === 'addon_timeout' && str_contains($said['fix'] ?? '', '2 seconds') && ($said['addon'] ?? null) === 'demo2' && microtime(true) - $started < 15, 'a process that never answers is stopped at the deadline');
+    [$code, $out] = $cli(['addon', 'demo2', 'crash']);
+    $said = json_decode($out, true) ?? [];
+    $check($code === 5 && ($said['reason'] ?? null) === 'addon_failed' && str_contains($said['fix'] ?? '', 'code 3'), 'one that crashes is an unreachable answer with the code');
+    [$code, $out] = $cli(['addon', 'demo2', 'garbage']);
+    $check($code === 5 && (json_decode($out, true)['reason'] ?? null) === 'addon_failed', 'and so is one that answers something else');
+    // The acceptance from the review of 8 November: a tool that hangs is stopped
+    // at its deadline, and the same server answers the next request.
+    $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    $server = new McpServer($runtime);
+    $reply = $server->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => 'aamio_addon_demo2_sleep', 'arguments' => []]]);
+    $check(($reply['result']['isError'] ?? null) === true && ($reply['result']['structuredContent']['reason'] ?? null) === 'addon_timeout', 'over MCP a tool that hangs is stopped at the deadline');
+    $listed = $server->handle(['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/list']);
+    $pong = $server->handle(['jsonrpc' => '2.0', 'id' => 3, 'method' => 'tools/call', 'params' => ['name' => 'aamio_addon_demo2_ping', 'arguments' => []]]);
+    $check(count($listed['result']['tools']) === 27 && ($pong['result']['isError'] ?? null) === false && ($pong['result']['structuredContent']['pong'] ?? null) === true, 'and the same server answers the next request');
+    $runtime->close();
+
+    // Hosts: the core's consent, kept per add-on and beside its directory.
+    [$code, $out] = $cli(['addon', 'demo2', 'check', 'Example.ORG', '--partner', 'bob']);
+    $said = json_decode($out, true) ?? [];
+    $check($code === 2 && ($said['reason'] ?? null) === 'host_not_allowed' && str_contains($said['fix'] ?? '', 'aamio addon demo2 allow example.org') && str_contains($said['fix'] ?? '', 'aamio_addon_demo2_check asks them') && !str_contains($ran('demo2'), 'check'), 'a website not on the list is refused before the process starts');
+    $key = str_repeat('A', 43);
+    $check($cli(['partner', 'add', 'bob', $key])[0] === 0, 'a partner for the checks');
+    [$code, $out] = $cli(['addon', 'demo2', 'allow', 'Example.ORG']);
+    $said = json_decode($out, true) ?? [];
+    $check($code === 0 && ($said['host'] ?? null) === 'example.org' && ($said['added'] ?? null) === true && ($said['hosts'] ?? null) === ['example.org'] && str_contains($said['note'] ?? '', 'Nothing was read now'), 'allow puts a website on the list, in its exact form');
+    $check(json_decode((string) file_get_contents($home . '/addons/demo2.hosts.json'), true) === ['example.org'], "kept beside the add-on's directory, not in it");
+    [$code, $out] = $cli(['addon', 'demo2', 'check', 'EXAMPLE.org', '--partner', 'bob']);
+    $got = json_decode($out, true) ?? [];
+    $check($code === 0 && ($got['arguments'] ?? null) === ['site' => 'example.org', 'partner' => 'bob'] && ($got['subject'] ?? null) === ['key' => $key, 'subject_source' => 'partner', 'partner' => 'bob', 'signature_checked_locally' => null], 'the core resolved the partner to a key; the add-on got the key and never the book');
+    [$code, $out] = $cli(['addon', 'demo2', 'check', 'example.org', '--partner', 'nobody']);
+    $check($code === 2 && (json_decode($out, true)['reason'] ?? null) === 'partner_unavailable', 'a partner nobody has is refused by the core');
+    [$code, $out] = $cli(['addon', 'demo2', 'allow', 'localhost']);
+    $check($code === 2 && (json_decode($out, true)['reason'] ?? null) === 'invalid_host', 'only a plain host goes on the list');
+    [$code, $out] = $cli(['addon', 'demo2', 'forget', 'example.org']);
+    $check($code === 0 && (json_decode($out, true)['removed'] ?? null) === true && json_decode($cli(['addon', 'demo2', 'list'])[1], true) === ['hosts' => []], 'forget takes it off, and list says so');
+    $legacyHome = $folder . DIRECTORY_SEPARATOR . 'legacy-home';
+    mkdir($legacyHome, 0700, true);
+    file_put_contents($legacyHome . '/old-hosts.json', json_encode(['legacy.example']));
+    file_put_contents($legacyHome . '/addons.json', json_encode(['enabled' => ['acme/demo2']]));
+    $check(json_decode($cli(['addon', 'demo2', 'list'], $legacyHome)[1], true) === ['hosts' => ['legacy.example']] && is_file($legacyHome . '/addons/demo2.hosts.json'), 'the list an earlier version kept is read once');
+    file_put_contents($legacyHome . '/old-hosts.json', json_encode(['other.example']));
+    $check(json_decode($cli(['addon', 'demo2', 'list'], $legacyHome)[1], true) === ['hosts' => ['legacy.example']], "and from then on the list is the core's");
+
+    // Over MCP the user is asked for the website, in words this runtime holds.
+    $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    $manifest = Addons::byName('demo2', $home);
+    $arguments = ['site' => 'example.org', 'partner' => 'bob'];
+    $refusedCall = Addons::dispatch($runtime, 'aamio_addon_demo2_check', $arguments, null);
+    $check(($refusedCall['isError'] ?? null) === true && ($refusedCall['structuredContent']['reason'] ?? null) === 'host_not_allowed' && str_contains($refusedCall['structuredContent']['fix'] ?? '', 'stop this server'), 'without a form the way by hand is said');
+    $asked = [];
+    $declined = Addons::dispatch($runtime, 'aamio_addon_demo2_check', $arguments, static function (array $question, string $about, string $tool, string $key) use (&$asked): array {
+        $asked[] = [$question, $about, $tool, $key];
+
+        return ['answer' => ['action' => 'decline']];
+    });
+    $check(($declined['structuredContent']['reason'] ?? null) === 'host_declined' && ($asked[0][2] ?? null) === 'aamio_addon_demo2_check' && ($asked[0][3] ?? null) === AddonProcess::HOST_QUESTION, 'a user who declines adds nothing');
+    $check(str_contains($asked[0][0]['message'] ?? '', 'your partner bob') && !str_contains($asked[0][0]['message'] ?? '', 'example.org'), 'the user is told who, and types the website themselves');
+    $other = Addons::dispatch($runtime, 'aamio_addon_demo2_check', $arguments, static fn (): array => ['answer' => ['action' => 'accept', 'content' => ['domain' => 'examp1e.org']]]);
+    $check(($other['structuredContent']['reason'] ?? null) === 'host_not_confirmed' && AddonProcess::allowedHosts($runtime, $manifest) === [], 'a lookalike stops at what the user types');
+    $done = Addons::dispatch($runtime, 'aamio_addon_demo2_check', $arguments, static fn (): array => ['answer' => ['action' => 'accept', 'content' => ['domain' => 'Example.org']]]);
+    $got = $done['structuredContent'] ?? [];
+    $check(($done['isError'] ?? null) === false && ($got['arguments'] ?? null) === ['site' => 'example.org', 'partner' => 'bob'] && ($got['subject']['key'] ?? null) === $key && AddonProcess::allowedHosts($runtime, $manifest) === ['example.org'], "the user's yes lets the process run, and is kept");
+    $both = Addons::dispatch($runtime, 'aamio_addon_demo2_check', $arguments + ['message' => str_repeat('a', 64)], null);
+    $check(($both['structuredContent']['reason'] ?? null) === 'choose_subject', 'exactly one subject');
+    $extra = Addons::dispatch($runtime, 'aamio_addon_demo2_check', $arguments + ['key' => 'x'], null);
+    $check(($extra['isError'] ?? null) === true && ($extra['structuredContent']['given'] ?? null) === ['key'], 'a key beside the rest is refused, not passed over');
+    $runtime->close();
+
+    // A contract this aamio does not know is said, and can be taken out.
+    Addons::disable('demo2');
+    $three = $pkg('demo3', 'acme/demo3', 'demo3', $manifestFor('demo3', 3));
+    Addons::useInstalled([$three]);
+    Addons::reset();
+    $row = Addons::describe()['addons'][0];
+    $check($row['enabled'] === false && str_contains($row['error'] ?? '', 'contract 3') && str_contains($row['error'] ?? '', 'knows 1 and 2') && !isset($row['contract']), 'a manifest for a contract this aamio does not know is the row\'s error');
+    $threw = $refused(static fn () => Addons::enable('demo3'));
+    $check($threw !== null && str_contains($threw, 'contract 3') && $ran('demo3') === '' && $enabledFile() === ['enabled' => []], 'enable refuses it, and nothing ran');
+    file_put_contents($home . '/addons.json', json_encode(['enabled' => ['acme/demo3']]));
+    Addons::reset();
+    $check(str_contains(Addons::describe()['error'] ?? '', 'contract 3'), 'enabled by an older aamio, say: the list says what is wrong');
+    Addons::disable('demo3');
+    $check($enabledFile() === ['enabled' => []] && $ran('demo3') === '', 'and disable works, running nothing');
+
+    // A process that is not the add-on the manifest says is refused before anything is recorded.
+    $nine = $pkg('demo9', 'acme/demo9', 'demo9', $manifestFor('demo9', 2, '9.9.9'), '0.0.2');
+    Addons::useInstalled([$nine]);
+    Addons::reset();
+    $threw = $refused(static fn () => Addons::enable('demo9'));
+    $check($threw !== null && str_contains($threw, 'answered the probe as') && str_contains($threw, '9.9.9') && $enabledFile() === ['enabled' => []] && $ran('demo9') === "probe probe\n", 'a probe that names another version refuses the enable');
+
+    // composer.json that says contract 2 for a package without a manifest.
+    $claims = $folder . DIRECTORY_SEPARATOR . 'claims';
+    mkdir($claims, 0700, true);
+    file_put_contents($claims . '/composer.json', json_encode(['name' => 'acme/claims', 'type' => 'aamio-addon', 'extra' => ['aamio-addon' => ['name' => 'claims', 'contract' => 2]]]));
+    file_put_contents($claims . '/aamio-addon.php', "<?php\nreturn 'never read';\n");
+    Addons::useInstalled([['package' => 'acme/claims', 'version' => '0.0.1', 'path' => $claims]]);
+    Addons::reset();
+    $threw = $refused(static fn () => Addons::enable('claims'));
+    $check($threw !== null && str_contains($threw, 'contract 2') && str_contains($threw, 'aamio-addon.json') && $enabledFile() === ['enabled' => []], 'a package that claims contract 2 without a manifest is refused');
+
+    putenv('AAMIO_TEST_INSTALLED');
+    putenv('AAMIO_TEST_SECRET');
+    Addons::useInstalled(null);
+    Addons::useHome(null);
+    Addons::reset();
+    AddonProcess::resetLimits();
+})();
+
+// The example add-on hello, as https://aamio.at/docs/addons shows it: a manifest and a dozen lines of process, named by AAMIO_ADDONS.
+(static function () use ($root, $check, $childPhp, $cliRun): void {
+    $home = $root . DIRECTORY_SEPARATOR . 'hello-home';
+    putenv('AAMIO_ADDONS=' . dirname(__DIR__) . DIRECTORY_SEPARATOR . 'examples' . DIRECTORY_SEPARATOR . 'hello');
+    Addons::useInstalled(null);
+    Addons::useHome($home);
+    Addons::reset();
+    AddonProcess::resetLimits();
+    $quiet = static function (string $line): void {
+    };
+    $row = Addons::describe()['addons'][0] ?? [];
+    $check(($row['name'] ?? null) === 'hello' && ($row['contract'] ?? null) === 2 && ($row['commands'] ?? null) === ['wave'] && ($row['mcp_tools'] ?? null) === ['aamio_addon_hello_wave'], 'the example add-on hello is listed from its manifest');
+    $cli = static fn (array $words): array => $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $home, '--host', 'https://fake.test', '--no-archive'], $words));
+    [$code, $out] = $cli(['addon', 'hello', 'wave', '--to', 'Kari']);
+    $check($code === 0 && json_decode($out, true) === ['hello' => 'Kari'], 'its command runs through its process');
+    [$code, $out] = $cli(['addon', 'hello', 'wave']);
+    $check($code === 0 && json_decode($out, true) === ['hello' => 'world'], 'with the default when the option is left out');
+    $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    $reply = (new McpServer($runtime))->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => 'aamio_addon_hello_wave', 'arguments' => ['to' => 'Ola']]]);
+    $runtime->close();
+    $check(($reply['result']['isError'] ?? null) === false && ($reply['result']['structuredContent'] ?? null) === ['hello' => 'Ola'], 'and its tool over MCP');
+    putenv('AAMIO_ADDONS');
     Addons::useHome(null);
     Addons::reset();
 })();

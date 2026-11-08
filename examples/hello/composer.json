@@ -1,0 +1,13 @@
+{
+  "name": "aisenseapi/aamio-hello",
+  "description": "An example add-on to aamio: one command and one tool that answer with a greeting, in a process of their own. Tested with the core and not published.",
+  "type": "aamio-addon",
+  "license": "MIT",
+  "require": {
+    "php": ">=8.1",
+    "aisenseapi/aamio": ">=0.3.13"
+  },
+  "extra": {
+    "aamio-addon": {"name": "hello", "contract": 2}
+  }
+}

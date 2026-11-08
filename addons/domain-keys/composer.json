@@ -16,13 +16,13 @@
   "require": {
     "php": ">=8.1",
     "ext-openssl": "*",
-    "aisenseapi/aamio": ">=0.3.11"
+    "aisenseapi/aamio": ">=0.3.13"
   },
   "autoload": {
     "psr-4": {"Aamio\\DomainKeys\\": "src/"}
   },
   "extra": {
-    "aamio-addon": {"name": "domain"}
+    "aamio-addon": {"name": "domain", "contract": 2}
   },
   "minimum-stability": "stable"
 }

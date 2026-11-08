@@ -18,7 +18,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/bootstrap.php';
 require __DIR__ . '/live-pace.inc.php';
-require dirname(__DIR__) . '/addons/domain-keys/aamio-addon.php';
+require dirname(__DIR__) . '/addons/domain-keys/autoload.php';
 
 use Aamio\Board;
 use Aamio\Client;

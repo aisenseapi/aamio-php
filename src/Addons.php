@@ -36,7 +36,7 @@ final class Addons
     public const TYPE = 'aamio-addon';
     public const FILE = 'aamio-addon.php';
     public const ENABLED_FILE = 'addons.json';
-    public const RESERVED = ['list', 'enable', 'disable'];
+    public const RESERVED = AddonProcess::RESERVED;
     public const RESTART = 'A local MCP server already running keeps the tools it started with: start it again to see the change.';
 
     /** How long a change waits for another aamio that is changing the same list, in seconds. */
@@ -193,7 +193,7 @@ final class Addons
         $rows = [];
         foreach ($packages as $package) {
             $dir = rtrim($package['path'], '/\\');
-            $rows[] = ['package' => $package['package'], 'version' => $package['version'], 'name' => self::declaredName($dir), 'file' => $dir . DIRECTORY_SEPARATOR . self::FILE];
+            $rows[] = ['package' => $package['package'], 'version' => $package['version'], 'name' => self::declaredName($dir), 'file' => $dir . DIRECTORY_SEPARATOR . self::FILE, 'dir' => $dir];
         }
 
         return $rows;
@@ -270,31 +270,55 @@ final class Addons
         $files = [];
         foreach (self::installed() as $row) {
             if (self::isEnabled($row, $wanted)) {
-                $files[] = [$row['file'], $row['name'], $row['package'], 'aamio addon disable ' . $row['package']];
+                $files[] = [$row['file'], $row['name'], $row['package'], 'aamio addon disable ' . $row['package'], $row['dir']];
             }
         }
+        // AAMIO_ADDONS names a contract-1 file, or a contract-2 manifest or the
+        // directory that holds one.
         foreach (explode(',', $env) as $named) {
-            if (trim($named) !== '') {
-                $files[] = [trim($named), null, null, 'uninstall it'];
+            $named = trim($named);
+            if ($named === '') {
+                continue;
+            }
+            if (is_dir($named)) {
+                $files[] = [$named . DIRECTORY_SEPARATOR . self::FILE, null, null, 'uninstall it', $named];
+            } elseif (basename($named) === AddonProcess::MANIFEST_FILE) {
+                $files[] = [dirname($named) . DIRECTORY_SEPARATOR . self::FILE, null, null, 'uninstall it', dirname($named)];
+            } else {
+                $files[] = [$named, null, null, 'uninstall it', dirname($named)];
             }
         }
         $found = [];
         $byFile = [];
-        foreach ($files as [$file, $declared, $package, $fix]) {
-            $real = realpath($file);
+        foreach ($files as [$file, $declared, $package, $fix, $dir]) {
+            $realDir = realpath($dir);
+            if ($realDir === false) {
+                throw new \RuntimeException('the add-on ' . ($package ?? $file) . ' is not there: ' . $dir . ' does not exist, so it could not be loaded. Reinstall the add-on, or ' . $fix . ' to go on without it.');
+            }
+            // One entry per manifest on contract 2, per file on contract 1: a
+            // folder may hold two contract-1 files.
+            $real = self::keyOf($realDir, $file);
             if ($real === false) {
                 throw new \RuntimeException('the add-on file ' . $file . ' is not there, so it could not be loaded. Reinstall the add-on, or ' . $fix . ' to go on without it.');
             }
             if (isset($byFile[$real])) {
                 continue;
             }
-            try {
-                $addon = (static fn () => require $real)();
-            } catch (\Throwable $failure) {
-                throw new \RuntimeException('the add-on ' . ($package ?? $file) . ' could not be loaded: ' . get_class($failure) . ': ' . $failure->getMessage() . '. Reinstall it, or ' . $fix . ' to go on without it.');
-            }
-            if (!$addon instanceof Addon) {
-                throw new \RuntimeException($file . ' cannot be used as an add-on: it does not return an Aamio\\Addon. Reinstall it, or ' . $fix . ' to go on without it.');
+            // Contract 2 is read from the manifest, running nothing of the add-on.
+            // Contract 1 is the file, required.
+            $addon = AddonProcess::readManifest($realDir, $package, $fix);
+            if ($addon === null) {
+                if (!is_file($file)) {
+                    throw new \RuntimeException('the add-on file ' . $file . ' is not there, so it could not be loaded. Reinstall the add-on, or ' . $fix . ' to go on without it.');
+                }
+                try {
+                    $addon = (static fn () => require $file)();
+                } catch (\Throwable $failure) {
+                    throw new \RuntimeException('the add-on ' . ($package ?? $file) . ' could not be loaded: ' . get_class($failure) . ': ' . $failure->getMessage() . '. Reinstall it, or ' . $fix . ' to go on without it.');
+                }
+                if (!$addon instanceof Addon) {
+                    throw new \RuntimeException($file . ' cannot be used as an add-on: it does not return an Aamio\\Addon. Reinstall it, or ' . $fix . ' to go on without it.');
+                }
             }
             if ($declared !== null && $declared !== $addon->name()) {
                 throw new \RuntimeException('the add-on ' . $package . ' is called ' . $declared . ' in its composer.json and ' . $addon->name() . ' in its code. Reinstall it, or ' . $fix . ' to go on without it.');
@@ -316,6 +340,14 @@ final class Addons
         self::tools(McpServer::coreTools(), $found);
 
         return [$found, $byFile];
+    }
+
+    /** What one add-on is known by in the loaded map: its manifest when it has one, its file otherwise. */
+    private static function keyOf(string $dir, string $file): string|false
+    {
+        $manifest = $dir . DIRECTORY_SEPARATOR . AddonProcess::MANIFEST_FILE;
+
+        return realpath(is_file($manifest) ? $manifest : $file);
     }
 
     /** @return array{0: list<Addon>, 1: array<string, Addon>} */
@@ -356,15 +388,32 @@ final class Addons
         $lock = self::lock($home);
         try {
             $names = self::enabled($home);
+            $contract = 1;
             if (!in_array(strtolower($package), array_map('strtolower', $names), true)) {
-                self::load((string) getenv('AAMIO_ADDONS'), array_merge($names, [$package]));
+                [$loaded] = self::load((string) getenv('AAMIO_ADDONS'), array_merge($names, [$package]));
+                foreach ($loaded as $addon) {
+                    if ($addon instanceof AddonManifest && $addon->package !== null && strtolower($addon->package) === strtolower($package)) {
+                        // Before anything is recorded: the process starts, speaks
+                        // the protocol and is the add-on the manifest says.
+                        AddonProcess::probe($addon);
+                        $contract = 2;
+                    }
+                }
                 self::writeEnabled($home, array_merge($names, [$package]));
+            } else {
+                foreach (self::describe($home)['addons'] as $row) {
+                    if (($row['package'] ?? null) !== null && strtolower($row['package']) === strtolower($package)) {
+                        $contract = $row['contract'] ?? 1;
+                    }
+                }
             }
         } finally {
             self::unlock($lock);
         }
         $answer = self::describe($home);
-        $answer['note'] = $package . " runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. " . self::RESTART;
+        $answer['note'] = $contract === 2
+            ? $package . " runs here from now on, in a process of its own for each call, with the call's arguments, a key aamio resolves for it and a directory of its own, and never the home's key. " . self::RESTART
+            : $package . " runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. " . self::RESTART;
 
         return $answer;
     }
@@ -406,7 +455,7 @@ final class Addons
 
     private static function running(Addon $addon): array
     {
-        return ['version' => $addon->version(), 'class' => get_class($addon), 'commands' => array_keys($addon->commands()), 'mcp_tools' => array_column($addon->tools(), 'name')];
+        return ['version' => $addon->version(), 'contract' => $addon instanceof AddonManifest ? 2 : 1, 'class' => get_class($addon), 'commands' => array_keys($addon->commands()), 'mcp_tools' => array_column($addon->tools(), 'name')];
     }
 
     /**
@@ -432,7 +481,14 @@ final class Addons
         $seen = [];
         foreach ($installed as $row) {
             $entry = ['name' => $row['name'], 'version' => $row['version'], 'package' => $row['package'], 'enabled' => self::isEnabled($row, $wanted)];
-            $real = realpath($row['file']);
+            // Which contract, from the manifest or its absence, running nothing; a
+            // manifest for a contract this aamio does not know is this row's error.
+            try {
+                $entry['contract'] = AddonProcess::readManifest($row['dir'], $row['package'], 'aamio addon disable ' . $row['package']) !== null ? 2 : 1;
+            } catch (\RuntimeException $failure) {
+                $entry['error'] = $failure->getMessage();
+            }
+            $real = self::keyOf($row['dir'], $row['file']);
             $addon = $real !== false ? ($byFile[$real] ?? null) : null;
             if (!$entry['enabled'] && $addon !== null) {
                 // Installed, and running because AAMIO_ADDONS names the same file:

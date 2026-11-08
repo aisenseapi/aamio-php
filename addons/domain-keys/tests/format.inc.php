@@ -11,7 +11,7 @@ declare(strict_types=1);
  * Included by the core's tests/run.php, with $check in scope.
  */
 
-require_once dirname(__DIR__) . '/aamio-addon.php';
+require_once dirname(__DIR__) . '/autoload.php';
 
 require_once __DIR__ . '/fake.inc.php';
 
