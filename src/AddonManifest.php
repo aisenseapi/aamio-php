@@ -22,6 +22,8 @@ final class AddonManifest implements Addon
     public readonly string $script;
     public readonly int $deadline;
     public readonly ?string $description;
+    /** @var list<string> */
+    public readonly array $environment;
     /** @var array<string, mixed>|null */
     public readonly ?array $hosts;
     /** @var array<string, array<string, mixed>> */
@@ -64,6 +66,15 @@ final class AddonManifest implements Addon
             $wrong('description in its manifest is not text');
         }
         $this->description = $description;
+        $environment = $data['environment'] ?? [];
+        if (!is_array($environment) || array_filter($environment, static fn ($name): bool => !is_string($name) || preg_match('/^[A-Z][A-Z0-9_]{0,63}$/', $name) !== 1) !== []) {
+            $wrong('environment in its manifest is not a list of variable names in A-Z, 0-9 and underscore');
+        }
+        $never = array_values(array_intersect($environment, AddonProcess::NEVER_PASSED));
+        if ($never !== []) {
+            $wrong('environment in its manifest asks for ' . implode(', ', $never) . ', which no add-on gets');
+        }
+        $this->environment = array_values($environment);
         $hosts = $data['hosts'] ?? null;
         if ($hosts === true) {
             $hosts = [];

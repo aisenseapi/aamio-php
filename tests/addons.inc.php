@@ -463,8 +463,8 @@ return new ThrowsInCommands();
     mkdir($folder, 0700, true);
     $quiet = static function (string $line): void {
     };
-    $manifestFor = static function (string $name, int $contract = 2, string $version = '0.0.2', int $deadline = 2): array {
-        return [
+    $manifestFor = static function (string $name, int $contract = 2, string $version = '0.0.2', int $deadline = 2, ?array $environment = null): array {
+        return ($environment === null ? [] : ['environment' => $environment]) + [
             'aamio_addon' => $contract,
             'name' => $name,
             'version' => $version,
@@ -481,11 +481,15 @@ return new ThrowsInCommands();
                 'garbage' => ['help' => 'talks nonsense'],
                 'bytes' => ['help' => 'raw bytes'],
                 'fail' => ['help' => 'a refusal'],
+                'flood' => ['help' => 'writes without end'],
+                'noisy' => ['help' => 'complains without end'],
             ],
             'tools' => [
                 ['name' => 'aamio_addon_' . $name . '_ping', 'description' => 'answers pong', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
                 ['name' => 'aamio_addon_' . $name . '_check', 'description' => 'a website and a subject', 'inputSchema' => ['type' => 'object', 'properties' => ['site' => ['type' => 'string'], 'partner' => ['type' => 'string'], 'message' => ['type' => 'string']], 'required' => ['site'], 'additionalProperties' => false], 'host' => 'site', 'subject' => ['partner' => 'partner', 'message' => 'message']],
                 ['name' => 'aamio_addon_' . $name . '_sleep', 'description' => 'never answers', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
+                ['name' => 'aamio_addon_' . $name . '_flood', 'description' => 'writes without end', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
+                ['name' => 'aamio_addon_' . $name . '_noisy', 'description' => 'complains without end', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
             ],
         ];
     };
@@ -509,8 +513,10 @@ if ($short === "crash") { exit(3); }
 if ($short === "garbage") { echo "not json"; exit(0); }
 if ($short === "bytes") { echo json_encode(["raw" => base64_encode("raw\n")]); exit(0); }
 if ($short === "fail") { echo json_encode(["result" => ["status" => "no", "fix" => "x"], "exit_code" => 3, "is_error" => true, "stderr" => "a note from the add-on"]); exit(3); }
+if ($short === "flood") { echo str_repeat("x", 5000); flush(); sleep(5); exit(0); }
+if ($short === "noisy") { fwrite(STDERR, str_repeat("y", 5000)); sleep(5); exit(0); }
 $env = static fn (string $key) => getenv($key) === false ? null : getenv($key);
-echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "arguments" => $request["arguments"], "subject" => $request["subject"], "own_key" => $request["own_key"], "state_dir" => $request["state_dir"], "home_env" => $env("AAMIO_HOME"), "addon_env" => $env("AAMIO_ADDON"), "secret_env" => $env("AAMIO_TEST_SECRET"), "path_env" => getenv("PATH") !== false]]);
+echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "arguments" => $request["arguments"], "subject" => $request["subject"], "own_key" => $request["own_key"], "state_dir" => $request["state_dir"], "home_env" => $env("AAMIO_HOME"), "addon_env" => $env("AAMIO_ADDON"), "secret_env" => $env("AAMIO_TEST_SECRET"), "passthru_env" => $env("AAMIO_TEST_PASSTHRU"), "path_env" => getenv("PATH") !== false]]);
 ');
 
         return ['package' => $package, 'version' => $version, 'path' => $path];
@@ -543,7 +549,7 @@ echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "argu
     $commands = $row['commands'];
     sort($commands);
     $check($ran('demo2') === "probe probe\n", 'enable asked the process who it is, and nothing else of it ran');
-    $check($row['enabled'] === true && $row['contract'] === 2 && $commands === ['allow', 'bytes', 'check', 'crash', 'fail', 'file', 'forget', 'garbage', 'list', 'local', 'ping', 'sleep'] && $row['mcp_tools'] === ['aamio_addon_demo2_ping', 'aamio_addon_demo2_check', 'aamio_addon_demo2_sleep'], "the manifest's commands and the three the core gives an add-on with hosts, and its tools");
+    $check($row['enabled'] === true && $row['contract'] === 2 && $commands === ['allow', 'bytes', 'check', 'crash', 'fail', 'file', 'flood', 'forget', 'garbage', 'list', 'local', 'noisy', 'ping', 'sleep'] && $row['mcp_tools'] === ['aamio_addon_demo2_ping', 'aamio_addon_demo2_check', 'aamio_addon_demo2_sleep', 'aamio_addon_demo2_flood', 'aamio_addon_demo2_noisy'], "the manifest's commands and the three the core gives an add-on with hosts, and its tools");
     $check(str_contains($said['note'], 'a process of its own') && str_contains($said['note'], "never the home's key") && $enabledFile() === ['enabled' => ['acme/demo2']], 'the note says what it means, and the choice is recorded by package');
 
     // The command line, from a process of its own, with Composer standing in.
@@ -607,8 +613,49 @@ if (!class_exists(InstalledVersions::class, false)) {
     $check(($reply['result']['isError'] ?? null) === true && ($reply['result']['structuredContent']['reason'] ?? null) === 'addon_timeout', 'over MCP a tool that hangs is stopped at the deadline');
     $listed = $server->handle(['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/list']);
     $pong = $server->handle(['jsonrpc' => '2.0', 'id' => 3, 'method' => 'tools/call', 'params' => ['name' => 'aamio_addon_demo2_ping', 'arguments' => []]]);
-    $check(count($listed['result']['tools']) === 27 && ($pong['result']['isError'] ?? null) === false && ($pong['result']['structuredContent']['pong'] ?? null) === true, 'and the same server answers the next request');
+    $check(count($listed['result']['tools']) === 29 && ($pong['result']['isError'] ?? null) === false && ($pong['result']['structuredContent']['pong'] ?? null) === true, 'and the same server answers the next request');
     $runtime->close();
+
+    // The limits hold while the process runs: a stream past either stops it, and the next call goes through.
+    AddonProcess::$maxAnswerBytes = 1000;
+    AddonProcess::$maxStderrBytes = 500;
+    $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    $started = microtime(true);
+    $flood = Addons::dispatch($runtime, 'aamio_addon_demo2_flood', [], null)['structuredContent'] ?? [];
+    $check(($flood['reason'] ?? null) === 'addon_failed' && str_contains($flood['fix'] ?? '', 'bytes an answer may be') && microtime(true) - $started < 4, 'a process that writes past the answer limit is stopped at the size, not at the deadline');
+    $started = microtime(true);
+    $noisy = Addons::dispatch($runtime, 'aamio_addon_demo2_noisy', [], null)['structuredContent'] ?? [];
+    $check(($noisy['reason'] ?? null) === 'addon_failed' && str_contains($noisy['fix'] ?? '', 'standard error') && microtime(true) - $started < 4, 'and so is one that writes past the limit on standard error');
+    $pongAgain = Addons::dispatch($runtime, 'aamio_addon_demo2_ping', [], null)['structuredContent'] ?? [];
+    $check(($pongAgain['pong'] ?? null) === true, 'and the next call goes through');
+    $runtime->close();
+    AddonProcess::$maxAnswerBytes = AddonProcess::MAX_ANSWER_BYTES;
+    AddonProcess::$maxStderrBytes = AddonProcess::MAX_STDERR_BYTES;
+
+    // The environment: only what the manifest declares, on top of the short list.
+    $passthru = $pkg('demo-env', 'acme/demo-env', 'demoenv', $manifestFor('demoenv', 2, '0.0.2', 2, ['AAMIO_TEST_PASSTHRU']));
+    $bad = $pkg('demo-bad', 'acme/demo-bad', 'demobad', $manifestFor('demobad', 2, '0.0.2', 2, ['AAMIO_HOME']));
+    Addons::useInstalled([$two, $passthru, $bad]);
+    Addons::reset();
+    putenv('AAMIO_TEST_PASSTHRU=yes please');
+    $said = Addons::enable('demoenv');
+    $rowEnv = null;
+    foreach ($said['addons'] as $candidate) {
+        if ($candidate['name'] === 'demoenv') {
+            $rowEnv = $candidate;
+        }
+    }
+    $check(($rowEnv['environment'] ?? null) === ['AAMIO_TEST_PASSTHRU'], 'the list says which variables the add-on asked for');
+    $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    $got = Addons::dispatch($runtime, 'aamio_addon_demoenv_ping', [], null)['structuredContent'] ?? [];
+    $runtime->close();
+    $check(($got['passthru_env'] ?? null) === 'yes please' && array_key_exists('secret_env', $got) && $got['secret_env'] === null, 'what the manifest declares comes through; the rest of the user\'s environment does not');
+    putenv('AAMIO_TEST_PASSTHRU');
+    $threw = $refused(static fn () => Addons::enable('demobad'));
+    $check($threw !== null && str_contains($threw, 'AAMIO_HOME') && str_contains($threw, 'no add-on gets'), 'a manifest may not ask for the home');
+    Addons::disable('demoenv');
+    Addons::useInstalled([$two]);
+    Addons::reset();
 
     // Hosts: the core's consent, kept per add-on and beside its directory.
     [$code, $out] = $cli(['addon', 'demo2', 'check', 'Example.ORG', '--partner', 'bob']);
@@ -693,6 +740,26 @@ if (!class_exists(InstalledVersions::class, false)) {
     Addons::reset();
     $threw = $refused(static fn () => Addons::enable('claims'));
     $check($threw !== null && str_contains($threw, 'contract 2') && str_contains($threw, 'aamio-addon.json') && $enabledFile() === ['enabled' => []], 'a package that claims contract 2 without a manifest is refused');
+
+    // The files of a call live in a directory of their own, private from the start, and are gone afterwards.
+    Addons::useInstalled([$two]);
+    Addons::reset();
+    $before = glob(rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'aamio-addon-*') ?: [];
+    $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    Addons::dispatch($runtime, 'aamio_addon_demo2_ping', [], null);
+    $runtime->close();
+    $after = glob(rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'aamio-addon-*') ?: [];
+    $check(count($after) <= count($before), 'and nothing of the call is left in the temporary directory');
+    if (DIRECTORY_SEPARATOR === '/') {
+        $probe = rtrim(sys_get_temp_dir(), '/') . '/aamio-addon-perms-' . getmypid();
+        $mask = umask(0077);
+        mkdir($probe, 0700);
+        file_put_contents($probe . '/in', '{}');
+        umask($mask);
+        $check((fileperms($probe) & 0777) === 0700 && (fileperms($probe . '/in') & 0777) === 0600, 'a directory and a file made under the umask the call sets are private');
+        @unlink($probe . '/in');
+        @rmdir($probe);
+    }
 
     putenv('AAMIO_TEST_INSTALLED');
     putenv('AAMIO_TEST_SECRET');

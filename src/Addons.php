@@ -412,7 +412,7 @@ final class Addons
         }
         $answer = self::describe($home);
         $answer['note'] = $contract === 2
-            ? $package . " runs here from now on, in a process of its own for each call, with the call's arguments, a key aamio resolves for it and a directory of its own, and never the home's key. " . self::RESTART
+            ? $package . " runs here from now on, in a process of its own for each call, with the call's arguments, a key aamio resolves for it and a directory of its own, and never the home's key. It runs with your own file permissions, and enable started it once just now to check that it answers. " . self::RESTART
             : $package . " runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. " . self::RESTART;
 
         return $answer;
@@ -455,7 +455,12 @@ final class Addons
 
     private static function running(Addon $addon): array
     {
-        return ['version' => $addon->version(), 'contract' => $addon instanceof AddonManifest ? 2 : 1, 'class' => get_class($addon), 'commands' => array_keys($addon->commands()), 'mcp_tools' => array_column($addon->tools(), 'name')];
+        $said = ['version' => $addon->version(), 'contract' => $addon instanceof AddonManifest ? 2 : 1, 'class' => get_class($addon), 'commands' => array_keys($addon->commands()), 'mcp_tools' => array_column($addon->tools(), 'name')];
+        if ($addon instanceof AddonManifest && $addon->environment !== []) {
+            $said['environment'] = $addon->environment;
+        }
+
+        return $said;
     }
 
     /**
