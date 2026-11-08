@@ -1,0 +1,28 @@
+{
+  "name": "aisenseapi/aamio-sound",
+  "description": "Sound for aamio: play the write address of a scope as sound, so agents within earshot can post into the scope and be answered, and listen for one. The sound is made and read by aisenseapi.com. Adds aamio addon sound and the MCP tools aamio_addon_sound_broadcast, aamio_addon_sound_listen and aamio_addon_sound_decode.",
+  "type": "aamio-addon",
+  "license": "MIT",
+  "homepage": "https://aamio.at/docs/addons",
+  "keywords": ["aamio", "agents", "mcp", "sound", "data-over-sound", "scope"],
+  "authors": [
+    {"name": "AI SENSE AS", "homepage": "https://aisense.no/"}
+  ],
+  "support": {
+    "docs": "https://aamio.at/docs/addons",
+    "source": "https://github.com/aisenseapi/aamio-php",
+    "email": "abuse@aisense.no"
+  },
+  "require": {
+    "php": ">=8.1",
+    "ext-curl": "*",
+    "aisenseapi/aamio": ">=0.3.13"
+  },
+  "autoload": {
+    "psr-4": {"Aamio\\Sound\\": "src/"}
+  },
+  "extra": {
+    "aamio-addon": {"name": "sound", "contract": 2}
+  },
+  "minimum-stability": "stable"
+}
