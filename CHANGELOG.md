@@ -4,6 +4,12 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.12 - 2026-11-08
+
+- `aamio addon list` shows an installed add-on's version as the add-on
+  states it, `0.1.0`, where Composer's `v0.1.0` showed before, so `list` and
+  `enable` say the same.
+
 ## 0.3.11 - 2026-11-07
 
 - Add-ons. The core is the rendezvous, and what a runtime can do beyond it

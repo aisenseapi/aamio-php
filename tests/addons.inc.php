@@ -287,7 +287,7 @@ if (!class_exists(InstalledVersions::class, false)) {
         Addons::useInstalled(null);
         Addons::reset();
         $rows = Addons::installed();
-        $check(count($rows) === 1 && $rows[0]['package'] === 'acme/fresh' && $rows[0]['name'] === 'demo' && $rows[0]['version'] === 'v0.0.1' && $rows[0]['file'] === $fresh['path'] . DIRECTORY_SEPARATOR . 'aamio-addon.php', 'Composer\'s answer is read through getInstalledPackagesByType, getInstallPath and getPrettyVersion');
+        $check(count($rows) === 1 && $rows[0]['package'] === 'acme/fresh' && $rows[0]['name'] === 'demo' && $rows[0]['version'] === '0.0.1' && $rows[0]['file'] === $fresh['path'] . DIRECTORY_SEPARATOR . 'aamio-addon.php', 'Composer\'s answer is read through getInstalledPackagesByType, getInstallPath and getPrettyVersion, and the tag\'s v comes off the version');
         \Composer\InstalledVersions::$packages = [];
     }
 

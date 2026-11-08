@@ -164,6 +164,14 @@ final class Addons
     }
 
     /**
+     * A version as the add-on states it: Composer's pretty version carries the tag's leading v, the add-on's own does not, and `list` and `enable` should agree.
+     */
+    private static function plainVersion(?string $version): ?string
+    {
+        return is_string($version) ? (string) preg_replace('/^v(?=[0-9])/', '', $version) : $version;
+    }
+
+    /**
      * Every add-on installed beside aamio, from its metadata and without running any of it.
      *
      * @return list<array{package: string, version: ?string, name: ?string, file: string}>
@@ -177,7 +185,7 @@ final class Addons
                 foreach (\Composer\InstalledVersions::getInstalledPackagesByType(self::TYPE) as $package) {
                     $path = \Composer\InstalledVersions::getInstallPath($package);
                     if ($path !== null) {
-                        $packages[] = ['package' => $package, 'version' => \Composer\InstalledVersions::getPrettyVersion($package), 'path' => $path];
+                        $packages[] = ['package' => $package, 'version' => self::plainVersion(\Composer\InstalledVersions::getPrettyVersion($package)), 'path' => $path];
                     }
                 }
             }
