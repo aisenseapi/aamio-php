@@ -28,6 +28,9 @@ not what moved in the source.
   error past 64 KB is refused the same whether the process was still writing
   or had already exited. The package runs on PHP 8.1.0 to 8.1.2 too, as
   Ubuntu 22.04 ships them.
+- `Codec::base32('')` is the empty string on PHP 8.1 as on 8.2 and later,
+  where it was `aa`: `str_split('')` gives one empty element there. Nothing in
+  the client encodes an empty string, so no address was affected.
 - aisenseapi/aamio-domain-keys 0.2.0 is on contract 2: the same commands and
   the same tool, with the check in a process of its own, and its `domains.json`
   becomes the core's list at the first command. It requires this version.

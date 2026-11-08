@@ -40,6 +40,11 @@ final class Codec
     /** RFC 4648 base32, lowercased, no padding. The standard library has none. */
     public static function base32(string $bytes): string
     {
+        if ($bytes === '') {
+            // PHP 8.1 gives str_split('') one empty element, which the loop
+            // below would take for a byte and encode as "aa"; 8.2 gives none.
+            return '';
+        }
         $alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
         $out = '';
         $buffer = 0;

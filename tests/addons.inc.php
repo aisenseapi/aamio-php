@@ -564,6 +564,8 @@ echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "argu
     $check($ran('demo2') === "probe probe\n", 'enable asked the process who it is, and nothing else of it ran');
     $check($row['enabled'] === true && $row['contract'] === 2 && $commands === ['allow', 'bytes', 'check', 'crash', 'fail', 'file', 'flood', 'forget', 'garbage', 'grumble', 'list', 'local', 'mutter', 'noisy', 'ping', 'sleep', 'spill'] && $row['mcp_tools'] === ['aamio_addon_demo2_ping', 'aamio_addon_demo2_check', 'aamio_addon_demo2_sleep', 'aamio_addon_demo2_flood', 'aamio_addon_demo2_noisy', 'aamio_addon_demo2_spill', 'aamio_addon_demo2_grumble', 'aamio_addon_demo2_mutter'], "the manifest's commands and the three the core gives an add-on with hosts, and its tools");
     $check(str_contains($said['note'], 'a process of its own') && str_contains($said['note'], "never the home's key") && $enabledFile() === ['enabled' => ['acme/demo2']], 'the note says what it means, and the choice is recorded by package');
+    $again = Addons::enable('demo2');
+    $check(str_contains($again['note'], 'nothing of it ran now') && !str_contains($again['note'], 'just now') && $ran('demo2') === "probe probe\n", 'enabling it again runs no probe, and says so');
 
     // The command line, from a process of its own, with Composer standing in.
     $standIn = $folder . DIRECTORY_SEPARATOR . 'InstalledVersions.php';

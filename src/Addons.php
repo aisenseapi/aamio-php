@@ -389,6 +389,7 @@ final class Addons
         try {
             $names = self::enabled($home);
             $contract = 1;
+            $probed = false;
             if (!in_array(strtolower($package), array_map('strtolower', $names), true)) {
                 [$loaded] = self::load((string) getenv('AAMIO_ADDONS'), array_merge($names, [$package]));
                 foreach ($loaded as $addon) {
@@ -397,6 +398,7 @@ final class Addons
                         // the protocol and is the add-on the manifest says.
                         AddonProcess::probe($addon);
                         $contract = 2;
+                        $probed = true;
                     }
                 }
                 self::writeEnabled($home, array_merge($names, [$package]));
@@ -418,7 +420,7 @@ final class Addons
                     $environment = $row['environment'] ?? [];
                 }
             }
-            $answer['note'] = AddonProcess::enableNote($package, $environment) . ' ' . self::RESTART;
+            $answer['note'] = AddonProcess::enableNote($package, $environment, $probed) . ' ' . self::RESTART;
         } else {
             $answer['note'] = $package . " runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. " . self::RESTART;
         }

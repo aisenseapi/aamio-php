@@ -58,7 +58,8 @@ final class AddonProcess
     /**
      * What the process gets of the environment: what the interpreter, the path, a
      * temporary directory, the locale, TLS roots, a proxy and PHP's own ini need,
-     * and nothing else. A token in the user's environment is not the add-on's to read.
+     * and nothing else. A token in the user's environment is not the add-on's to read,
+     * unless its manifest names it, and then aamio addon list says so before it is enabled.
      */
     public const ENVIRONMENT = [
         'PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR',
@@ -581,15 +582,19 @@ final class AddonProcess
 
     /**
      * What enable says of an add-on on contract 2: the same words as aamio-python and https://aamio.at/docs/addons.
+     * $probed is whether the probe ran now; it does not for an add-on that was enabled already.
      *
      * @param list<string> $environment
      */
-    public static function enableNote(string $package, array $environment): string
+    public static function enableNote(string $package, array $environment, bool $probed = true): string
     {
         $asked = $environment === [] ? '' : ', and ' . implode(', ', $environment) . ', which its manifest asks for';
+        $ran = $probed
+            ? 'enable started it once just now, before the choice was recorded, to see that it answers as its manifest says.'
+            : 'It was enabled already, and nothing of it ran now.';
 
-        return $package . ' runs here from now on, in a process of its own for each call. enable started it once just now, before the choice was recorded, '
-            . 'to see that it answers as its manifest says. A call gets its arguments, a key aamio resolved for it, the runtime\'s public key where a '
+        return $package . ' runs here from now on, in a process of its own for each call. ' . $ran . ' '
+            . 'A call gets its arguments, a key aamio resolved for it, the runtime\'s public key where a '
             . 'command asks for it, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, '
             . 'the locale, the interpreter\'s own settings, TLS roots and the proxy variables, which can carry credentials of their own' . $asked . ', and never the '
             . 'home\'s key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions.';
