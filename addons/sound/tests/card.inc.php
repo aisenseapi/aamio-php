@@ -41,10 +41,19 @@ echo "sound: the card\n";
         return null;
     };
 
-    $check(Card::make($address) === 'aamio:scope/' . $address && Card::read(Card::make($address)) === ['kind' => 'scope', 'address' => $address, 'name' => null], 'a card is the address, and reads back');
+    $now = 1794150000;
+    $check(Card::make($address) === 'aamio:scope/' . $address && Card::read(Card::make($address)) === ['kind' => 'scope', 'address' => $address, 'name' => null, 'expires_at' => null], 'a card is the address, and reads back');
     $named = Card::make($address, 'rom-42');
-    $check($named === 'aamio:scope/' . $address . '?n=rom-42' && Card::read($named) === ['kind' => 'scope', 'address' => $address, 'name' => 'rom-42'], 'with a name to keep the scope under');
-    $check(strlen(Card::make($address, 'R' . str_repeat('x', 31))) === 67 && Card::make($address, '') === Card::make($address), 'the longest card is 67 bytes of the 128 a sound carries, and an empty name is no name');
+    $check($named === 'aamio:scope/' . $address . '?n=rom-42' && Card::read($named) === ['kind' => 'scope', 'address' => $address, 'name' => 'rom-42', 'expires_at' => null], 'with a name to keep the scope under');
+    $timed = Card::make($address, 'rom-42', $now + 3600);
+    $check($timed === 'aamio:scope/' . $address . '?n=rom-42&t=' . ($now + 3600) && Card::read($timed)['expires_at'] === $now + 3600 && Card::read('aamio:scope/' . $address . '?t=' . $now . '&n=rom-42')['name'] === 'rom-42', 'and the time it stops being good, in either order');
+    $check(strlen(Card::make($address, 'R' . str_repeat('x', 31), $now)) === 80 && Card::make($address, '') === Card::make($address), 'the longest card is 80 bytes of the 128 a sound carries, and an empty name is no name');
+    $badTimes = 0;
+    foreach ([-1, 12345678, 123456789012, '1794150000', true, 1.5] as $wrong) {
+        $error = $refusedFor(static fn () => Card::make($address, null, $wrong));
+        $badTimes += $error !== null && $error->reason === 'invalid_expiry' ? 1 : 0;
+    }
+    $check($badTimes === 6, 'a time that is not Unix seconds is refused');
 
     $cases = [
         ['abcdefghijklmnopqrstuvwxyz', 'a_key_not_an_address'],
@@ -88,6 +97,10 @@ echo "sound: the card\n";
         ['aamio:scope/' . $address . '?n', 'not_this_version'],
         ['aamio:scope/' . $address . '?n=bad name', 'invalid_name'],
         ['aamio:scope/' . $address . '?n=', 'invalid_name'],
+        ['aamio:scope/' . $address . '?t=soon', 'invalid_expiry'],
+        ['aamio:scope/' . $address . '?t=12345678', 'invalid_expiry'],
+        ['aamio:scope/' . $address . '?t=1&t=2', 'invalid_expiry'],
+        ['aamio:scope/' . $address . '?t=1794150000&t=1794150000', 'not_this_version'],
     ];
     $misread = [];
     foreach ($reads as [$text, $reason]) {

@@ -8,7 +8,7 @@ namespace Aamio\Sound;
  * The card a sound carries, and the rule that keeps every key out of the air.
  *
  *     aamio:scope/k7rq2m4xw5tbz3yd6ena
- *     aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42
+ *     aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000
  *
  * The address is the write capability of a scope: whoever holds it can post
  * into the scope, and only whoever holds the key can read what was posted. It
@@ -16,8 +16,12 @@ namespace Aamio\Sound;
  * scope's key and a thread's read key are 26 to 64 characters of a-z and 0-9,
  * and a card is made from exactly 20 characters of a-z and 2-7 and nothing
  * else. n is a name to keep the scope under, a hint the listener may take or
- * leave. A card this version does not read is not understood rather than read
- * in part. The same as aamio-python's aamio_sound.card.
+ * leave, and t the Unix time the card stops being good, so a recording played
+ * again later is turned down. t is not signed: whoever recorded the sound can
+ * change it and make a new sound, so it stops a recording played as it is, and
+ * a new scope for each occasion is still what stops the rest. A card this
+ * version does not read is not understood rather than read in part. The
+ * longest card is 80 bytes. The same as aamio-python's aamio_sound.card.
  */
 final class Card
 {
@@ -26,6 +30,8 @@ final class Card
     public const NAME = '/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/D';
     /** A scope key or a thread's read key, as aamio makes them. */
     public const KEY_SHAPED = '/^[a-z0-9]{26,64}$/D';
+    /** Unix seconds, as a card carries them: nine to eleven digits. */
+    public const EXPIRY = '/^[0-9]{9,11}$/D';
     public const MAX_BYTES = 128;
 
     public static function checkAddress(mixed $address): string
@@ -50,19 +56,26 @@ final class Card
         throw new Refused('invalid_name', 'The name is a hint the listeners may keep the scope under: 1 to 32 letters, digits, dots, underscores and dashes, starting with a letter or a digit. It can be left out.');
     }
 
-    /** The card for a scope's write address, or Refused. */
-    public static function make(mixed $address, mixed $name = null): string
+    /** The card for a scope's write address, good until $expires (Unix seconds) when given, or Refused. */
+    public static function make(mixed $address, mixed $name = null, mixed $expires = null): string
     {
         $address = self::checkAddress($address);
         $name = self::checkName($name);
+        $parts = $name !== null ? ['n=' . $name] : [];
+        if ($expires !== null) {
+            if (!is_int($expires) || preg_match(self::EXPIRY, (string) $expires) !== 1) {
+                throw new Refused('invalid_expiry', 'The time a card stops being good is Unix seconds, nine to eleven digits.');
+            }
+            $parts[] = 't=' . $expires;
+        }
 
-        return self::PREFIX . $address . ($name !== null ? '?n=' . $name : '');
+        return self::PREFIX . $address . ($parts !== [] ? '?' . implode('&', $parts) : '');
     }
 
     /**
      * The card in what was heard, or NotUnderstood.
      *
-     * @return array{kind: string, address: string, name: ?string}
+     * @return array{kind: string, address: string, name: ?string, expires_at: ?int}
      */
     public static function read(mixed $text): array
     {
@@ -75,22 +88,27 @@ final class Card
         if (preg_match(self::ADDRESS, $address) !== 1) {
             throw new NotUnderstood('not_a_write_address');
         }
-        $name = null;
+        $found = ['n' => null, 't' => null];
+        $seen = [];
         if ($mark !== false) {
             foreach (explode('&', substr($rest, $mark + 1)) as $part) {
                 $equals = strpos($part, '=');
                 $key = $equals === false ? $part : substr($part, 0, $equals);
-                if ($key !== 'n' || $equals === false || $name !== null) {
+                if (!array_key_exists($key, $found) || $equals === false || isset($seen[$key])) {
                     throw new NotUnderstood('not_this_version');
                 }
+                $seen[$key] = true;
                 $value = substr($part, $equals + 1);
-                if (preg_match(self::NAME, $value) !== 1) {
+                if ($key === 'n' && preg_match(self::NAME, $value) !== 1) {
                     throw new NotUnderstood('invalid_name');
                 }
-                $name = $value;
+                if ($key === 't' && preg_match(self::EXPIRY, $value) !== 1) {
+                    throw new NotUnderstood('invalid_expiry');
+                }
+                $found[$key] = $value;
             }
         }
 
-        return ['kind' => 'scope', 'address' => $address, 'name' => $name];
+        return ['kind' => 'scope', 'address' => $address, 'name' => $found['n'], 'expires_at' => $found['t'] !== null ? (int) $found['t'] : null];
     }
 }

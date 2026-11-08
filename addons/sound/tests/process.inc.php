@@ -34,6 +34,7 @@ echo "sound: the process\n";
     $address = 'k7rq2m4xw5tbz3yd6ena';
     $scopeKey = 'abcdefghijklmnopqrstuvwxyz';
     $readKey = '0123456789abcdefghijklmnop';
+    $now = 1794150000;
     $folder = $root . DIRECTORY_SEPARATOR . 'sound';
     mkdir($folder, 0700, true);
     $quiet = static function (string $line): void {
@@ -45,15 +46,15 @@ echo "sound: the process\n";
     };
     $request = static fn (string $kind, string $call, array $arguments = []): array => ['aamio_addon' => 2, 'kind' => $kind, 'name' => $call, 'arguments' => $arguments, 'subject' => null, 'own_key' => null, 'state_dir' => null, 'deadline_seconds' => 90, 'aamio' => ['version' => '0.3.13', 'runtime' => 'php']];
     /** aisenseapi.com, a speaker and a microphone, as the process sees them, and what each was asked. */
-    $world = static function (?string $text = null, ?\Throwable $aisense = null, ?\Throwable $speaker = null, ?\Throwable $microphone = null, bool $leaveNothing = false) use ($wav): object {
-        return new class ($text, $aisense, $speaker, $microphone, $leaveNothing, $wav(8.1), $wav(2)) {
+    $world = static function (?string $text = null, ?\Throwable $aisense = null, ?\Throwable $speaker = null, ?\Throwable $microphone = null, bool $leaveNothing = false, ?int $at = null) use ($wav, $now): object {
+        return new class ($text, $aisense, $speaker, $microphone, $leaveNothing, $wav(8.1), $wav(2), $at ?? $now) {
             public array $encoded = [];
             public array $decoded = [];
             public array $played = [];
             public array $recorded = [];
             public array $pauses = [];
 
-            public function __construct(public ?string $text, public ?\Throwable $aisense, public ?\Throwable $speaker, public ?\Throwable $microphone, public bool $leaveNothing, public string $sound, public string $recording)
+            public function __construct(public ?string $text, public ?\Throwable $aisense, public ?\Throwable $speaker, public ?\Throwable $microphone, public bool $leaveNothing, public string $sound, public string $recording, public int $at)
             {
             }
 
@@ -98,6 +99,7 @@ echo "sound: the process\n";
                     'pause' => function (float $seconds): void {
                         $this->pauses[] = $seconds;
                     },
+                    'clock' => fn (): int => $this->at,
                 ];
             }
         };
@@ -107,15 +109,20 @@ echo "sound: the process\n";
     $check($said === ['result' => ['ok' => true, 'name' => 'sound', 'version' => Process::VERSION, 'aamio_addon' => 2], 'exit_code' => 0, 'is_error' => false], 'the probe names the add-on');
     $w = $world();
     $said = Process::handle($request('command', 'card', ['address' => $address, 'name' => 'rom-42']), $w->seams());
-    $check($said['exit_code'] === 0 && $said['result']['card'] === 'aamio:scope/' . $address . '?n=rom-42' && $said['result']['bytes'] === 41 && $w->encoded === [], 'card makes the text without sound or network');
+    $check($said['exit_code'] === 0 && $said['result']['card'] === 'aamio:scope/' . $address . '?n=rom-42&t=' . ($now + 3600) && $said['result']['bytes'] === 54 && $said['result']['expires_at'] === $now + 3600 && $w->encoded === [], 'card makes the text without sound or network, good for an hour');
+    $said = Process::handle($request('command', 'card', ['address' => $address, 'valid_for' => '0']), $world()->seams());
+    $check(($said['result']['card'] ?? null) === 'aamio:scope/' . $address && array_key_exists('expires_at', $said['result']) && $said['result']['expires_at'] === null, 'and 0 is a card with no end');
 
     // Broadcast.
     $w = $world();
     $said = Process::handle($request('tool', 'aamio_addon_sound_broadcast', ['address' => $address, 'name' => 'rom-42', 'repeat' => 2]), $w->seams());
     $result = $said['result'];
-    $check($said['exit_code'] === 0 && $said['is_error'] === false && $result['status'] === 'played' && $w->encoded === [['aamio:scope/' . $address . '?n=rom-42', 'audible']], 'broadcast sends the card to aisense once, audible by default');
+    $check($said['exit_code'] === 0 && $said['is_error'] === false && $result['status'] === 'played' && $w->encoded === [['aamio:scope/' . $address . '?n=rom-42&t=' . ($now + 3600), 'audible']], 'broadcast sends the card to aisense once, audible by default, good for an hour');
     $check(count($w->played) === 2 && $w->played[0][1] && $w->played[1][1] && $w->pauses === [Process::PAUSE] && !file_exists($w->played[0][0]), 'and plays it twice with a pause between, and the file is gone afterwards');
-    $check($result['duration_seconds'] === 8.1 && $result['repeat'] === 2 && $result['player'] === 'fake-player' && str_contains($result['note'], 'aamio_board_find') && str_contains($result['note'], 'new scope'), 'the answer says how long, what played it and what to do next');
+    $check($result['duration_seconds'] === 8.1 && $result['repeat'] === 2 && $result['player'] === 'fake-player' && $result['expires_at'] === $now + 3600 && str_contains($result['note'], 'aamio_board_find') && str_contains($result['note'], 'turns the card down after'), 'the answer says how long, what played it, until when, and what to do next');
+    $w = $world();
+    $said = Process::handle($request('tool', 'aamio_addon_sound_broadcast', ['address' => $address, 'valid_for' => 600]), $w->seams());
+    $check(($w->encoded[0][0] ?? null) === 'aamio:scope/' . $address . '?t=' . ($now + 600) && ($said['result']['expires_at'] ?? null) === $now + 600, 'valid_for sets the time');
     $said = Process::handle($request('command', 'broadcast', ['address' => $address, 'repeat' => '3', 'mode' => 'high']), $world()->seams());
     $check(($said['result']['repeat'] ?? null) === 3 && ($said['result']['mode'] ?? null) === 'high' && str_contains($said['result']['note'] ?? '', 'aamio board find --scope'), 'the command line has its own words, and strings for numbers');
     $refusals = [
@@ -131,6 +138,9 @@ echo "sound: the process\n";
         [['address' => $address, 'repeat' => 'two'], 'invalid_repeat'],
         [['address' => $address, 'repeat' => true], 'invalid_repeat'],
         [['address' => $address, 'out' => 5], 'invalid_out'],
+        [['address' => $address, 'valid_for' => 59], 'invalid_valid_for'],
+        [['address' => $address, 'valid_for' => 86401], 'invalid_valid_for'],
+        [['address' => $address, 'valid_for' => 'an hour'], 'invalid_valid_for'],
     ];
     $wrong = [];
     foreach ($refusals as [$arguments, $reason]) {
@@ -159,9 +169,14 @@ echo "sound: the process\n";
     $w = $world('aamio:scope/' . $address . '?n=rom-42');
     $said = Process::handle($request('tool', 'aamio_addon_sound_listen'), $w->seams());
     $result = $said['result'];
-    $check($said['exit_code'] === 0 && $result['status'] === 'heard' && $result['card'] === ['kind' => 'scope', 'address' => $address, 'name' => 'rom-42'] && $result['recorded_seconds'] === 30 && $result['recorder'] === 'fake-recorder', 'listen records 30 seconds by default and reads the card');
+    $check($said['exit_code'] === 0 && $result['status'] === 'heard' && $result['card'] === ['kind' => 'scope', 'address' => $address, 'name' => 'rom-42', 'expires_at' => null] && $result['recorded_seconds'] === 30 && $result['recorder'] === 'fake-recorder', 'listen records 30 seconds by default and reads the card');
     $check($w->decoded === [[strlen($w->recording), 'auto', false]], 'in auto mode, and the recording was gone from the disk before it was sent');
-    $check(str_contains($result['next'], 'aamio_scope_add with name rom-42 and address ' . $address) && str_contains($result['next'], 'aamio_board_post with scope rom-42') && str_contains($result['note'], 'anyone within earshot'), 'and says what to do next, and that a card heard can be anyone\'s');
+    $check(str_contains($result['next'], 'aamio_scope_add with name rom-42 and address ' . $address) && str_contains($result['next'], 'aamio_board_post with scope rom-42') && str_contains($result['note'], 'anyone within earshot') && str_contains($result['note'], 'may be a recording of any age'), 'and says what to do next, that a card heard can be anyone\'s, and that one with no end can be of any age');
+    $timed = 'aamio:scope/' . $address . '?n=rom-42&t=' . $now;
+    $said = Process::handle($request('tool', 'aamio_addon_sound_listen'), $world($timed, null, null, null, false, $now + Process::SKEW + 1)->seams());
+    $check($said['exit_code'] === 3 && $said['is_error'] === true && ($said['result']['status'] ?? null) === 'expired' && ($said['result']['card']['expires_at'] ?? null) === $now && str_contains($said['result']['fix'] ?? '', 'recording played again') && !isset($said['result']['next']), 'a card past its time is turned down, with no next steps');
+    $said = Process::handle($request('tool', 'aamio_addon_sound_listen'), $world($timed, null, null, null, false, $now + Process::SKEW)->seams());
+    $check(($said['result']['status'] ?? null) === 'heard' && str_contains($said['result']['note'] ?? '', 'It is good until'), 'and two minutes of difference between the clocks is allowed');
     $said = Process::handle($request('command', 'listen', ['seconds' => '12']), $world('aamio:scope/' . $address)->seams());
     $check(($said['result']['recorded_seconds'] ?? null) === 12 && str_contains($said['result']['next'] ?? '', 'aamio scope add heard-k7rq2m --address ' . $address), 'a card with no name gets one, in the command line\'s words');
     $bounds = 0;
@@ -296,7 +311,8 @@ echo "sound: the process\n";
     }
     $check(($tools['aamio_addon_sound_broadcast']['inputSchema']['properties']['address']['pattern'] ?? null) === '^[a-z2-7]{20}$' && str_contains($tools['aamio_addon_sound_broadcast']['description'] ?? '', 'never a key') && ($tools['aamio_addon_sound_listen']['annotations']['readOnlyHint'] ?? null) === true, 'the tools come from the manifest, with their schemas and hints');
     [$code, $out] = $cli(['addon', 'sound', 'card', $address, '--name', 'rom-42'], $home);
-    $check($code === 0 && (json_decode($out, true)['card'] ?? null) === 'aamio:scope/' . $address . '?n=rom-42', 'card runs in a process of its own');
+    $made = json_decode($out, true) ?? [];
+    $check($code === 0 && ($made['card'] ?? null) === 'aamio:scope/' . $address . '?n=rom-42&t=' . ($made['expires_at'] ?? -1) && ($made['expires_at'] ?? 0) - time() > 3500, 'card runs in a process of its own, good for an hour by the real clock');
     [$code, $out] = $cli(['addon', 'sound', 'broadcast', $scopeKey], $home);
     $check($code === 2 && (json_decode($out, true)['reason'] ?? null) === 'a_key_not_an_address', 'and a key is refused there before anything is sent');
     [$code, $out] = $cli(['addon', 'sound', 'decode', $folder . DIRECTORY_SEPARATOR . 'missing.wav'], $home);
@@ -318,9 +334,10 @@ echo "sound: the process\n";
         $out = $folder . DIRECTORY_SEPARATOR . 'live-card.wav';
         @unlink($out);
         $said = Process::handle($request('command', 'broadcast', ['address' => $address, 'name' => 'rom-42', 'out' => $out]));
-        $check(($said['result']['status'] ?? null) === 'written' && ($said['result']['duration_seconds'] ?? 0) > 7 && ($said['result']['duration_seconds'] ?? 0) < 12, 'live: aisense makes the card into a sound of 7 to 11 seconds', json_encode($said['result']));
+        $made = $said['result'];
+        $check(($made['status'] ?? null) === 'written' && ($made['duration_seconds'] ?? 0) > 7 && ($made['duration_seconds'] ?? 0) <= 12.5, 'live: aisense makes the card into a sound of 7 to 12 seconds', json_encode($made));
         $said = Process::handle($request('tool', 'aamio_addon_sound_decode', ['file' => $out]));
-        $check(($said['result']['card'] ?? null) === ['kind' => 'scope', 'address' => $address, 'name' => 'rom-42'] && ($said['result']['corrected_bits'] ?? null) === 0, 'live: and reads the same sound back as the same card', json_encode($said['result']));
+        $check(($said['result']['card'] ?? null) === ['kind' => 'scope', 'address' => $address, 'name' => 'rom-42', 'expires_at' => $made['expires_at'] ?? -1] && ($said['result']['corrected_bits'] ?? null) === 0, 'live: and reads the same sound back as the same card', json_encode($said['result']));
         $silence = $folder . DIRECTORY_SEPARATOR . 'silence.wav';
         file_put_contents($silence, $wav(3));
         $said = Process::handle($request('tool', 'aamio_addon_sound_decode', ['file' => $silence]));

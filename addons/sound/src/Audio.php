@@ -156,6 +156,9 @@ final class Audio
         if ($failed !== []) {
             throw new Unreachable('recorder_failed', 'Nothing was recorded: ' . implode('; ', $failed) . '. Check that a microphone is connected and that this app may use it: macOS asks once for the app the agent runs in, Windows has it under the privacy settings for desktop apps.');
         }
-        throw new Unreachable('no_recorder', 'Nothing on this machine records from the microphone: install sox, or alsa-utils (arecord) or ffmpeg on Linux, or record the sound another way and read the file with aamio addon sound decode FILE (aamio_addon_sound_decode).');
+        $install = ($platform ?? self::platform()) === 'win32'
+            ? 'On Windows, SoX comes with winget install ChrisBagwell.SoX, and is found once the terminal is started again'
+            : 'Install sox, or alsa-utils (arecord) or ffmpeg on Linux';
+        throw new Unreachable('no_recorder', 'Nothing on this machine records from the microphone. ' . $install . ', or record the sound another way and read the file with aamio addon sound decode FILE (aamio_addon_sound_decode).');
     }
 }
