@@ -212,6 +212,37 @@ require __DIR__ . '/mcp-revision.inc.php';
 
 require dirname(__DIR__) . '/addons/domain-keys/tests/format.inc.php';
 
+echo "sources\n";
+// The package says PHP >=8.1, and 8.1.0 to 8.1.2, as Ubuntu 22.04 ships, refuse never
+// on an arrow function (GH-7900): the sources are scanned for that, and for syntax and
+// functions later series brought, so that no interpreter of that series is needed to
+// catch it again. A run on the oldest series before a release is still the proof.
+$sources = [];
+foreach (['src', 'bin', 'addons', 'examples'] as $part) {
+    $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator(dirname(__DIR__) . '/' . $part, FilesystemIterator::SKIP_DOTS));
+    foreach ($iterator as $file) {
+        $path = str_replace('\\', '/', $file->getPathname());
+        if ($file->isFile() && !str_contains($path, '/vendor/') && (str_ends_with($path, '.php') || basename($path) === 'aamio')) {
+            $sources[] = $path;
+        }
+    }
+}
+$later = [];
+foreach ($sources as $path) {
+    $code = (string) file_get_contents($path);
+    foreach ([
+        '/\bfn\s*\([^{};]*\)\s*:\s*\??never\b/' => 'never on an arrow function (PHP 8.1.3)',
+        '/\breadonly\s+(?:final\s+|abstract\s+)?class\b/' => 'a readonly class (PHP 8.2)',
+        '/#\[\\\\?Override\]/' => 'the Override attribute (PHP 8.3)',
+        '/\b(?:json_validate|mb_str_pad|array_find|array_find_key|array_any|array_all)\s*\(/' => 'a function PHP 8.1 does not have',
+    ] as $pattern => $what) {
+        if (preg_match($pattern, $code) === 1) {
+            $later[] = basename($path) . ': ' . $what;
+        }
+    }
+}
+$check(count($sources) > 10 && $later === [], 'the sources use nothing PHP 8.1.0 lacks' . ($later === [] ? '' : ': ' . implode('; ', $later)));
+
 echo "\n$passed passed, $failed failed\n";
 exit($failed === 0 ? 0 : 1);
 

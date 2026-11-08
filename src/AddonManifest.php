@@ -36,7 +36,10 @@ final class AddonManifest implements Addon
     /** @param array<string, mixed> $data */
     public function __construct(public readonly ?string $package, public readonly string $dir, public readonly string $path, array $data, public readonly string $fix)
     {
-        $wrong = fn (string $what): never => throw new \RuntimeException($this->label() . ' cannot be used as an add-on: ' . $what . '. Reinstall it, or ' . $fix . ' to go on without it.');
+        // A closure, not an arrow function: PHP 8.1.0 to 8.1.2, as Ubuntu 22.04 ships, refuse never on an arrow function (GH-7900).
+        $wrong = function (string $what) use ($fix): never {
+            throw new \RuntimeException($this->label() . ' cannot be used as an add-on: ' . $what . '. Reinstall it, or ' . $fix . ' to go on without it.');
+        };
         $name = $data['name'] ?? null;
         if (!is_string($name) || preg_match('/^[a-z0-9][a-z0-9_-]{0,31}$/', $name) !== 1) {
             $wrong('its manifest has no name of 1 to 32 characters of a-z, 0-9, dash and underscore');

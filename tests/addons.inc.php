@@ -483,6 +483,9 @@ return new ThrowsInCommands();
                 'fail' => ['help' => 'a refusal'],
                 'flood' => ['help' => 'writes without end'],
                 'noisy' => ['help' => 'complains without end'],
+                'spill' => ['help' => 'a big answer, at once'],
+                'grumble' => ['help' => 'too much on standard error, at once'],
+                'mutter' => ['help' => 'exactly the limit on standard error'],
             ],
             'tools' => [
                 ['name' => 'aamio_addon_' . $name . '_ping', 'description' => 'answers pong', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
@@ -490,6 +493,9 @@ return new ThrowsInCommands();
                 ['name' => 'aamio_addon_' . $name . '_sleep', 'description' => 'never answers', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
                 ['name' => 'aamio_addon_' . $name . '_flood', 'description' => 'writes without end', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
                 ['name' => 'aamio_addon_' . $name . '_noisy', 'description' => 'complains without end', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
+                ['name' => 'aamio_addon_' . $name . '_spill', 'description' => 'a big answer, at once', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
+                ['name' => 'aamio_addon_' . $name . '_grumble', 'description' => 'too much on standard error, at once', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
+                ['name' => 'aamio_addon_' . $name . '_mutter', 'description' => 'exactly the limit on standard error', 'inputSchema' => ['type' => 'object', 'properties' => new \stdClass(), 'additionalProperties' => false]],
             ],
         ];
     };
@@ -503,6 +509,10 @@ return new ThrowsInCommands();
 $request = json_decode((string) stream_get_contents(STDIN), true);
 file_put_contents(__DIR__ . "/process.ran", $request["kind"] . " " . $request["name"] . "\n", FILE_APPEND);
 if ($request["kind"] === "probe") {
+    if (getenv("AAMIO_TEST_PASSTHRU") !== false) {
+        echo json_encode(["result" => ["ok" => false, "reason" => "addon_failed", "fix" => "the probe was given AAMIO_TEST_PASSTHRU, which only a call may get"]]);
+        exit(0);
+    }
     echo json_encode(["result" => ["ok" => true, "name" => ' . var_export($name, true) . ', "version" => ' . var_export($version, true) . ', "aamio_addon" => 2]]);
     exit(0);
 }
@@ -515,6 +525,9 @@ if ($short === "bytes") { echo json_encode(["raw" => base64_encode("raw\n")]); e
 if ($short === "fail") { echo json_encode(["result" => ["status" => "no", "fix" => "x"], "exit_code" => 3, "is_error" => true, "stderr" => "a note from the add-on"]); exit(3); }
 if ($short === "flood") { echo str_repeat("x", 5000); flush(); sleep(5); exit(0); }
 if ($short === "noisy") { fwrite(STDERR, str_repeat("y", 5000)); sleep(5); exit(0); }
+if ($short === "spill") { echo str_repeat("x", 5000); exit(0); }
+if ($short === "grumble") { fwrite(STDERR, str_repeat("y", 5000)); echo json_encode(["result" => ["pong" => true]]); exit(0); }
+if ($short === "mutter") { fwrite(STDERR, str_repeat("y", 500)); echo json_encode(["result" => ["pong" => true]]); exit(0); }
 $env = static fn (string $key) => getenv($key) === false ? null : getenv($key);
 echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "arguments" => $request["arguments"], "subject" => $request["subject"], "own_key" => $request["own_key"], "state_dir" => $request["state_dir"], "home_env" => $env("AAMIO_HOME"), "addon_env" => $env("AAMIO_ADDON"), "secret_env" => $env("AAMIO_TEST_SECRET"), "passthru_env" => $env("AAMIO_TEST_PASSTHRU"), "path_env" => getenv("PATH") !== false]]);
 ');
@@ -549,7 +562,7 @@ echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "argu
     $commands = $row['commands'];
     sort($commands);
     $check($ran('demo2') === "probe probe\n", 'enable asked the process who it is, and nothing else of it ran');
-    $check($row['enabled'] === true && $row['contract'] === 2 && $commands === ['allow', 'bytes', 'check', 'crash', 'fail', 'file', 'flood', 'forget', 'garbage', 'list', 'local', 'noisy', 'ping', 'sleep'] && $row['mcp_tools'] === ['aamio_addon_demo2_ping', 'aamio_addon_demo2_check', 'aamio_addon_demo2_sleep', 'aamio_addon_demo2_flood', 'aamio_addon_demo2_noisy'], "the manifest's commands and the three the core gives an add-on with hosts, and its tools");
+    $check($row['enabled'] === true && $row['contract'] === 2 && $commands === ['allow', 'bytes', 'check', 'crash', 'fail', 'file', 'flood', 'forget', 'garbage', 'grumble', 'list', 'local', 'mutter', 'noisy', 'ping', 'sleep', 'spill'] && $row['mcp_tools'] === ['aamio_addon_demo2_ping', 'aamio_addon_demo2_check', 'aamio_addon_demo2_sleep', 'aamio_addon_demo2_flood', 'aamio_addon_demo2_noisy', 'aamio_addon_demo2_spill', 'aamio_addon_demo2_grumble', 'aamio_addon_demo2_mutter'], "the manifest's commands and the three the core gives an add-on with hosts, and its tools");
     $check(str_contains($said['note'], 'a process of its own') && str_contains($said['note'], "never the home's key") && $enabledFile() === ['enabled' => ['acme/demo2']], 'the note says what it means, and the choice is recorded by package');
 
     // The command line, from a process of its own, with Composer standing in.
@@ -613,7 +626,7 @@ if (!class_exists(InstalledVersions::class, false)) {
     $check(($reply['result']['isError'] ?? null) === true && ($reply['result']['structuredContent']['reason'] ?? null) === 'addon_timeout', 'over MCP a tool that hangs is stopped at the deadline');
     $listed = $server->handle(['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/list']);
     $pong = $server->handle(['jsonrpc' => '2.0', 'id' => 3, 'method' => 'tools/call', 'params' => ['name' => 'aamio_addon_demo2_ping', 'arguments' => []]]);
-    $check(count($listed['result']['tools']) === 29 && ($pong['result']['isError'] ?? null) === false && ($pong['result']['structuredContent']['pong'] ?? null) === true, 'and the same server answers the next request');
+    $check(count($listed['result']['tools']) === 32 && ($pong['result']['isError'] ?? null) === false && ($pong['result']['structuredContent']['pong'] ?? null) === true, 'and the same server answers the next request');
     $runtime->close();
 
     // The limits hold while the process runs: a stream past either stops it, and the next call goes through.
@@ -626,6 +639,13 @@ if (!class_exists(InstalledVersions::class, false)) {
     $started = microtime(true);
     $noisy = Addons::dispatch($runtime, 'aamio_addon_demo2_noisy', [], null)['structuredContent'] ?? [];
     $check(($noisy['reason'] ?? null) === 'addon_failed' && str_contains($noisy['fix'] ?? '', 'standard error') && microtime(true) - $started < 4, 'and so is one that writes past the limit on standard error');
+    // The same limits when the process has exited before the next look.
+    $spill = Addons::dispatch($runtime, 'aamio_addon_demo2_spill', [], null)['structuredContent'] ?? [];
+    $check(($spill['reason'] ?? null) === 'addon_failed' && str_contains($spill['fix'] ?? '', 'bytes an answer may be'), 'an answer past the limit from a process that exited at once is refused the same');
+    $grumble = Addons::dispatch($runtime, 'aamio_addon_demo2_grumble', [], null)['structuredContent'] ?? [];
+    $check(($grumble['reason'] ?? null) === 'addon_failed' && str_contains($grumble['fix'] ?? '', 'standard error'), 'and so is a valid answer beside too much standard error');
+    $mutter = Addons::dispatch($runtime, 'aamio_addon_demo2_mutter', [], null)['structuredContent'] ?? [];
+    $check(($mutter['pong'] ?? null) === true, 'exactly the limit on standard error passes');
     $pongAgain = Addons::dispatch($runtime, 'aamio_addon_demo2_ping', [], null)['structuredContent'] ?? [];
     $check(($pongAgain['pong'] ?? null) === true, 'and the next call goes through');
     $runtime->close();
@@ -638,7 +658,19 @@ if (!class_exists(InstalledVersions::class, false)) {
     Addons::useInstalled([$two, $passthru, $bad]);
     Addons::reset();
     putenv('AAMIO_TEST_PASSTHRU=yes please');
-    $said = Addons::enable('demoenv');
+    $passive = null;
+    foreach (Addons::describe()['addons'] as $candidate) {
+        if ($candidate['name'] === 'demoenv') {
+            $passive = $candidate;
+        }
+    }
+    $check(($passive['enabled'] ?? null) === false && ($passive['environment'] ?? null) === ['AAMIO_TEST_PASSTHRU'] && $ran('demo-env') === '', 'the list says which variables an add-on asks for before it is enabled, running nothing');
+    // The fake process refuses the probe when it is given the variable: the probe gets the short list alone.
+    $said = ['addons' => []];
+    $threw = $refused(static function () use (&$said): void {
+        $said = Addons::enable('demoenv');
+    });
+    $check($threw === null && $ran('demo-env') === "probe probe\n" && str_contains($said['note'] ?? '', 'AAMIO_TEST_PASSTHRU, which its manifest asks for'), 'the probe ran without it, and the note names it' . ($threw === null ? '' : ': ' . $threw));
     $rowEnv = null;
     foreach ($said['addons'] as $candidate) {
         if ($candidate['name'] === 'demoenv') {

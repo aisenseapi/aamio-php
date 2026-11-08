@@ -17,12 +17,15 @@ namespace Aamio;
  * user's consent to the websites an add-on may read. The add-on gets the call's
  * arguments, a subject the core resolved to a key, a directory of its own, and a
  * short list of environment variables rather than the user's. It is not a
- * sandbox: the process runs as the same user and reads what the user reads. What
- * it gives is that the key is never in the add-on's memory, that nothing an
- * add-on answers changes state here, that an add-on that hangs or crashes does
- * not take the runtime with it, and that list, help and enable run none of the
- * add-on's code. It is for add-ons the user trusts. The same as aamio-python's
- * addon_process.py, and written up on https://aamio.at/docs/addons.
+ * sandbox: the process runs as the same user, with the user's own file
+ * permissions, and reads what the user reads. What it gives is that the core
+ * never sends the home's key, only the public key a call asks for, that nothing
+ * an add-on answers changes state here, that an add-on that hangs or crashes
+ * does not take the runtime with it, and that list and help run none of the
+ * add-on's code: enable starts it once, before the choice is recorded, to see
+ * that it answers as its manifest says. It is for add-ons the user trusts. The
+ * same as aamio-python's addon_process.py, and written up on
+ * https://aamio.at/docs/addons.
  */
 final class AddonProcess
 {
@@ -412,7 +415,7 @@ final class AddonProcess
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function run(AddonManifest $manifest, string $kind, string $name, array $arguments, ?array $subject = null, ?string $ownKey = null, ?string $stateDir = null, ?callable $stderr = null, ?int $deadline = null): array
+    public static function run(AddonManifest $manifest, string $kind, string $name, array $arguments, ?array $subject = null, ?string $ownKey = null, ?string $stateDir = null, ?callable $stderr = null, ?int $deadline = null, bool $declared = true): array
     {
         $deadline ??= $manifest->deadline;
         $request = [
@@ -455,10 +458,11 @@ final class AddonProcess
             return self::failure($manifest, 'addon_failed', 'the request to the add-on ' . $manifest->name . ' could not be written to a private directory of its own. Check the temporary directory.');
         }
         // What the process gets of the environment: the short list, and what
-        // its manifest declared it reads, when set. Never the home or the rest.
+        // its manifest declared it reads, when set and when this is a call and
+        // not the probe at enable. Never the home or the rest.
         $environment = ['AAMIO_ADDON' => '2'];
         foreach (getenv() as $key => $value) {
-            if (in_array(strtoupper((string) $key), self::ENVIRONMENT, true) || in_array((string) $key, $manifest->environment, true)) {
+            if (in_array(strtoupper((string) $key), self::ENVIRONMENT, true) || ($declared && in_array((string) $key, $manifest->environment, true))) {
                 $environment[$key] = $value;
             }
         }
@@ -502,12 +506,16 @@ final class AddonProcess
         $out = (string) @file_get_contents($files['out'], false, null, 0, self::$maxAnswerBytes + 1);
         $err = (string) @file_get_contents($files['err'], false, null, 0, self::$maxStderrBytes + 1);
         $clean();
-        $err = substr($err, 0, self::$maxStderrBytes);
-        if ($stderr !== null && $err !== '') {
-            $stderr($err);
-        }
+        // The same limits whether the process was slow or had exited before the
+        // next look: past either, the answer is refused and nothing is relayed.
         if (strlen($out) > self::$maxAnswerBytes) {
             return self::failure($manifest, 'addon_failed', 'the add-on ' . $manifest->name . ' answered with more than the ' . self::$maxAnswerBytes . ' bytes an answer may be. ' . $stop);
+        }
+        if (strlen($err) > self::$maxStderrBytes) {
+            return self::failure($manifest, 'addon_failed', 'the add-on ' . $manifest->name . ' wrote more than ' . self::$maxStderrBytes . ' bytes to standard error. ' . $stop);
+        }
+        if ($stderr !== null && $err !== '') {
+            $stderr($err);
         }
         $answer = json_decode($out, true);
         if (!is_array($answer) || array_is_list($answer) && $answer !== []) {
@@ -550,10 +558,16 @@ final class AddonProcess
         }
     }
 
-    /** What enable asks before anything is recorded: the process starts, speaks the protocol, and is the add-on the manifest says. */
+    /**
+     * What enable asks before anything is recorded: the process starts, speaks
+     * the protocol, and is the add-on the manifest says. It runs with the short
+     * list of environment variables and none the manifest asks for: the user
+     * sees those names in aamio addon list before anything of the add-on has
+     * run, and the first call is what gets them.
+     */
     public static function probe(AddonManifest $manifest): void
     {
-        $answer = self::run($manifest, 'probe', 'probe', [], null, null, null, null, min($manifest->deadline, self::PROBE_DEADLINE));
+        $answer = self::run($manifest, 'probe', 'probe', [], null, null, null, null, min($manifest->deadline, self::PROBE_DEADLINE), false);
         $said = $answer['result'] ?? null;
         if (!is_array($said) || ($said['ok'] ?? null) !== true) {
             $reason = is_array($said) ? ($said['reason'] ?? null) : null;
@@ -563,6 +577,22 @@ final class AddonProcess
         if (($said['aamio_addon'] ?? null) !== 2 || ($said['name'] ?? null) !== $manifest->name || ($said['version'] ?? null) !== $manifest->version) {
             throw new \RuntimeException('the add-on ' . $manifest->name . ' answered the probe as ' . json_encode($said['name'] ?? null) . ' ' . json_encode($said['version'] ?? null) . ' on contract ' . json_encode($said['aamio_addon'] ?? null) . ', and its manifest says ' . $manifest->name . ' ' . $manifest->version . ' on contract 2. Reinstall it, or ' . $manifest->fix . ' to go on without it.');
         }
+    }
+
+    /**
+     * What enable says of an add-on on contract 2: the same words as aamio-python and https://aamio.at/docs/addons.
+     *
+     * @param list<string> $environment
+     */
+    public static function enableNote(string $package, array $environment): string
+    {
+        $asked = $environment === [] ? '' : ', and ' . implode(', ', $environment) . ', which its manifest asks for';
+
+        return $package . ' runs here from now on, in a process of its own for each call. enable started it once just now, before the choice was recorded, '
+            . 'to see that it answers as its manifest says. A call gets its arguments, a key aamio resolved for it, the runtime\'s public key where a '
+            . 'command asks for it, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, '
+            . 'the locale, the interpreter\'s own settings, TLS roots and the proxy variables, which can carry credentials of their own' . $asked . ', and never the '
+            . 'home\'s key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions.';
     }
 
     /** A directory of the add-on's own under the home, made on first use, private to the user. */

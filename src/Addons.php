@@ -411,9 +411,17 @@ final class Addons
             self::unlock($lock);
         }
         $answer = self::describe($home);
-        $answer['note'] = $contract === 2
-            ? $package . " runs here from now on, in a process of its own for each call, with the call's arguments, a key aamio resolves for it and a directory of its own, and never the home's key. It runs with your own file permissions, and enable started it once just now to check that it answers. " . self::RESTART
-            : $package . " runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. " . self::RESTART;
+        if ($contract === 2) {
+            $environment = [];
+            foreach ($answer['addons'] as $row) {
+                if (($row['package'] ?? null) !== null && strtolower($row['package']) === strtolower($package)) {
+                    $environment = $row['environment'] ?? [];
+                }
+            }
+            $answer['note'] = AddonProcess::enableNote($package, $environment) . ' ' . self::RESTART;
+        } else {
+            $answer['note'] = $package . " runs here from now on, in aamio's own process and with its key and home: it can do what aamio itself can. " . self::RESTART;
+        }
 
         return $answer;
     }
@@ -489,7 +497,12 @@ final class Addons
             // Which contract, from the manifest or its absence, running nothing; a
             // manifest for a contract this aamio does not know is this row's error.
             try {
-                $entry['contract'] = AddonProcess::readManifest($row['dir'], $row['package'], 'aamio addon disable ' . $row['package']) !== null ? 2 : 1;
+                $manifest = AddonProcess::readManifest($row['dir'], $row['package'], 'aamio addon disable ' . $row['package']);
+                $entry['contract'] = $manifest !== null ? 2 : 1;
+                if ($manifest !== null && $manifest->environment !== []) {
+                    // Said before the add-on is enabled: which variables it asks for, by name.
+                    $entry['environment'] = $manifest->environment;
+                }
             } catch (\RuntimeException $failure) {
                 $entry['error'] = $failure->getMessage();
             }
