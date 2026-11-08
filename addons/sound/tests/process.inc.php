@@ -22,6 +22,7 @@ use Aamio\Addons;
 use Aamio\McpServer;
 use Aamio\Runtime;
 use Aamio\Sound\Audio;
+use Aamio\Sound\Codec;
 use Aamio\Sound\NothingHeard;
 use Aamio\Sound\Process;
 use Aamio\Sound\Refused;
@@ -51,6 +52,7 @@ echo "sound: the process\n";
             public array $encoded = [];
             public array $decoded = [];
             public array $played = [];
+            public array $sounds = [];
             public array $recorded = [];
             public array $pauses = [];
 
@@ -79,6 +81,7 @@ echo "sound: the process\n";
                     },
                     'play' => function (string $path): string {
                         $this->played[] = [$path, file_exists($path)];
+                        $this->sounds[] = (string) @file_get_contents($path);
                         if ($this->speaker !== null) {
                             throw $this->speaker;
                         }
@@ -160,8 +163,11 @@ echo "sound: the process\n";
     $check(($said['result']['reason'] ?? null) === 'out_exists' && file_get_contents($out) === 'mine', 'a file that is there is left as it is');
     $said = Process::handle($request('command', 'broadcast', ['address' => $address, 'out' => $folder . DIRECTORY_SEPARATOR . 'nowhere' . DIRECTORY_SEPARATOR . 'card.wav']), $world()->seams());
     $check(($said['result']['reason'] ?? null) === 'out_folder_missing', 'and a folder that is not there is said');
-    $said = Process::handle($request('tool', 'aamio_addon_sound_broadcast', ['address' => $address]), $world(null, new Unreachable('rate_limited', 'Try again after 3600 seconds.', '3600'))->seams());
-    $check($said['exit_code'] === 5 && $said['result'] === ['status' => 'unreachable', 'reason' => 'rate_limited', 'fix' => 'Try again after 3600 seconds.', 'retry_after' => '3600'], 'aisense at its limit is unreachable, with when to try again');
+    $w = $world(null, new Unreachable('rate_limited', 'Try again after 3600 seconds.', '3600'));
+    $said = Process::handle($request('tool', 'aamio_addon_sound_broadcast', ['address' => $address]), $w->seams());
+    $result = $said['result'];
+    $check($said['exit_code'] === 0 && ($result['status'] ?? null) === 'played' && ($result['engine'] ?? null) === 'local' && ($result['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'rate_limited'] && str_contains($result['engine_note'] ?? '', 'could not be reached (rate_limited)'), 'aisense at its limit: the sound is made here instead, and the answer says so');
+    $check(count($w->encoded) === 1 && ($w->sounds[0] ?? '') === Codec::encode($result['card'], 'audible'), 'aisense was asked once, and the sound it would have made was played');
     $said = Process::handle($request('tool', 'aamio_addon_sound_broadcast', ['address' => $address]), $world(null, null, new Unreachable('no_player', 'Nothing on this machine plays a sound file.'))->seams());
     $check($said['exit_code'] === 5 && ($said['result']['reason'] ?? null) === 'no_player', 'and so is a machine with no player');
 
@@ -194,6 +200,40 @@ echo "sound: the process\n";
     $check($said['exit_code'] === 5 && ($said['result']['reason'] ?? null) === 'no_recorder', 'no recorder is unreachable');
     $said = Process::handle($request('tool', 'aamio_addon_sound_listen'), $world(null, null, null, null, true)->seams());
     $check($said['exit_code'] === 5 && ($said['result']['reason'] ?? null) === 'recorder_failed', 'and a recorder that leaves nothing is said');
+
+    // The engine.
+    $timed = 'aamio:scope/' . $address . '?n=rom-42&t=' . ($now + 3600);
+    $w = $world();
+    $said = Process::handle($request('tool', 'aamio_addon_sound_broadcast', ['address' => $address, 'name' => 'rom-42', 'engine' => 'local']), $w->seams());
+    $result = $said['result'];
+    $check($said['exit_code'] === 0 && ($result['engine'] ?? null) === 'local' && !isset($result['fallback']) && $w->encoded === [] && ($w->sounds[0] ?? '') === Codec::encode($result['card'], 'audible'), 'the local engine makes the sound here, the same as aisense would, and sends nothing');
+    $w = $world();
+    $w->recording = Codec::encode($timed, 'high');
+    $said = Process::handle($request('tool', 'aamio_addon_sound_listen', ['engine' => 'local']), $w->seams());
+    $result = $said['result'];
+    $check($said['exit_code'] === 0 && ($result['status'] ?? null) === 'heard' && ($result['engine'] ?? null) === 'local' && ($result['mode'] ?? null) === 'high' && ($result['card']['name'] ?? null) === 'rom-42' && $w->decoded === [], 'and reads a recording here, in its own range');
+    $w = $world(null, new Unreachable('service_unreachable', 'aisenseapi.com could not be reached.'));
+    $w->recording = Codec::encode($timed, 'audible');
+    $said = Process::handle($request('tool', 'aamio_addon_sound_listen'), $w->seams());
+    $result = $said['result'];
+    $check(($result['status'] ?? null) === 'heard' && ($result['engine'] ?? null) === 'local' && ($result['fallback']['reason'] ?? null) === 'service_unreachable' && str_contains($result['engine_note'] ?? '', 'read on this machine'), 'when aisense cannot be reached the recording is read here');
+    $said = Process::handle($request('tool', 'aamio_addon_sound_listen'), $world(null, new Unreachable('service_unreachable', 'aisenseapi.com could not be reached.'))->seams());
+    $check(($said['result']['status'] ?? null) === 'nothing_heard' && ($said['result']['engine'] ?? null) === 'local' && ($said['result']['fallback']['reason'] ?? null) === 'service_unreachable', 'and says so when nothing was heard here either');
+    $w = $world(null, new NothingHeard('No complete message was heard.'));
+    $w->recording = Codec::encode($timed, 'audible');
+    $said = Process::handle($request('tool', 'aamio_addon_sound_listen'), $w->seams());
+    $check(($said['result']['status'] ?? null) === 'nothing_heard' && ($said['result']['engine'] ?? null) === 'aisense' && !isset($said['result']['fallback']), 'what aisense heard nothing in is not read again here');
+    $odd = $folder . DIRECTORY_SEPARATOR . 'odd.wav';
+    file_put_contents($odd, Codec::wav(str_repeat("\0", 200), 22050, 1));
+    $said = Process::handle($request('tool', 'aamio_addon_sound_decode', ['file' => $odd, 'engine' => 'local']), $world()->seams());
+    $check($said['exit_code'] === 2 && ($said['result']['reason'] ?? null) === 'not_readable' && str_contains($said['result']['fix'] ?? '', '44100 or 48000') && ($said['result']['engine'] ?? null) === 'local', 'the local engine turns down a file it does not read');
+    $engines = 0;
+    foreach ([['aamio_addon_sound_broadcast', ['address' => $address, 'engine' => 'cloud']], ['aamio_addon_sound_listen', ['engine' => 'Local']], ['aamio_addon_sound_decode', ['file' => $odd, 'engine' => 1]]] as [$call, $arguments]) {
+        $w = $world();
+        $said = Process::handle($request('tool', $call, $arguments), $w->seams());
+        $engines += ($said['result']['reason'] ?? null) === 'invalid_engine' && $w->encoded === [] && $w->decoded === [] && $w->played === [] && $w->recorded === [] ? 1 : 0;
+    }
+    $check($engines === 3, 'an engine that is not one is refused before anything happens');
 
     // Decode.
     $good = $folder . DIRECTORY_SEPARATOR . 'heard.wav';
@@ -319,6 +359,12 @@ echo "sound: the process\n";
     $check($code === 2 && (json_decode($out, true)['reason'] ?? null) === 'no_such_file', 'decode says a missing file');
     [$code, $out] = $cli(['addon', 'sound', 'listen', '--seconds', '99'], $home);
     $check($code === 2 && (json_decode($out, true)['reason'] ?? null) === 'invalid_seconds' && !is_dir($home . DIRECTORY_SEPARATOR . 'addons' . DIRECTORY_SEPARATOR . 'sound'), 'a length out of bounds opens no microphone, and no command made a directory in the home');
+    $localOut = $folder . DIRECTORY_SEPARATOR . 'cli-local.wav';
+    [$code, $out] = $cli(['addon', 'sound', 'broadcast', $address, '--name', 'rom-42', '--engine', 'local', '--out', $localOut], $home);
+    $made = json_decode($out, true) ?? [];
+    [$code2, $out2] = $cli(['addon', 'sound', 'decode', $localOut, '--engine', 'local'], $home);
+    $heard = json_decode($out2, true) ?? [];
+    $check($code === 0 && ($made['engine'] ?? null) === 'local' && $code2 === 0 && ($heard['engine'] ?? null) === 'local' && ($heard['card']['name'] ?? null) === 'rom-42' && ($heard['card']['expires_at'] ?? null) === ($made['expires_at'] ?? -1), 'the local engine through the core makes and reads a card with no network');
     $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
     $server = new McpServer($runtime);
     $reply = $server->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => ['name' => 'aamio_addon_sound_broadcast', 'arguments' => ['address' => $readKey]]]);

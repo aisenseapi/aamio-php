@@ -12,7 +12,9 @@ declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/autoload.php';
 
+use Aamio\Sound\BadRecording;
 use Aamio\Sound\Card;
+use Aamio\Sound\Codec;
 use Aamio\Sound\NotUnderstood;
 use Aamio\Sound\Process;
 use Aamio\Sound\Refused;
@@ -117,3 +119,83 @@ echo "sound: the card\n";
     };
     $check(Service::isWav($wav(0.1)) && !Service::isWav('ID3 not a wav') && Process::secondsOf($wav(8.1)) === 8.1 && Process::secondsOf('nope') === null, 'a WAV is known by its header, and its length read from it');
 })();
+
+echo "sound: the codec\n";
+
+(static function () use ($check): void {
+    $card = 'aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000';
+    // sha256 of Codec::encode('Hello', mode): what aisenseapi.com made for "Hello" on 8 November 2026, byte for byte, and what aamio-python's codec makes.
+    $hello = [
+        'audible' => 'e3f6cabcf2fc98de4efdc5b69e3e2914fd061537a15f8ad3d651aa18e42ae4b3',
+        'high' => '27678826b7765fdf9ce2be8a8b48a2209c9ea5453c5bda0c8ebce47e85aeac2b',
+        'ultrasound' => '487cf8493ed3e6a72daadae4d4c74ff6ba97a8768f938f22ff745220c6f9e2ac',
+    ];
+    $same = [];
+    foreach ($hello as $mode => $sha) {
+        $same[] = hash('sha256', Codec::encode('Hello', $mode)) === $sha;
+    }
+    $check($same === [true, true, true], 'the encoder makes what aisense made, byte for byte, in all three ranges, as aamio-python does');
+    $check(bin2hex(Codec::packetBytes('Hello')) === '41530305a3465a4fab9008d748656c6c6fa49f027eea265836471d0fa69817b9f91be0dfbf' && Codec::bodyParity(1) === 16 && Codec::bodyParity(128) === 32, 'the packet is the header, the payload, the CRC and their parity');
+    $round = [];
+    foreach (Codec::MODES as $mode) {
+        $made = Codec::encode($card, $mode);
+        $got = Codec::decode($made, 'auto');
+        $round[] = ($got['data'] ?? null) === $card && ($got['mode'] ?? null) === $mode && ($got['corrected_bits'] ?? null) === 0;
+    }
+    $check($round === [true, true, true], 'a card reads back in each range, and auto finds the range');
+    $message = implode('', array_map('chr', range(0, 39)));
+    $code = Codec::rsEncode($message, 16);
+    foreach ([0, 5, 17, 33, 44, 55, 3, 9] as $position) {
+        $code[$position] = chr(ord($code[$position]) ^ 0x5A);
+    }
+    $eight = Codec::rsDecode($code, 16) === $message;
+    $code[20] = chr(ord($code[20]) ^ 1);
+    $check($eight && Codec::rsDecode($code, 16) === null && Codec::rsDecode($code, 16, [0, 5, 17, 33, 44, 55, 3, 9, 20]) === $message, 'Reed-Solomon mends eight errors, not nine, and nine with their places known');
+    $silenced = static function (int $first, int $count) use ($card): string {
+        $made = Codec::encode($card, 'audible');
+        $cut = 44 + 2 * (int) (0.25 * 48000) + 2 * 960 * $first;
+
+        return substr_replace($made, str_repeat("\0\0", 960 * $count), $cut, 2 * 960 * $count);
+    };
+    $mended = Codec::decode($silenced(112, 40), 'audible');
+    $check(($mended['data'] ?? null) === $card && ($mended['corrected_bits'] ?? 0) > 0 && Codec::decode($silenced(112, 200), 'audible') === null, 'a dropout of ten bytes is mended and said, and one of fifty lets nothing half through');
+    $check(Codec::decode(Codec::wav(str_repeat("\0\0", 48000 * 3)), 'auto') === null, 'silence holds no card');
+    $turned = [];
+    foreach ([
+        [str_repeat('ID3 not a wav at all, though long enough to be one', 2), 'uncompressed PCM16'],
+        [Codec::wav(str_repeat("\0", 100), 22050, 1), '44100 or 48000'],
+        [Codec::wav(str_repeat("\0\0", 41 * 48000)), 'at most 40 seconds'],
+        [substr(Codec::wav(str_repeat("\0\0", 480)), 0, -2), 'does not match its RIFF header'],
+    ] as [$data, $words]) {
+        try {
+            Codec::decode($data, 'auto');
+            $turned[] = false;
+        } catch (BadRecording $error) {
+            $turned[] = str_contains($error->getMessage(), $words);
+        }
+    }
+    $check($turned === [true, true, true, true], 'a file the codec does not read is turned down in aisense\'s words');
+    // A room: the card quieter and late, an echo, noise, from a fixed seed.
+    $clean = array_values(unpack('s*', substr(Codec::encode($card, 'ultrasound'), 44)));
+    $total = 12 * 48000;
+    $start = (int) (3.37 * 48000);
+    $signal = array_fill(0, $total, 0.0);
+    foreach ($clean as $i => $v) {
+        if ($start + $i < $total) {
+            $signal[$start + $i] += 0.35 * $v;
+        }
+    }
+    $delay = (int) (0.031 * 48000);
+    for ($i = $total - 1; $i >= $delay; $i--) {
+        $signal[$i] += 0.4 * $signal[$i - $delay];
+    }
+    mt_srand(8);
+    $pcm = '';
+    foreach ($signal as $x) {
+        $noise = (mt_rand() / mt_getrandmax() - 0.5) * 3000;
+        $pcm .= pack('v', max(-32768, min(32767, (int) ($x + $noise))) & 65535);
+    }
+    $got = Codec::decode(Codec::wav($pcm), 'auto');
+    $check(($got['data'] ?? null) === $card && ($got['mode'] ?? null) === 'ultrasound', 'and a card in a noisy room with an echo is heard, in its own range');
+})();
+
