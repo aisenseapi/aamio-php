@@ -214,6 +214,8 @@ require dirname(__DIR__) . '/addons/domain-keys/tests/format.inc.php';
 
 require dirname(__DIR__) . '/addons/sound/tests/card.inc.php';
 
+require dirname(__DIR__) . '/addons/qr/tests/symbol.inc.php';
+
 echo "sources\n";
 // The package says PHP >=8.1, and 8.1.0 to 8.1.2, as Ubuntu 22.04 ships, refuse never
 // on an arrow function (GH-7900): the sources are scanned for that, and for syntax and
