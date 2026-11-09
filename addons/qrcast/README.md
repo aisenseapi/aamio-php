@@ -88,7 +88,7 @@ a second, for 20 seconds by default, 5 to 60, and stops at the first card. The
 exit code is 0 shown, written or seen, 3 nothing seen, a card past its time or
 no card this version reads, 5 unreachable, and 2 invalid. The flow, with the
 core's scope and board commands, is the one in aamio-qrcast for Python:
-https://github.com/aisenseapi/aamio-python/tree/main/addons/qr.
+https://github.com/aisenseapi/aamio-python/tree/main/addons/qrcast.
 
 The add-on is on contract 2 of aamio's add-ons: the core runs it in a process
 of its own for each call, and it gets nothing of the home, no key and no
