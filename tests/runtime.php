@@ -883,6 +883,7 @@ require __DIR__ . '/resilience.inc.php';
 require __DIR__ . '/read-limit.inc.php';
 require __DIR__ . '/board-answer.inc.php';
 require __DIR__ . '/partners-inbox.inc.php';
+require __DIR__ . '/partner-names.inc.php';
 require __DIR__ . '/local-storage.inc.php';
 require __DIR__ . '/outbox-reconcile.inc.php';
 require __DIR__ . '/gate-set.inc.php';

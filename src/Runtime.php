@@ -783,6 +783,11 @@ final class Runtime
         if (!Codec::isKey($key)) {
             throw new \InvalidArgumentException('not a base64url Ed25519 public key of 32 bytes');
         }
+        foreach ($this->partners as $p) {
+            if ($p['name'] !== $name && strtolower($p['name']) === strtolower($name) && $p['key'] !== $key) {
+                throw new AmbiguousPartner(sprintf('%s is in the address book with another key, and %s differs from it only in upper and lower case, which would make a send by name a guess. Give %s exactly to replace its key, or choose another name.', $p['name'], $name, $p['name']));
+            }
+        }
         $this->partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $name && $p['key'] !== $key));
         $this->partners[] = ['name' => $name, 'key' => $key];
         $this->saveJson('partners.json', $this->partners);
@@ -870,15 +875,24 @@ final class Runtime
         return array_map(static fn (array $p): array => ['name' => $p['name'], 'key' => $p['key'], 'hash_prefix' => Keys::hashPrefixOf($p['key'])], $this->partners);
     }
 
+    /**
+     * The partner with this name: the one so named exactly, or the only one so
+     * named apart from upper and lower case. Two of those and no exact one
+     * throws AmbiguousPartner: a guess seals the message to the wrong key.
+     */
     public function partnerByName(string $name): ?array
     {
         foreach ($this->partners as $p) {
-            if (strtolower($p['name']) === strtolower($name)) {
+            if ($p['name'] === $name) {
                 return $p;
             }
         }
+        $folded = array_values(array_filter($this->partners, static fn (array $p): bool => strtolower($p['name']) === strtolower($name)));
+        if (count($folded) > 1) {
+            throw new AmbiguousPartner(sprintf('%d partners are called %s apart from upper and lower case (%s). Give the name exactly as it is in the address book, or the key.', count($folded), $name, implode(', ', array_column($folded, 'name'))));
+        }
 
-        return null;
+        return $folded[0] ?? null;
     }
 
     public function partnerByKey(?string $key): ?array
@@ -2025,16 +2039,26 @@ final class Runtime
         return ['online' => $online, 'offline' => array_values(array_filter($names, static fn (string $n): bool => !isset($seen[$n])))];
     }
 
-    /** The write address a partner currently answers on, from presence, with the key. */
-    public function addressFor(string $name): array
+    /**
+     * The write address a partner currently answers on, from presence, with the
+     * key: that partner's own record, never another's. The lookup is by name
+     * without regard to case, so with Ada and ADA in the book both came back,
+     * and the first one online was taken whichever was asked for: a message
+     * sealed to one key went to the other's inbox.
+     *
+     * @param string|array{name: string, key: string} $name a name, or the partner itself
+     */
+    public function addressFor(string|array $name): array
     {
-        $partner = $this->partnerByName($name);
+        $partner = is_array($name) ? $name : $this->partnerByName($name);
         if ($partner === null) {
             throw new \InvalidArgumentException('unknown partner: ' . $name);
         }
-        $result = $this->lookup([$name]);
+        $result = $this->lookup([$partner['name']]);
         foreach ($result['online'] as $entry) {
-            return [$entry['w'], $partner['key']];
+            if ($entry['name'] === $partner['name']) {
+                return [$entry['w'], $partner['key']];
+            }
         }
         throw new \RuntimeException($partner['name'] . ' is not online right now');
     }
@@ -2075,11 +2099,15 @@ final class Runtime
     private function recipient(string $to): array
     {
         if (Codec::isKey($to)) {
+            // The partner the key names, kept as it is: turned into its name and
+            // looked up again, it could become another partner of that name.
             $partner = $this->partnerByKey($to);
             if ($partner === null) {
                 throw new \InvalidArgumentException('key is not in partners');
             }
-            $to = $partner['name'];
+            [$w, $key] = $this->addressFor($partner);
+
+            return [$w, $key, $partner['name']];
         }
         if (Address::isW($to)) {
             $key = $this->peers[$to] ?? null;
@@ -2093,9 +2121,15 @@ final class Runtime
 
             return [$to, $key, null];
         }
-        [$w, $key] = $this->addressFor($to);
+        $partner = $this->partnerByName($to);
+        if ($partner === null) {
+            throw new \InvalidArgumentException('unknown partner: ' . $to);
+        }
+        [$w, $key] = $this->addressFor($partner);
 
-        return [$w, $key, $to];
+        // The book's own spelling, so asking presence again after a 404 or a
+        // 410 asks for this partner and no other.
+        return [$w, $key, $partner['name']];
     }
 
     /**
