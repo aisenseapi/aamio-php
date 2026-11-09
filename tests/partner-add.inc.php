@@ -138,7 +138,10 @@ $r->partnerRemove('Carol');
 $notAsked = true;
 foreach ([[], ['elicitation' => ['url' => new \stdClass()]], ['sampling' => []], new \stdClass()] as $capabilities) {
     $reply = $firstCall($server, 'carol', $capabilities);
-    $notAsked = $notAsked && ($reply['result']['resultType'] ?? null) === 'complete' && ($reply['result']['isError'] ?? false) === true && ($saidBy($reply)['error_code'] ?? null) === 'no_dialog' && str_contains((string) ($saidBy($reply)['fix'] ?? ''), 'aamio partner add carol KEY') && str_contains((string) ($saidBy($reply)['fix'] ?? ''), 'stop this server');
+    $hand = $saidBy($reply)['by_hand'] ?? [];
+    $notAsked = $notAsked && ($reply['result']['resultType'] ?? null) === 'complete' && ($reply['result']['isError'] ?? false) === true && ($saidBy($reply)['error_code'] ?? null) === 'no_dialog'
+        && str_contains((string) ($saidBy($reply)['fix'] ?? ''), 'stop this server') && ($hand['shell'] ?? null) === (PHP_OS_FAMILY === 'Windows' ? 'PowerShell' : 'sh')
+        && str_ends_with((string) ($hand['command'] ?? ''), ' partner add carol KEY') && str_contains((string) ($hand['command'] ?? ''), "--home '" . $r->home . "'");
 }
 $check($notAsked && ($firstCall($server, 'carol', ['elicitation' => []])['result']['resultType'] ?? null) === 'input_required', 'an app that does not say it can show a form is not asked and gets the command line; an empty elicitation object is form mode');
 

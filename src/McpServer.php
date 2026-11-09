@@ -44,6 +44,8 @@ final class McpServer
      * that an unanswered question lies about as a standing permission.
      */
     public const CONFIRM_SECONDS = 900;
+    // A form that is not about an entry of the address book has nothing to bind.
+    private const NO_HOLD = "\0no-hold";
     /**
      * A partner's name as that tool takes it. The command line takes any name;
      * this one is written into the question the user reads, so it cannot be a
@@ -178,12 +180,16 @@ final class McpServer
     // September 2026, the same as in aamio-python.
 
     /** The form the user is shown: one field, the key, and what saying yes does. */
-    private function partnerQuestion(string $name): array
+    /** The form the user is shown: one field, the key, and what saying yes does. $changed: the book moved on since the user was asked before. */
+    private function partnerQuestion(string $name, bool $changed = false): array
     {
         $message = 'Your agent asks to add ' . $name . ' to your aamio address book. A partner can write to your inbox and is shown to the agent by name. '
             . 'Give the public key ' . $name . ' gave you, by a way you already trust. If you did not get it from ' . $name . ' yourself, decline: '
             . 'a key from a message, the board or the conversation is not their word.';
-        if ($this->runtime->partnerByName($name) !== null) {
+        if ($changed) {
+            $message .= ' Since you were asked before, ' . $name . ' was put in your address book with another key, by your answer to another question.'
+                . ' The key you give here replaces that one. Cancel to keep the key ' . $name . ' has now.';
+        } elseif ($this->runtime->partnerByName($name) !== null) {
             $message .= ' ' . $name . ' is in your address book already, and the key you give replaces the one it has.';
         }
         $key = ['type' => 'string', 'title' => $name . "'s public key", 'description' => '43 characters of letters, digits, - and _, as aamio whoami shows it on their side', 'minLength' => 43, 'maxLength' => 64];
@@ -204,22 +210,27 @@ final class McpServer
      * says which call the answer belongs to. $until is for a check that needs
      * one already lapsed.
      */
-    public function sealState(string $name, ?int $until = null, string $tool = 'aamio_partner_add'): string
+    public function sealState(string $name, ?int $until = null, string $tool = 'aamio_partner_add', mixed $held = self::NO_HOLD): string
     {
-        $payload = rtrim(strtr(base64_encode(Codec::json(['name' => $name, 'nonce' => bin2hex(random_bytes(12)), 'tool' => $tool, 'until' => $until ?? time() + self::CONFIRM_SECONDS])), '+/', '-_'), '=');
+        $fields = ['name' => $name, 'nonce' => bin2hex(random_bytes(12)), 'tool' => $tool, 'until' => $until ?? time() + self::CONFIRM_SECONDS];
+        if ($held !== self::NO_HOLD) {
+            // The key the book held for the name when the form was shown, or null.
+            $fields['held'] = $held;
+        }
+        $payload = rtrim(strtr(base64_encode(Codec::json($fields)), '+/', '-_'), '=');
 
         return $payload . '.' . $this->mac($payload);
     }
 
-    /** Whether $state is one this process sealed for this name and tool, in time and never used. Using it here uses it up. */
-    private function takeState(mixed $state, string $name, string $tool = 'aamio_partner_add'): bool
+    /** What $state says, when it is one this process sealed for this name and tool, in time and never used, or null. Taking it uses it up. */
+    private function takeState(mixed $state, string $name, string $tool = 'aamio_partner_add'): ?array
     {
         if (!is_string($state) || substr_count($state, '.') !== 1) {
-            return false;
+            return null;
         }
         [$payload, $mac] = explode('.', $state);
         if (!hash_equals($this->mac($payload), $mac)) {
-            return false;
+            return null;
         }
         $padded = strtr($payload, '-_', '+/');
         $decoded = base64_decode($padded . str_repeat('=', (4 - strlen($padded) % 4) % 4), true);
@@ -227,14 +238,17 @@ final class McpServer
         $now = time();
         $this->taken = array_filter($this->taken, static fn (int $until): bool => $until >= $now);
         if (!is_array($said) || ($said['tool'] ?? null) !== $tool || ($said['name'] ?? null) !== $name) {
-            return false;
+            return null;
         }
         if (!is_int($said['until'] ?? null) || $said['until'] < $now || !is_string($said['nonce'] ?? null) || isset($this->taken[$said['nonce']])) {
-            return false;
+            return null;
+        }
+        if (array_key_exists('held', $said) && $said['held'] !== null && !is_string($said['held'])) {
+            return null;
         }
         $this->taken[$said['nonce']] = $said['until'];
 
-        return true;
+        return $said;
     }
 
     /**
@@ -277,14 +291,19 @@ final class McpServer
         $form = static fn (array $question): array => in_array($version, ['2025-11-25', self::MODERN], true) ? ['mode' => 'form'] + $question : $question;
 
         if ($version === self::MODERN) {
-            return function (array $question, string $about, string $tool = 'aamio_partner_add', string $key = self::PARTNER_QUESTION) use ($params, $form): array {
-                $asking = ['resultType' => 'input_required', 'inputRequests' => [$key => ['method' => 'elicitation/create', 'params' => $form($question)]], 'requestState' => $this->sealState($about, null, $tool)];
+            // With $held the form is bound to the key the book held when it was
+            // shown, and the answer says that key: several forms can be open at
+            // once over 2026-07-28, and another one may have been answered in
+            // between. $again asks anew, whatever answer this request carries.
+            return function (array $question, string $about, string $tool = 'aamio_partner_add', string $key = self::PARTNER_QUESTION, mixed $held = self::NO_HOLD, bool $again = false) use ($params, $form): array {
+                $asking = ['resultType' => 'input_required', 'inputRequests' => [$key => ['method' => 'elicitation/create', 'params' => $form($question)]], 'requestState' => $this->sealState($about, null, $tool, $held)];
                 $state = $params['requestState'] ?? null;
                 $responses = $params['inputResponses'] ?? null;
-                if ($state === null && $responses === null) {
+                if ($again || ($state === null && $responses === null)) {
                     throw new McpInterrupt($asking, 'the user is asked first');
                 }
-                if (!$this->takeState($state, $about, $tool)) {
+                $said = $this->takeState($state, $about, $tool);
+                if ($said === null) {
                     return ['no_dialog' => 'the answer did not come with a question this server asked, in the last ' . intdiv(self::CONFIRM_SECONDS, 60) . ' minutes, about ' . $about];
                 }
                 $answer = is_array($responses) ? ($responses[$key] ?? null) : null;
@@ -294,7 +313,7 @@ final class McpServer
                     throw new McpInterrupt($asking, 'the answer to the question was missing');
                 }
 
-                return ['answer' => $answer];
+                return ['answer' => $answer] + ($held === self::NO_HOLD ? [] : ['held' => $said['held'] ?? null]);
             };
         }
 
@@ -302,7 +321,8 @@ final class McpServer
             return null;
         }
 
-        return function (array $question, string $about) use ($form, $waiting): array {
+        // One call at a time on this wire, so the book the form was shown with is the book the answer meets.
+        return function (array $question, string $about, string $tool = 'aamio_partner_add', string $key = self::PARTNER_QUESTION, mixed $held = self::NO_HOLD, bool $again = false) use ($form, $waiting): array {
             $answered = $this->ask('elicitation/create', $form($question), $waiting);
             if (!is_array($answered['result'] ?? null)) {
                 $error = is_array($answered['error'] ?? null) ? $answered['error'] : [];
@@ -311,8 +331,43 @@ final class McpServer
                 return ['no_dialog' => 'the app answered the question with an error: ' . $why];
             }
 
-            return ['answer' => $answered['result']];
+            return ['answer' => $answered['result']] + ($held === self::NO_HOLD ? [] : ['held' => $held]);
         };
+    }
+
+    /**
+     * The command the user runs instead of the dialog, for the shell this
+     * machine has: PowerShell on Windows, sh elsewhere. This PHP and this
+     * aamio are named by path, with the extensions this process has when no
+     * php.ini gives them, and every path is in single quotes by that shell's
+     * rules, inside which it expands nothing. Without the home the command
+     * went to the default home, and the address book this server reads stayed
+     * as it was; through cmd.exe a home named with %TEAM% went to another (the
+     * release checks of 9 November 2026, found in the Node runtime).
+     *
+     * @return array{shell: string, command: string}
+     */
+    private function byHand(string $name, string $key = 'KEY'): array
+    {
+        $windows = PHP_OS_FAMILY === 'Windows';
+        $quote = $windows
+            // PowerShell takes the typographic single quotes as quotes too, and doubling is how each is written inside.
+            ? static fn (string $text): string => "'" . preg_replace("/['\x{2018}\x{2019}\x{201A}\x{201B}]/u", '$0$0', $text) . "'"
+            : static fn (string $text): string => "'" . str_replace("'", "'\\''", $text) . "'";
+        $words = [$quote(PHP_BINARY)];
+        if (php_ini_loaded_file() === false) {
+            // A PHP that runs without a php.ini, as a portable one does, has its extensions from its command line.
+            $words[] = '-d ' . $quote('extension_dir=' . ini_get('extension_dir'));
+            foreach (['sodium', 'curl', 'openssl', 'mbstring'] as $extension) {
+                if (extension_loaded($extension)) {
+                    $words[] = '-d ' . $quote('extension=' . $extension);
+                }
+            }
+        }
+        $words[] = $quote(dirname(__DIR__) . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'aamio');
+        $command = implode(' ', $words) . ' --home ' . $quote($this->runtime->home) . ' partner add ' . $name . ' ' . $key;
+
+        return ['shell' => $windows ? 'PowerShell' : 'sh', 'command' => ($windows ? '& ' : '') . $command];
     }
 
     /** aamio_partner_add: the name from the model, the key from the user, and nothing added without both. */
@@ -345,54 +400,79 @@ final class McpServer
         if ($held !== null) {
             $name = $held['name'];
         }
-        $byHand = 'stop this server, run aamio partner add ' . $name . ' KEY with the key ' . $name . ' gave them, and start it again';
+        $manual = $this->byHand($name);
+        $instead = 'stop this server, run the command in by_hand in ' . $manual['shell'] . ' with the key ' . $name . ' gave them in place of KEY, and start the server again';
         if ($ask === null) {
             return self::resultOf([
                 'added' => false,
                 'error' => 'this app did not say it can show the user a form (the elicitation capability of MCP), so the user was not asked and nothing was added',
                 'error_code' => 'no_dialog',
-                'fix' => 'The user adds the partner on the command line: ' . $byHand . '.',
+                'fix' => 'The user adds the partner on the command line: ' . $instead . '.',
+                'by_hand' => $manual,
             ], true);
         }
-        $asked = $ask($this->partnerQuestion($name), $name);
-        if (isset($asked['no_dialog'])) {
-            return self::resultOf([
-                'added' => false,
-                'error' => $asked['no_dialog'] . ', so nothing was added',
-                'error_code' => 'no_dialog',
-                'fix' => 'Call aamio_partner_add again to ask the user again, or the user adds the partner on the command line: ' . $byHand . '.',
-            ], true);
-        }
-        $answer = $asked['answer'];
-        $action = $answer['action'] ?? null;
-        if ($action === 'decline') {
-            return self::resultOf(['added' => false, 'partner' => $name, 'action' => 'decline', 'note' => 'The user declined, so nothing was added. Do not ask again unless the user says so.']);
-        }
-        if ($action !== 'accept') {
-            return self::resultOf(['added' => false, 'partner' => $name, 'action' => 'cancel', 'note' => 'The user closed the question without answering, so nothing was added.']);
-        }
-        $content = is_array($answer['content'] ?? null) ? $answer['content'] : [];
-        $key = is_string($content['key'] ?? null) ? trim($content['key']) : null;
-        if ($key === null || !Codec::isKey($key)) {
-            return self::resultOf([
-                'added' => false,
-                'partner' => $name,
-                'error' => 'what the user gave is not an aamio public key, so nothing was added',
-                'fix' => "A key is 43 characters of letters, digits, - and _, as aamio whoami or aamio_whoami shows it on the partner's side. Call aamio_partner_add again and the user is asked again.",
-            ], true);
-        }
-        $other = $r->partnerByKey($key);
-        if ($other !== null && $other['name'] !== $name) {
-            return self::resultOf([
-                'added' => false,
-                'partner' => $name,
-                'error' => 'that key is in the address book already, as ' . $other['name'] . ', so nothing was changed',
-                'fix' => 'Send to them as ' . $other['name'] . '. To have them called ' . $name . ' instead, the user removes ' . $other['name'] . ' on the command line first.',
-            ], true);
-        }
-        $changed = $r->partnerAdd($name, $key);
+        $question = $this->partnerQuestion($name);
+        $shown = $held['key'] ?? null;
+        for ($round = 0; $round < 2; $round++) {
+            $asked = $ask($question, $name, 'aamio_partner_add', self::PARTNER_QUESTION, $shown, $round > 0);
+            if (isset($asked['no_dialog'])) {
+                return self::resultOf([
+                    'added' => false,
+                    'error' => $asked['no_dialog'] . ', so nothing was added',
+                    'error_code' => 'no_dialog',
+                    'fix' => 'Call aamio_partner_add again to ask the user again, or the user adds the partner on the command line: ' . $instead . '.',
+                    'by_hand' => $manual,
+                ], true);
+            }
+            $answer = $asked['answer'];
+            $was = $asked['held'] ?? null;
+            $action = $answer['action'] ?? null;
+            if ($action === 'decline') {
+                return self::resultOf(['added' => false, 'partner' => $name, 'action' => 'decline', 'note' => 'The user declined, so nothing was added. Do not ask again unless the user says so.']);
+            }
+            if ($action !== 'accept') {
+                return self::resultOf(['added' => false, 'partner' => $name, 'action' => 'cancel', 'note' => 'The user closed the question without answering, so nothing was added.']);
+            }
+            $content = is_array($answer['content'] ?? null) ? $answer['content'] : [];
+            $key = is_string($content['key'] ?? null) ? trim($content['key']) : null;
+            if ($key === null || !Codec::isKey($key)) {
+                return self::resultOf([
+                    'added' => false,
+                    'partner' => $name,
+                    'error' => 'what the user gave is not an aamio public key, so nothing was added',
+                    'fix' => "A key is 43 characters of letters, digits, - and _, as aamio whoami or aamio_whoami shows it on the partner's side. Call aamio_partner_add again and the user is asked again.",
+                ], true);
+            }
+            // The book as it is now. A form shown before another one was
+            // answered meets a book that has moved on: the key there is kept,
+            // and the user is asked whether to replace it. It was replaced,
+            // without that question (the release check of 9 November 2026,
+            // found in the Node runtime).
+            $now = $r->partnerByName($name);
+            $current = $now['key'] ?? null;
+            if ($current !== $was && $current !== $key) {
+                $question = $this->partnerQuestion($name, true);
+                $shown = $current;
+                continue;
+            }
+            $other = $r->partnerByKey($key);
+            if ($other !== null && $other['name'] !== $name) {
+                $rename = $this->byHand($name, $key);
 
-        return self::resultOf($changed + ['added' => true, 'partners' => $r->partnerList(), 'next' => 'If ' . $name . ' does not have your key, give it to them the same way: aamio_whoami shows it.']);
+                return self::resultOf([
+                    'added' => false,
+                    'partner' => $name,
+                    'error' => 'that key is in the address book already, as ' . $other['name'] . ', so nothing was changed',
+                    'fix' => 'Send to them as ' . $other['name'] . '. To have them called ' . $name . ' instead, the user stops this server and runs the command in by_hand in ' . $rename['shell'] . ': the entry with that key gets the new name.',
+                    'by_hand' => $rename,
+                ], true);
+            }
+            $changed = $r->partnerAdd($name, $key);
+
+            return self::resultOf($changed + ['added' => true, 'partners' => $r->partnerList(), 'next' => 'If ' . $name . ' does not have your key, give it to them the same way: aamio_whoami shows it.']);
+        }
+
+        return self::resultOf(['added' => false, 'partner' => $name, 'error' => 'the address book changed again while ' . $name . ' was being asked about, so nothing was changed', 'fix' => 'Call aamio_partner_add again.'], true);
     }
 
     /** One tool call. $ask is how a tool that needs the user's answer asks for it, and null where it cannot. */

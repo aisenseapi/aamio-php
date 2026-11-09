@@ -788,9 +788,14 @@ final class Runtime
                 throw new AmbiguousPartner(sprintf('%s is in the address book with another key, and %s differs from it only in upper and lower case, which would make a send by name a guess. Give %s exactly to replace its key, or choose another name.', $p['name'], $name, $p['name']));
             }
         }
-        $this->partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $name && $p['key'] !== $key));
-        $this->partners[] = ['name' => $name, 'key' => $key];
-        $this->saveJson('partners.json', $this->partners);
+        // The new book counts only once partners.json holds it. Put in place
+        // first, a write that failed left this process sealing to the new key
+        // and opening its inbox to it, and the next start back on the old one
+        // (the release check of 9 November 2026, found in the Node runtime).
+        $partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $name && $p['key'] !== $key));
+        $partners[] = ['name' => $name, 'key' => $key];
+        $this->saveJson('partners.json', $partners);
+        $this->partners = $partners;
 
         return $this->inboxAfterChange('partner ' . $name . ' was added', ['partner' => $name, 'key' => $key]);
     }
@@ -808,8 +813,9 @@ final class Runtime
     public function partnerRemove(string $name): array
     {
         $known = $this->partnerByName($name);
-        $this->partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $name));
-        $this->saveJson('partners.json', $this->partners);
+        $partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $name));
+        $this->saveJson('partners.json', $partners);
+        $this->partners = $partners;
         if ($known === null) {
             $inbox = $this->channels['inbox'] ?? null;
 
@@ -832,7 +838,7 @@ final class Runtime
             return $outcome + ['inbox' => $inbox->w, 'rotated' => false, 'expire_at' => $inbox->expireAt];
         }
 
-        return $outcome + $this->rotateInbox($reason);
+        return $outcome + $this->rotateInbox($reason, true);
     }
 
     // ------------------------------------------------ what an add-on may use --
@@ -1221,7 +1227,7 @@ final class Runtime
      *
      * A rotation that fails leaves the old inbox in use, and says so.
      */
-    private function rotateInbox(string $reason): array
+    private function rotateInbox(string $reason, bool $caller = false): array
     {
         $old = $this->channels['inbox'] ?? null;
         $wanted = $this->wantedAllow();
@@ -1240,6 +1246,14 @@ final class Runtime
         }
         $fresh = new Channel('inbox', $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], $wanted ?? []);
         $outcome = ['rotated' => true, 'inbox' => $fresh->w, 'allow' => $this->allowNames($fresh->allow), 'expire_at' => $fresh->expireAt];
+        // The new inbox, and what it changes in the older ones, count only once
+        // state.json holds them. Kept when the save failed, the next read
+        // published an address whose read key this home did not have after a
+        // restart, and a partner wrote where nobody could read (the release
+        // check of 9 November 2026, found in the Node runtime).
+        $before = $this->channels;
+        $flags = array_map(static fn (Channel $c): array => [$c, $c->label, $c->muted], array_values($before));
+        $noted = $this->attention;
         if ($old !== null) {
             $this->retireChannel($old);
         }
@@ -1250,15 +1264,37 @@ final class Runtime
         // contact.
         $muted = $this->muteGenerations($reason);
         if ($old !== null) {
-            if (!$old->muted && $old->allow === []) {
-                $this->note($old, 'open', sprintf('inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)', $old->w, $old->expireAt, $reason, $fresh->w, count($fresh->allow)));
-            }
             $outcome['old_inbox'] = ['w' => $old->w, 'muted' => $old->muted, 'until' => $old->expireAt];
+            if (!$old->muted && $old->allow === []) {
+                // In the answer of the call that changed the book, since partner
+                // add on the command line is a process of its own and its notes
+                // were gone before the next read; in the notes of a read otherwise.
+                if ($caller && $fresh->allow !== []) {
+                    $who = in_array('*', $fresh->allow, true) ? 'any signed key' : 'the ' . count($fresh->allow) . ' key(s) in the address book';
+                    $outcome['old_inbox'] += ['open' => true, 'note' => sprintf('inbox %s was open to anyone, signed or not, and is still read until %d: whoever has that address can write there until then. After %s the new inbox %s takes writes from %s only.', $old->w, $old->expireAt, $reason, $fresh->w, $who)];
+                } else {
+                    $this->note($old, 'open', sprintf('inbox %s was open to anyone and is still read until %d; after %s the new inbox %s names %d key(s)', $old->w, $old->expireAt, $reason, $fresh->w, count($fresh->allow)));
+                }
+            }
         }
         if ($muted !== []) {
             $outcome['muted'] = $muted;
         }
-        $this->saveState();
+        try {
+            $this->saveState();
+        } catch (\RuntimeException $error) {
+            $this->channels = $before;
+            foreach ($flags as [$channel, $label, $wasMuted]) {
+                $channel->label = $label;
+                $channel->muted = $wasMuted;
+            }
+            $this->attention = $noted;
+            $what = 'the inbox opened again after ' . $reason . ' could not be written down (' . $error->getMessage() . '), so it is not used: a partner would write where this home cannot read after a restart. '
+                . ($old !== null ? 'The old inbox stays in use with its old list.' : 'There is no inbox until state.json can be written.');
+            $this->noteTrouble('inbox', 'rotation_failed', $what, $old?->w);
+
+            return ['rotated' => false, 'inbox' => $old?->w, 'allow' => $this->allowNames($old?->allow ?? []), 'error' => $what];
+        }
         ($this->log)(sprintf('inbox %s until %d, %s%s', $fresh->w, $fresh->expireAt, $reason, $fresh->allow !== [] ? ' (allowlist ' . count($fresh->allow) . ' keys)' : ''));
         $outcome['presence'] = $this->publishPresence(true);
 
@@ -1653,11 +1689,22 @@ final class Runtime
             throw new \RuntimeException('could not open the board inbox: ' . $opened['status'] . ' ' . json_encode($opened['body']));
         }
         $channel = new Channel('board', $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], ['*']);
+        $before = $this->channels;
+        $label = $held?->label;
         if ($held !== null) {
             $this->retireChannel($held);
         }
         $this->channels['board'] = $channel;
-        $this->saveState();
+        try {
+            $this->saveState();
+        } catch (\RuntimeException $error) {
+            // As with the inbox: an address this home cannot read after a restart is never put on a post.
+            $this->channels = $before;
+            if ($held !== null) {
+                $held->label = (string) $label;
+            }
+            throw new \RuntimeException('the board inbox could not be written down (' . $error->getMessage() . '), so nothing was posted or sent: an answer would come where this home cannot read after a restart');
+        }
         ($this->log)(sprintf('board inbox %s until %d (any key, signed only)', $channel->w, $channel->expireAt));
 
         return $channel;
@@ -2010,13 +2057,35 @@ final class Runtime
 
     // ------------------------------------------------------------- lookup --
 
+    /**
+     * Which partners are reachable now, and where. A name is chosen as a send
+     * chooses it: exactly, or apart from case when only one partner is so
+     * named, and AmbiguousPartner when two are. Matched without regard to
+     * case, ADA brought Ada back as well, and a caller that took the first
+     * address answered the wrong partner (the release check of 9 November
+     * 2026, found in the Node runtime). A name that is nobody's is said in
+     * unknown, and only the partners asked for are answered for.
+     */
     public function lookup(?array $names = null, int $wait = 0): array
     {
-        $wanted = $names ? array_map('strtolower', array_map('strval', $names)) : null;
-        $partners = $wanted === null ? $this->partners : array_values(array_filter($this->partners, static fn (array $p): bool => in_array(strtolower($p['name']), $wanted, true)));
-        if ($partners === []) {
-            return ['online' => [], 'offline' => [], 'error' => 'no partners to look up'];
+        $unknown = [];
+        if ($names) {
+            $partners = [];
+            foreach ($names as $asked) {
+                $partner = $this->partnerByName((string) $asked);
+                if ($partner === null) {
+                    $unknown[] = (string) $asked;
+                } elseif (!in_array($partner['key'], array_column($partners, 'key'), true)) {
+                    $partners[] = $partner;
+                }
+            }
+        } else {
+            $partners = $this->partners;
         }
+        if ($partners === []) {
+            return ['online' => [], 'offline' => [], 'error' => 'no partners to look up'] + ($unknown !== [] ? ['unknown' => $unknown] : []);
+        }
+        $askedKeys = array_column($partners, 'key');
         $prefixes = array_map(static fn (array $p): string => Keys::hashPrefixOf($p['key']), $partners);
         $found = $this->client->presenceLookup($prefixes, $wait);
         $names = array_map(static fn (array $p): string => $p['name'], $partners);
@@ -2027,7 +2096,7 @@ final class Runtime
         $seen = [];
         foreach ((array) ($found['body']['matches'] ?? []) as $match) {
             $partner = $this->partnerByKey($match['key'] ?? null);
-            if ($partner === null) {
+            if ($partner === null || !in_array($partner['key'], $askedKeys, true)) {
                 continue;
             }
             $seen[$partner['name']] = true;
@@ -2036,7 +2105,7 @@ final class Runtime
         }
         $this->saveState();
 
-        return ['online' => $online, 'offline' => array_values(array_filter($names, static fn (string $n): bool => !isset($seen[$n])))];
+        return ['online' => $online, 'offline' => array_values(array_filter($names, static fn (string $n): bool => !isset($seen[$n])))] + ($unknown !== [] ? ['unknown' => $unknown] : []);
     }
 
     /**

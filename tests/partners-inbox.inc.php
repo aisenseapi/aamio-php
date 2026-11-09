@@ -105,13 +105,13 @@ $out = $p->partnerRemove('nobody');
 $check($out === ['partner' => 'nobody', 'known' => false, 'inbox' => $fourth->w] && $p->channels['inbox'] === $fourth, 'removing an unknown name touches nothing');
 
 // An open inbox gets its first partner: the old one stays open until it
-// expires, is still read, and attention says so.
+// expires, is still read, and the answer of partner add says so.
 $open = $q->ensureInbox();
 $check($fake->threads[$open->w]['allow'] === [] && $write($open->w, null) === 201, 'a first contact starts with an inbox open to anyone');
 $out = $q->partnerAdd('P', $p->keys->public);
 $named = $q->channels['inbox'];
 $check($out['rotated'] === true && $fake->threads[$named->w]['allow'] === [$p->keys->public] && $open->muted === false && isset($q->channels['inbox-' . $open->expireAt]), 'the first partner gets a named inbox, and the open one is still read');
-$check($states($q) === ['open'], 'attention says the old address is open to anyone until it expires');
+$check(($out['old_inbox']['open'] ?? null) === true && str_contains((string) ($out['old_inbox']['note'] ?? ''), 'is still read until ' . $open->expireAt) && !in_array('open', $states($q), true), 'the answer says the old address is open to anyone until it expires, once');
 
 // A replacement that fails leaves the old inbox in use, and says so.
 $held = $r->ensureInbox();

@@ -306,8 +306,11 @@ $added = $a->partnerAdd('Bea', $b->keys->public);
 $b->partnerAdd('Al', $a->keys->public);
 $check($a->partnerList()[0]['name'] === 'Bea' && $a->nameForKey($b->keys->public) === 'Bea', 'a partner is known by name and key');
 // The inbox follows the address book: the one open to anyone is replaced by
-// one that names Bea, and stays read until it expires, which attention says.
-$check($added['rotated'] === true && $a->channels['inbox']->w !== $inbox->w && $fake->threads[$a->channels['inbox']->w]['allow'] === [$b->keys->public] && array_column($a->attentionTaken(), 'state') === ['open'], 'the first partner replaces the open inbox with one that names her, and attention says the old one is open until it expires', json_encode($added));
+// one that names Bea, and stays read until it expires, which the answer of
+// partner add says: partner add on the command line is a process of its own,
+// and a note in attention was gone before the next read (the release check of
+// 9 November 2026).
+$check($added['rotated'] === true && $a->channels['inbox']->w !== $inbox->w && $fake->threads[$a->channels['inbox']->w]['allow'] === [$b->keys->public] && ($added['old_inbox']['open'] ?? null) === true && str_contains((string) ($added['old_inbox']['note'] ?? ''), 'was open to anyone, signed or not') && !in_array('open', array_column($a->attentionTaken(), 'state'), true), 'the first partner replaces the open inbox with one that names her, and the answer says the old one is open until it expires', json_encode($added));
 $inbox = $a->channels['inbox'];
 $b->ensureInbox();
 $found = $a->lookup(['Bea']);
@@ -892,6 +895,7 @@ require __DIR__ . '/trace.inc.php';
 require __DIR__ . '/cli-stdout.inc.php';
 require __DIR__ . '/first-exchange.inc.php';
 require __DIR__ . '/partner-add.inc.php';
+require __DIR__ . '/release-check.inc.php';
 require __DIR__ . '/addons.inc.php';
 require dirname(__DIR__) . '/addons/domain-keys/tests/process.inc.php';
 
