@@ -48,7 +48,7 @@ final class Service
         $said = self::json($payload);
         $png = is_string($said['qrcode_image'] ?? null) ? base64_decode($said['qrcode_image'], true) : false;
         if (!is_string($png) || !str_starts_with($png, "\x89PNG\r\n\x1a\n")) {
-            throw new Unreachable('service_answered_something_else', 'aisenseapi.com answered with something other than the PNG it documents, so nothing was made. Try again later, or use the local engine.');
+            throw new Unreachable('service_answered_something_else', 'aisenseapi.com answered with something other than the PNG it documents, so nothing was made. Try again later, or use the local engine.', null, true);
         }
 
         return $png;
@@ -78,7 +78,7 @@ final class Service
         }
         $said = self::json($payload);
         if (!is_string($said['qrcode_content'] ?? null)) {
-            throw new Unreachable('service_answered_something_else', 'aisenseapi.com answered with something other than the JSON it documents, so nothing was read. Try again later, or use the local engine.');
+            throw new Unreachable('service_answered_something_else', 'aisenseapi.com answered with something other than the JSON it documents, so nothing was read. Try again later, or use the local engine.', null, true);
         }
         $texts = [];
         foreach (explode("\n", $said['qrcode_content']) as $line) {
@@ -114,10 +114,10 @@ final class Service
         $retry = $headers['retry-after'] ?? null;
         $later = $retry !== null ? ' Try again after ' . $retry . ' seconds.' : ' Try again later.';
         if ($status === 429) {
-            return new Unreachable('rate_limited', 'aisenseapi.com counts requests per address and day, and this address has used its share for now.' . $later, $retry);
+            return new Unreachable('rate_limited', 'aisenseapi.com counts requests per address and day, and this address has used its share for now.' . $later, $retry, true);
         }
         if ($status === 503) {
-            return new Unreachable('service_busy', 'aisenseapi.com cannot serve this right now.' . $later, $retry);
+            return new Unreachable('service_busy', 'aisenseapi.com cannot serve this right now.' . $later, $retry, true);
         }
         if ($status >= 400 && $status < 500) {
             [$error, $fix] = self::words($payload);
@@ -125,7 +125,7 @@ final class Service
             return new Refused($refused, trim('aisenseapi.com would not take it: ' . ($error ?? 'HTTP ' . $status . '.') . ' ' . ($fix ?? '')));
         }
 
-        return new Unreachable('service_unreachable', 'aisenseapi.com answered HTTP ' . $status . ', so nothing was ' . $done . '.' . $later);
+        return new Unreachable('service_unreachable', 'aisenseapi.com answered HTTP ' . $status . ', so nothing was ' . $done . '.' . $later, null, true);
     }
 
     /**
@@ -177,11 +177,16 @@ final class Service
         $error = curl_error($handle);
         unset($handle);
         if ($tooMuch) {
-            throw new Unreachable('service_answered_something_else', 'aisenseapi.com answered with more than it documents, so nothing was used. Try again later.');
+            throw new Unreachable('service_answered_something_else', 'aisenseapi.com answered with more than it documents, so nothing was used. Try again later.', null, true);
         }
         if ($done === false || $errno !== 0) {
             if ($errno === 60 || $errno === 77 || str_contains($error, 'certificate')) {
                 throw new Unreachable('service_unreachable', 'The certificate of aisenseapi.com could not be verified on this machine. If the site opens in a browser, PHP may lack the root: curl.cainfo or openssl.cafile in php.ini can point it at a CA bundle. Verification is never switched off.');
+            }
+            // A status line came before the error, a timeout or a connection cut
+            // in the body: it had the request, and that is said, not hidden.
+            if ($status > 0) {
+                throw new Unreachable('service_unreachable', 'aisenseapi.com answered, and the answer broke off: ' . ($error !== '' ? $error : 'curl error ' . $errno) . '. Try again, or use the local engine.', null, true);
             }
             throw new Unreachable('service_unreachable', 'aisenseapi.com could not be reached: ' . ($error !== '' ? $error : 'curl error ' . $errno) . '. Check the network and try again, or use the local engine.');
         }

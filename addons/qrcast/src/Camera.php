@@ -270,10 +270,18 @@ final class Camera
                 $got++;
                 yield $frame;
             }
-            $running['wait']();
+            $code = $running['wait']();
             if ($got === 0) {
                 $said = (string) @file_get_contents($errFile, false, null, 0, 8192);
                 throw new Unreachable('camera_failed', 'ffmpeg gave no picture from the camera ' . $camera . ': ' . Programs::lastLine($said) . '. ' . self::privacyHint($platform));
+            }
+            // The pictures stop either because the time is up, and ffmpeg ends
+            // well, or because the camera went away, and ffmpeg ends with an
+            // error. Only the exit code tells the two apart: without it a camera
+            // unplugged halfway would read as a scan in which no code was seen.
+            if ($code !== null && $code !== 0) {
+                $said = (string) @file_get_contents($errFile, false, null, 0, 8192);
+                throw new Unreachable('camera_failed', 'The camera ' . $camera . ' stopped giving pictures after ' . $got . ', and ffmpeg ended with exit code ' . $code . ': ' . Programs::lastLine($said) . '. Check that the camera is connected and not taken by another program, and scan again.');
             }
         } finally {
             ($running['stop'])();

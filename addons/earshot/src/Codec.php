@@ -375,13 +375,21 @@ final class Codec
 
     // ------------------------------------------------------------------ reading a recording
 
+    public const PCM = 1;
+    public const EXTENSIBLE = 0xFFFE;
+    /** KSDATAFORMAT_SUBTYPE_PCM, 00000001-0000-0010-8000-00aa00389b71, as its bytes lie in a file. */
+    public const PCM_SUBTYPE = "\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71";
+
     /**
-     * Where the stronger channel's samples are, and the recording's shape, with
-     * the same checks aisense makes. Samples stay in the packed string.
+     * The format of a WAV and where its samples lie, with the checks aisense
+     * makes. One header more is taken than aisense takes: WAVE_FORMAT_EXTENSIBLE,
+     * which many recorders write, when its subtype is PCM and every one of the
+     * 16 bits is used. The samples after it are the same as after a plain PCM
+     * header, and extensible says so, for classicWav to give aisense the plain one.
      *
-     * @return array{offset: int, stride: int, sample_rate: int, samples: int, channel: int, duration_seconds: float}
+     * @return array{format: array{format: int, channels: int, rate: int, bytes_per_second: int, align: int, bits: int}, data: array{offset: int, bytes: int}, samples: int, extensible: bool}
      */
-    public static function parseWav(string $wav): array
+    private static function layout(string $wav): array
     {
         $size = strlen($wav);
         if ($size > self::MAX_WAV_BYTES) {
@@ -395,6 +403,7 @@ final class Codec
         }
         $format = null;
         $data = null;
+        $extensible = false;
         $chunks = 0;
         for ($offset = 12; $offset < $size;) {
             if (++$chunks > 64) {
@@ -414,6 +423,11 @@ final class Codec
                     throw new BadRecording('Invalid or duplicate WAV format chunk.');
                 }
                 $format = unpack('vformat/vchannels/Vrate/Vbytes_per_second/valign/vbits', substr($wav, $start, 16));
+                if ($format['format'] === self::EXTENSIBLE && $length >= 40 && unpack('v', substr($wav, $start + 16, 2))[1] >= 22
+                    && unpack('v', substr($wav, $start + 18, 2))[1] === $format['bits'] && substr($wav, $start + 24, 16) === self::PCM_SUBTYPE) {
+                    $format['format'] = self::PCM;
+                    $extensible = true;
+                }
             } elseif ($tag === 'data') {
                 if ($data !== null) {
                     throw new BadRecording('Duplicate WAV data chunk.');
@@ -422,7 +436,7 @@ final class Codec
             }
             $offset = $start + $length + ($length & 1);
         }
-        if ($format === null || $data === null || $format['format'] !== 1 || $format['bits'] !== 16
+        if ($format === null || $data === null || $format['format'] !== self::PCM || $format['bits'] !== 16
             || !in_array($format['channels'], [1, 2], true) || !in_array($format['rate'], [44100, 48000], true)) {
             throw new BadRecording('Use PCM16 WAV, mono or stereo, at 44100 or 48000 Hz.');
         }
@@ -434,6 +448,41 @@ final class Codec
         if ($samples < 1 || $samples > self::MAX_SECONDS * $format['rate']) {
             throw new BadRecording('Recording must contain at most 40 seconds of audio.');
         }
+
+        return ['format' => $format, 'data' => $data, 'samples' => $samples, 'extensible' => $extensible];
+    }
+
+    /**
+     * The same recording under the plain PCM header, for aisense, which reads
+     * no other: a WAVE_FORMAT_EXTENSIBLE file of 16-bit PCM is written again
+     * with format 1 and its samples untouched. Any other file comes back as it
+     * was, for aisense to judge.
+     */
+    public static function classicWav(string $wav): string
+    {
+        try {
+            $layout = self::layout($wav);
+        } catch (BadRecording) {
+            return $wav;
+        }
+        if (!$layout['extensible']) {
+            return $wav;
+        }
+
+        return self::wav(substr($wav, $layout['data']['offset'], $layout['data']['bytes']), $layout['format']['rate'], $layout['format']['channels']);
+    }
+
+    /**
+     * Where the stronger channel's samples are, and the recording's shape, with
+     * the same checks aisense makes and the one header more that layout takes.
+     * Samples stay in the packed string.
+     *
+     * @return array{offset: int, stride: int, sample_rate: int, samples: int, channel: int, duration_seconds: float}
+     */
+    public static function parseWav(string $wav): array
+    {
+        ['format' => $format, 'data' => $data, 'samples' => $samples] = self::layout($wav);
+        $stride = $format['channels'] * 2;
         // A stereo microphone can put the useful signal in only one channel: use
         // the stronger one, without the phase cancellation of a naive mix.
         $channel = 0;

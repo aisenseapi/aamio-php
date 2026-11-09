@@ -68,8 +68,10 @@ for module as aamio-qrcast for Python, and reads pictures and camera frames with
 zbarimg. Nothing is sent. aisense makes the code at aisenseapi.com, as a PNG at
 level H in blue, and reads a picture there. It is `--engine aisense` on the
 command line and `engine: aisense` over MCP. When aisenseapi.com cannot be
-reached, the add-on makes or reads the code here instead and says so, with
-`engine: local` and a `fallback` in the answer. A picture is never sent unless
+reached or cannot do it, the add-on makes or reads the code here instead and
+says so, with `engine: local` and a `fallback` in the answer: its `sent` is
+`yes` when aisenseapi.com answered, so it had the card or the picture, and
+`maybe` when the connection failed. A picture is never sent unless
 aisense is asked for, and `scan` reads only here.
 
 ## Commands

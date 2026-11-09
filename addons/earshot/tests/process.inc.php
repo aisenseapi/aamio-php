@@ -22,6 +22,7 @@ use Aamio\Addons;
 use Aamio\McpServer;
 use Aamio\Runtime;
 use Aamio\Earshot\Audio;
+use Aamio\Earshot\BadRecording;
 use Aamio\Earshot\Codec;
 use Aamio\Earshot\NothingHeard;
 use Aamio\Earshot\Process;
@@ -163,11 +164,14 @@ echo "earshot: the process\n";
     $check(($said['result']['reason'] ?? null) === 'out_exists' && file_get_contents($out) === 'mine', 'a file that is there is left as it is');
     $said = Process::handle($request('command', 'broadcast', ['address' => $address, 'out' => $folder . DIRECTORY_SEPARATOR . 'nowhere' . DIRECTORY_SEPARATOR . 'card.wav']), $world()->seams());
     $check(($said['result']['reason'] ?? null) === 'out_folder_missing', 'and a folder that is not there is said');
-    $w = $world(null, new Unreachable('rate_limited', 'Try again after 3600 seconds.', '3600'));
+    $w = $world(null, new Unreachable('rate_limited', 'Try again after 3600 seconds.', '3600', true));
     $said = Process::handle($request('tool', 'aamio_addon_earshot_broadcast', ['address' => $address]), $w->seams());
     $result = $said['result'];
-    $check($said['exit_code'] === 0 && ($result['status'] ?? null) === 'played' && ($result['engine'] ?? null) === 'local' && ($result['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'rate_limited'] && str_contains($result['engine_note'] ?? '', 'could not be reached (rate_limited)'), 'aisense at its limit: the sound is made here instead, and the answer says so');
+    $check($said['exit_code'] === 0 && ($result['status'] ?? null) === 'played' && ($result['engine'] ?? null) === 'local' && ($result['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'rate_limited', 'sent' => 'yes']
+        && str_contains($result['engine_note'] ?? '', 'answered but did not do it (rate_limited)') && str_contains($result['engine_note'] ?? '', 'The card had gone to aisenseapi.com with the request.') && !str_contains($result['engine_note'] ?? '', 'nothing went'), 'aisense at its limit: the sound is made here instead, and the answer says the card had gone there');
     $check(count($w->encoded) === 1 && ($w->sounds[0] ?? '') === Codec::encode($result['card'], 'audible'), 'aisense was asked once, and the sound it would have made was played');
+    $said = Process::handle($request('tool', 'aamio_addon_earshot_broadcast', ['address' => $address]), $world(null, new Unreachable('service_unreachable', 'aisenseapi.com could not be reached.'))->seams());
+    $check(($said['result']['fallback']['sent'] ?? null) === 'maybe' && str_contains($said['result']['engine_note'] ?? '', 'The card may have reached aisenseapi.com before the connection failed.'), 'and when it could not be reached, that the card may have');
     $said = Process::handle($request('tool', 'aamio_addon_earshot_broadcast', ['address' => $address]), $world(null, null, new Unreachable('no_player', 'Nothing on this machine plays a sound file.'))->seams());
     $check($said['exit_code'] === 5 && ($said['result']['reason'] ?? null) === 'no_player', 'and so is a machine with no player');
 
@@ -216,7 +220,8 @@ echo "earshot: the process\n";
     $w->recording = Codec::encode($timed, 'audible');
     $said = Process::handle($request('tool', 'aamio_addon_earshot_listen'), $w->seams());
     $result = $said['result'];
-    $check(($result['status'] ?? null) === 'heard' && ($result['engine'] ?? null) === 'local' && ($result['fallback']['reason'] ?? null) === 'service_unreachable' && str_contains($result['engine_note'] ?? '', 'read on this machine'), 'when aisense cannot be reached the recording is read here');
+    $check(($result['status'] ?? null) === 'heard' && ($result['engine'] ?? null) === 'local' && ($result['fallback']['reason'] ?? null) === 'service_unreachable' && str_contains($result['engine_note'] ?? '', 'read on this machine')
+        && ($result['fallback']['sent'] ?? null) === 'maybe' && str_contains($result['engine_note'] ?? '', 'The recording may have reached aisenseapi.com before the connection failed.'), 'when aisense cannot be reached the recording is read here');
     $said = Process::handle($request('tool', 'aamio_addon_earshot_listen'), $world(null, new Unreachable('service_unreachable', 'aisenseapi.com could not be reached.'))->seams());
     $check(($said['result']['status'] ?? null) === 'nothing_heard' && ($said['result']['engine'] ?? null) === 'local' && ($said['result']['fallback']['reason'] ?? null) === 'service_unreachable', 'and says so when nothing was heard here either');
     $w = $world(null, new NothingHeard('No complete message was heard.'));
@@ -234,6 +239,102 @@ echo "earshot: the process\n";
         $engines += ($said['result']['reason'] ?? null) === 'invalid_engine' && $w->encoded === [] && $w->decoded === [] && $w->played === [] && $w->recorded === [] ? 1 : 0;
     }
     $check($engines === 3, 'an engine that is not one is refused before anything happens');
+    // aisense as a receiver that reads the whole request and then answers 503.
+    $bodies = [];
+    $busy = static function (string $path, string $body, string $type, int $limit) use (&$bodies): array {
+        $bodies[] = $body;
+
+        return [503, ['retry-after' => '5'], '{"error": "Busy."}'];
+    };
+    $seams = $world()->seams();
+    $seams['encode'] = static fn (string $card, string $mode): string => Service::encode($card, $mode, $busy);
+    $seams['decode'] = static fn (string $sound, string $mode): array => Service::decode($sound, $mode, $busy);
+    $out = $folder . DIRECTORY_SEPARATOR . 'busy.wav';
+    $said = Process::handle($request('command', 'broadcast', ['address' => $address, 'name' => 'rom-42', 'out' => $out]), $seams);
+    $check((json_decode($bodies[0] ?? '', true)['data'] ?? null) === ($said['result']['card'] ?? '') && ($said['result']['engine'] ?? null) === 'local'
+        && ($said['result']['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'service_busy', 'sent' => 'yes'] && str_contains($said['result']['engine_note'] ?? '', 'The card had gone to aisenseapi.com with the request.'), 'aisense had the whole card when it answered 503, and the answer says so');
+    $heard = $folder . DIRECTORY_SEPARATOR . 'busy-heard.wav';
+    file_put_contents($heard, Codec::encode($timed, 'audible'));
+    $said = Process::handle($request('command', 'decode', ['file' => $heard]), $seams);
+    $check(($bodies[1] ?? null) === Codec::encode($timed, 'audible') && ($said['result']['status'] ?? null) === 'heard' && ($said['result']['engine'] ?? null) === 'local'
+        && ($said['result']['fallback']['sent'] ?? null) === 'yes' && str_contains($said['result']['engine_note'] ?? '', 'The recording had gone to aisenseapi.com with the request.'), 'and the whole recording, read here after it');
+    // A file that cannot be written whole.
+    $short = static function ($handle, string $bytes): int|false {
+        static $taken = 0;
+        if ($taken >= 400) {
+            $taken = 0;
+
+            return false;
+        }
+        $put = fwrite($handle, substr($bytes, 0, 400 - $taken));
+        $taken += (int) $put;
+
+        return $put;
+    };
+    $out = $folder . DIRECTORY_SEPARATOR . 'short.wav';
+    $seams = $world()->seams();
+    $seams['write'] = $short;
+    $said = Process::handle($request('command', 'broadcast', ['address' => $address, 'out' => $out]), $seams);
+    $check($said['exit_code'] === 2 && ($said['result']['reason'] ?? null) === 'out_not_written' && !file_exists($out), 'a WAV the disk takes 400 bytes of is not reported as written, and is not left behind');
+    $w = $world();
+    $seams = $w->seams();
+    $seams['write'] = $short;
+    $said = Process::handle($request('command', 'broadcast', ['address' => $address]), $seams);
+    $check($said['exit_code'] === 5 && ($said['result']['reason'] ?? null) === 'temporary_file_not_written' && $w->played === [], 'and no player plays half a sound');
+    $said = Process::handle($request('command', 'broadcast', ['address' => $address, 'out' => $out]), $world()->seams());
+    $check(($said['result']['status'] ?? null) === 'written' && filesize($out) === ($said['result']['bytes'] ?? null), 'the same name can be given again');
+    // The clock when the recording ended, not when the call began.
+    $expires = $now + 3600;
+    $card = 'aamio:scope/' . $address . '?n=rom-42&t=' . $expires;
+    $statuses = [];
+    foreach ([Process::SKEW, Process::SKEW + 1, 140] as $late) {
+        $w = $world($card, null, null, null, false, $expires + 100);
+        $seams = $w->seams();
+        $record = $seams['record'];
+        $seams['record'] = static function (int $seconds, string $path) use ($w, $record, $expires, $late): string {
+            $w->at = $expires + $late;
+
+            return $record($seconds, $path);
+        };
+        $statuses[] = Process::handle($request('tool', 'aamio_addon_earshot_listen'), $seams)['result']['status'] ?? null;
+    }
+    $check($statuses === ['heard', 'expired', 'expired'], 'listening begun 100 seconds after the card ran out judges it by the clock when the recording ended');
+    // The extensible header over 16-bit PCM, as many recorders write it.
+    $plain = Codec::encode($timed, 'audible');
+    $pcm = substr($plain, 44);
+    $extensible = static function (string $pcm, string $subtype = Codec::PCM_SUBTYPE, int $valid = 16, int $channels = 1): string {
+        $fmt = pack('vvVVvv', 0xFFFE, $channels, 48000, 48000 * $channels * 2, $channels * 2, 16) . pack('vvV', 22, $valid, $channels === 1 ? 4 : 3) . $subtype;
+        $body = 'WAVE' . 'fmt ' . pack('V', strlen($fmt)) . $fmt . 'data' . pack('V', strlen($pcm)) . $pcm;
+
+        return 'RIFF' . pack('V', strlen($body)) . $body;
+    };
+    $check(Codec::decode($extensible($pcm)) === Codec::decode($plain) && Codec::classicWav($extensible($pcm)) === $plain && Codec::classicWav($plain) === $plain, 'the extensible header over 16-bit PCM is read as the plain one, and aisense gets the plain one over the same samples');
+    $refused = 0;
+    foreach ([$extensible($pcm, "\x03" . substr(Codec::PCM_SUBTYPE, 1)), $extensible($pcm, Codec::PCM_SUBTYPE, 12)] as $odd) {
+        $error = null;
+        try {
+            Codec::decode($odd);
+        } catch (BadRecording $error) {
+        }
+        $refused += $error instanceof BadRecording && str_contains($error->getMessage(), 'Use PCM16 WAV') && Codec::classicWav($odd) === $odd ? 1 : 0;
+    }
+    $check($refused === 2, 'but not a float subtype or 12 of the 16 bits, and aisense gets those as they came');
+    $file = $folder . DIRECTORY_SEPARATOR . 'extensible.wav';
+    file_put_contents($file, $extensible($pcm));
+    $said = Process::handle($request('command', 'decode', ['file' => $file, 'engine' => 'local']), $world()->seams());
+    $sent = [];
+    $seams = $world($timed)->seams();
+    $seams['decode'] = static function (string $sound, string $mode) use (&$sent, $timed): array {
+        $sent[] = $sound;
+
+        return ['data_base64' => '', 'byte_length' => strlen($timed), 'text' => $timed, 'protocol' => 'aisense-audio-v2', 'corrected_bits' => 0, 'mode' => 'audible'];
+    };
+    $remote = Process::handle($request('command', 'decode', ['file' => $file]), $seams);
+    $check(($said['result']['status'] ?? null) === 'heard' && ($said['result']['card']['name'] ?? null) === 'rom-42' && ($remote['result']['status'] ?? null) === 'heard' && $sent === [$plain], 'a recording with that header is heard here, and goes to aisense under the plain one');
+    [$json, $code] = Process::written(['result' => ['status' => 'not_understood', 'heard' => ['text' => "caf\xe9"]], 'exit_code' => 3, 'is_error' => false]);
+    $check($code === 3 && (json_decode($json, true)['result']['heard']['text'] ?? null) === "caf\u{fffd}", 'bytes that are no UTF-8 cost one character of the answer, not the answer');
+    [$json, $code] = Process::written(['result' => ['status' => 'heard', 'value' => NAN], 'exit_code' => 0, 'is_error' => false]);
+    $check($code === 5 && (json_decode($json, true)['result']['reason'] ?? null) === 'answer_not_written', 'and an answer that cannot be written as JSON at all is replaced by one that says so');
 
     // Decode.
     $good = $folder . DIRECTORY_SEPARATOR . 'heard.wav';

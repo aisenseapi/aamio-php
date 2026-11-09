@@ -174,9 +174,55 @@ echo "qrcast: the process\n";
     $said = Process::handle($request('command', 'show', ['address' => $address, 'out' => $out, 'engine' => 'aisense']), $w->seams());
     $check($said['result']['engine'] === 'aisense' && !isset($said['result']['code']) && file_get_contents($out) === "\x89PNG\r\n\x1a\naisense" && count($w->encoded) === 1, 'aisense makes the code when asked');
     $check(Process::handle($request('command', 'show', ['address' => $address, 'out' => $folder . DIRECTORY_SEPARATOR . 'theirs.svg', 'engine' => 'aisense']), $w->seams())['result']['reason'] === 'aisense_makes_png', 'and only as a PNG');
-    $w = $world([], new Unreachable('service_busy', 'aisenseapi.com cannot serve this right now.', '5'));
+    $w = $world([], new Unreachable('service_busy', 'aisenseapi.com cannot serve this right now.', '5', true));
     $said = Process::handle($request('command', 'show', ['address' => $address, 'engine' => 'aisense']), $w->seams());
-    $check($said['exit_code'] === 0 && $said['result']['engine'] === 'local' && ($said['result']['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'service_busy'] && str_contains($said['result']['engine_note'] ?? '', 'nothing went to it'), 'when aisense cannot be reached the code is made here, and the answer says so');
+    $check($said['exit_code'] === 0 && $said['result']['engine'] === 'local' && ($said['result']['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'service_busy', 'sent' => 'yes']
+        && str_contains($said['result']['engine_note'] ?? '', 'The card had gone to aisenseapi.com with the request.') && !str_contains($said['result']['engine_note'] ?? '', 'nothing went'), 'when aisense answers but cannot do it, the code is made here, and the answer says the card had gone there');
+    $w = $world([], new Unreachable('service_unreachable', 'aisenseapi.com could not be reached.'));
+    $said = Process::handle($request('command', 'show', ['address' => $address, 'engine' => 'aisense']), $w->seams());
+    $check(($said['result']['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'service_unreachable', 'sent' => 'maybe'] && str_contains($said['result']['engine_note'] ?? '', 'The card may have reached aisenseapi.com before the connection failed.'), 'and when it could not be reached, that the card may have');
+    // aisense as a receiver that reads the whole request and then answers 503.
+    $bodies = [];
+    $busy = static function (string $path, string $body, string $type, int $limit) use (&$bodies): array {
+        $bodies[] = $body;
+
+        return [503, ['retry-after' => '5'], '{"error": "Busy."}'];
+    };
+    $seams = $world([$card])->seams();
+    $seams['encode'] = static fn (string $text): string => Service::encode($text, $busy);
+    $seams['decode'] = static fn (string $data, string $kind): array => Service::decode($data, $kind, $busy);
+    $said = Process::handle($request('command', 'show', ['address' => $address, 'name' => 'stue-tv', 'engine' => 'aisense']), $seams);
+    $check(json_decode($bodies[0] ?? '', true) === ['data' => $card] && $said['exit_code'] === 0 && $said['result']['engine'] === 'local'
+        && ($said['result']['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'service_busy', 'sent' => 'yes'] && str_contains($said['result']['engine_note'] ?? '', 'answered but did not do it (service_busy)'), 'aisense had the whole card when it answered 503, and the answer says so');
+    $data = Symbol::png(Symbol::encode($card), 4);
+    $said = Process::handle($request('command', 'read', ['file' => $picture('busy.png', $data), 'engine' => 'aisense']), $seams);
+    $check(str_contains($bodies[1] ?? '', $data) && $said['result']['status'] === 'seen' && $said['result']['engine'] === 'local' && ($said['result']['fallback']['sent'] ?? null) === 'yes'
+        && str_contains($said['result']['engine_note'] ?? '', 'The picture had gone to aisenseapi.com with the request.'), 'and the whole picture, read here after it');
+    // A file that cannot be written whole.
+    $short = static function ($handle, string $bytes): int|false {
+        static $taken = 0;
+        if ($taken >= 400) {
+            $taken = 0;
+
+            return false;
+        }
+        $put = fwrite($handle, substr($bytes, 0, 400 - $taken));
+        $taken += (int) $put;
+
+        return $put;
+    };
+    $out = $folder . DIRECTORY_SEPARATOR . 'short.png';
+    $seams = $world()->seams();
+    $seams['write'] = $short;
+    $said = Process::handle($request('command', 'show', ['address' => $address, 'out' => $out]), $seams);
+    $check($said['exit_code'] === 2 && $said['result']['reason'] === 'out_not_written' && !file_exists($out), 'a file the disk takes 400 bytes of is not reported as written, and is not left behind');
+    $w = $world();
+    $seams = $w->seams();
+    $seams['write'] = $short;
+    $said = Process::handle($request('command', 'show', ['address' => $address]), $seams);
+    $check($said['exit_code'] === 5 && $said['result']['reason'] === 'temporary_file_not_written' && $w->shown === [], 'and no viewer opens half a picture');
+    $said = Process::handle($request('command', 'show', ['address' => $address, 'out' => $out]), $world()->seams());
+    $check($said['result']['status'] === 'written' && filesize($out) === $said['result']['bytes'], 'the same name can be given again');
     $w = $world([], new Refused('service_refused', 'aisenseapi.com would not take it.'));
     $check(Process::handle($request('command', 'show', ['address' => $address, 'engine' => 'aisense']), $w->seams())['result']['reason'] === 'service_refused', 'but a refusal is not a reason to make it here');
     $w = $world([], null, new Unreachable('no_screen', 'This machine has no screen the add-on can reach.'));
@@ -195,7 +241,8 @@ echo "qrcast: the process\n";
     $check($said['result']['engine'] === 'aisense' && ($w->decoded[0][1] ?? null) === 'png' && $w->read === [] && str_starts_with($said['result']['next'], 'aamio_scope_add with name stue-tv'), 'read with aisense sends the picture there');
     $w = $world([$card], new Unreachable('service_unreachable', 'aisenseapi.com could not be reached.'));
     $said = Process::handle($request('tool', 'aamio_addon_qrcast_read', ['file' => $picture('three.png'), 'engine' => 'aisense']), $w->seams());
-    $check($said['result']['status'] === 'seen' && $said['result']['engine'] === 'local' && ($said['result']['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'service_unreachable'] && count($w->read) === 1, 'and falls back here when it cannot be reached');
+    $check($said['result']['status'] === 'seen' && $said['result']['engine'] === 'local' && ($said['result']['fallback'] ?? null) === ['from' => 'aisense', 'reason' => 'service_unreachable', 'sent' => 'maybe'] && count($w->read) === 1
+        && str_contains($said['result']['engine_note'] ?? '', 'The picture may have reached aisenseapi.com before the connection failed.'), 'and falls back here when it cannot be reached');
     $w = $world([], new NothingSeen('aisense found no code in the picture.'));
     $said = Process::handle($request('tool', 'aamio_addon_qrcast_read', ['file' => $picture('four.png'), 'engine' => 'aisense']), $w->seams());
     $check($said['exit_code'] === 3 && $said['result']['status'] === 'nothing_seen' && $said['result']['engine'] === 'aisense' && !isset($said['result']['fallback']), 'nothing seen at aisense is said, not sent again here');
@@ -224,6 +271,17 @@ echo "qrcast: the process\n";
     $w = $world([]);
     $said = Process::handle($request('command', 'read', ['file' => $picture('ten.png')]), $w->seams());
     $check($said['exit_code'] === 3 && $said['result']['status'] === 'nothing_seen' && str_contains($said['result']['fix'], 'engine aisense'), 'nothing found here says the other engine reads with another decoder');
+    // A code with a Norwegian letter across the old cut at byte 300, and one with bytes that are no UTF-8.
+    $long = str_repeat('x', 299) . 'ø på møte';
+    $w = $world([$long, "aamio\xff\xfe"]);
+    [$json, $code] = Process::written(Process::handle($request('command', 'read', ['file' => $picture('letter.png')]), $w->seams()));
+    $answer = json_decode($json, true);
+    $check($code === 3 && ($answer['result']['status'] ?? null) === 'not_understood' && ($answer['result']['seen'][0]['text'] ?? null) === str_repeat('x', 299) . 'ø'
+        && ($answer['result']['seen'][1]['text'] ?? null) === "aamio\u{fffd}\u{fffd}", 'a letter across the old cut, or bytes that are no UTF-8, keep the answer: not_understood and exit code 3, cut by characters as Python cuts');
+    $check(Process::seenText(str_repeat('é', 400)) === str_repeat('é', Process::SEEN_CHARS) && Process::seenText('') === '', 'the cut is 300 characters, not 300 bytes');
+    [$json, $code] = Process::written(['result' => ['status' => 'seen', 'value' => NAN], 'exit_code' => 0, 'is_error' => false]);
+    $answer = json_decode($json, true);
+    $check($code === 5 && ($answer['result']['reason'] ?? null) === 'answer_not_written' && ($answer['exit_code'] ?? null) === 5, 'an answer that cannot be written as JSON at all is replaced by one that says so, never by nothing');
 
     // scan
     $w = $world([], null, null, null, [[640, 480, 'empty'], [640, 480, 'ad'], [640, 480, 'card'], [640, 480, 'never']], ['ad' => ['https://example.org'], 'card' => [$card]]);
@@ -244,6 +302,30 @@ echo "qrcast: the process\n";
     $w = $world([], null, null, null, [], [], new Unreachable('no_ffmpeg', 'ffmpeg, which reads the camera, is not on this machine.'));
     $said = Process::handle($request('command', 'scan'), $w->seams());
     $check($said['exit_code'] === 5 && $said['result']['reason'] === 'no_ffmpeg' && $w->closed, 'and a camera that cannot be had is said');
+    // The clock when a card is read, not when the call began.
+    $expires = $now + 3600;
+    $timed = 'aamio:scope/' . $address . '?t=' . $expires;
+    $statuses = [];
+    foreach ([Process::SKEW, Process::SKEW + 1, 140] as $late) {
+        $w = $world([], null, null, null, [[4, 2, 'card']], ['card' => [$timed]]);
+        $w->at = $expires + 100;
+        $seams = $w->seams();
+        $seams['frames'] = static function (int $seconds, ?string $which) use ($w, $expires, $late): \Generator {
+            $w->at = $expires + $late;
+            yield [4, 2, 'card'];
+        };
+        $statuses[] = Process::handle($request('command', 'scan'), $seams)['result']['status'];
+    }
+    $check($statuses === ['seen', 'expired', 'expired'], 'a scan begun 100 seconds after the card ran out judges its frame by the clock when the frame was read');
+    $w = $world([$timed]);
+    $w->at = $expires + 100;
+    $seams = $w->seams();
+    $seams['decode'] = static function (string $data, string $kind) use ($w, $expires, $timed): array {
+        $w->at = $expires + Process::SKEW + 1;
+
+        return [$timed];
+    };
+    $check(Process::handle($request('command', 'read', ['file' => $picture('slow.png'), 'engine' => 'aisense']), $seams)['result']['status'] === 'expired', 'and a picture read at aisense by the clock when its answer came');
 
     // The camera, with ffmpeg faked.
     $pgm = static fn (int $width, int $height, int $fill, bool $comment = false): string => "P5\n" . ($comment ? "# made here\n" : '') . $width . ' ' . $height . "\n255\n" . str_repeat(chr($fill), $width * $height);
@@ -301,6 +383,17 @@ echo "qrcast: the process\n";
     $check($error instanceof Unreachable && $error->reason === 'camera_failed' && str_contains($error->fix, 'I/O error') && str_contains($error->fix, 'Settings, Privacy, Camera'), 'a camera that gives no frame says why');
     $error = $caught(static fn () => iterator_to_array(Camera::frames(5, null, static fn (string $name): ?string => null, 'win32', [])));
     $check($error instanceof Unreachable && $error->reason === 'no_ffmpeg' && str_contains($error->fix, 'winget install Gyan.FFmpeg') && str_contains($error->fix, 'aamio addon qrcast read FILE'), 'and no ffmpeg says how to get it');
+    $gone = Camera::frames(20, 'Logi C270 HD WebCam', static fn (string $name): ?string => 'ffmpeg', 'win32', [], $start($pgm(4, 2, 1), 1, "[dshow @ 01] Could not read frame\r\nvideo=Logi C270 HD WebCam: I/O error\r\n"));
+    $first = $gone->current();
+    $error = $caught(static fn () => $gone->next());
+    $check($first === [4, 2, str_repeat("\x01", 8)] && $error instanceof Unreachable && $error->reason === 'camera_failed' && str_contains($error->fix, 'after 1') && str_contains($error->fix, 'exit code 1') && str_contains($error->fix, 'I/O error'), 'a camera that stops after a frame, with an error from ffmpeg, is a camera that failed');
+    $results = [];
+    foreach ([1, 0] as $exit) {
+        $said = Process::handle($request('command', 'scan'), ['read_frame' => static fn (int $width, int $height, string $gray): array => [], 'clock' => static fn (): int => $now,
+            'frames' => static fn (int $seconds, ?string $which): \Generator => Camera::frames($seconds, 'Logi C270 HD WebCam', static fn (string $name): ?string => 'ffmpeg', 'win32', [], $start($pgm(4, 2, 1) . $pgm(4, 2, 2), $exit, 'I/O error'))]);
+        $results[] = [$said['result']['status'], $said['result']['reason'], $said['exit_code']];
+    }
+    $check($results === [['unreachable', 'camera_failed', 5], ['nothing_seen', 'nothing_seen', 3]], 'through the process: camera_failed and exit code 5, not a scan in which no code was seen; a scan that ends well sees nothing');
 
     // The screen, with the programs faked.
     $ran = [];

@@ -23,15 +23,17 @@ namespace Aamio\Qrcast;
  * goes into an answer. The engine makes and reads the code: local, the default,
  * on this machine with Symbol and zbarimg, so nothing is sent, or aisense, at
  * aisenseapi.com, which sees the card or the picture. When aisenseapi.com
- * cannot be reached, the local engine does the work instead and the answer
- * says so. A picture is only sent when aisense is asked for, and the camera is
- * only ever read here. The same as aamio-python's aamio_qrcast.process.
+ * cannot be reached or cannot do it, the local engine does the work instead,
+ * and the answer says so and whether the card or the picture had gone to
+ * aisenseapi.com all the same. A picture is only sent when aisense is asked
+ * for, and the camera is only ever read here. The same as aamio-python's
+ * aamio_qrcast.process.
  */
 final class Process
 {
     public const CONTRACT = 2;
     public const NAME = 'qrcast';
-    public const VERSION = '0.1.0';
+    public const VERSION = '0.1.1';
     public const TOOL = 'aamio_addon_qrcast_';
     public const EXIT_CODES = ['card' => 0, 'shown' => 0, 'written' => 0, 'seen' => 0, 'nothing_seen' => 3, 'not_understood' => 3, 'expired' => 3, 'invalid' => 2, 'unreachable' => 5];
     public const SECONDS_DEFAULT = 20;
@@ -132,7 +134,12 @@ final class Process
     }
 
     /**
-     * What an answer says when aisenseapi.com could not be reached and the work was done here.
+     * What an answer says when aisenseapi.com did not do the work and it was done here.
+     *
+     * The request went out before anything failed, so the card or the picture
+     * may be at aisenseapi.com all the same: certainly when it answered, with a
+     * 503 say, and perhaps when the connection broke. sent says which, yes or
+     * maybe.
      *
      * @param array<string, mixed> $said
      * @return array<string, mixed>
@@ -140,11 +147,49 @@ final class Process
     private static function fallback(array $said, ?Unreachable $error, string $done): array
     {
         if ($error !== null) {
-            $said['fallback'] = ['from' => 'aisense', 'reason' => $error->reason];
-            $said['engine_note'] = 'aisenseapi.com could not be reached (' . $error->reason . '), so the ' . ($done === 'made' ? 'code was made' : 'picture was read') . ' on this machine instead, and nothing went to it.';
+            [$what, $work] = $done === 'made' ? ['card', 'the code was made'] : ['picture', 'the picture was read'];
+            $said['fallback'] = ['from' => 'aisense', 'reason' => $error->reason, 'sent' => $error->answered ? 'yes' : 'maybe'];
+            $said['engine_note'] = $error->answered
+                ? 'aisenseapi.com answered but did not do it (' . $error->reason . '), so ' . $work . ' on this machine instead. The ' . $what . ' had gone to aisenseapi.com with the request.'
+                : 'aisenseapi.com could not be reached (' . $error->reason . '), so ' . $work . ' on this machine instead. The ' . $what . ' may have reached aisenseapi.com before the connection failed.';
         }
 
         return $said;
+    }
+
+    /**
+     * $data in a new file, whole or not at all: fwrite may take part of it, so
+     * it is written until every byte is or a write fails, and a file that could
+     * not be written to the end is removed again, as this call made it.
+     *
+     * @param null|callable(resource, string): (int|false) $write fwrite, or a stand-in for tests
+     * @return ?string null, or out_exists or out_not_written
+     */
+    public static function writeNew(string $path, string $data, ?callable $write = null): ?string
+    {
+        $write ??= static fn ($handle, string $bytes): int|false => @fwrite($handle, $bytes);
+        $handle = @fopen($path, 'xb');
+        if ($handle === false) {
+            return file_exists($path) ? 'out_exists' : 'out_not_written';
+        }
+        $done = 0;
+        $length = strlen($data);
+        while ($done < $length) {
+            $put = $write($handle, substr($data, $done, 1048576));
+            if ($put === false || $put === 0) {
+                break;
+            }
+            $done += $put;
+        }
+        $whole = $done === $length && @fflush($handle);
+        $whole = @fclose($handle) && $whole;
+        if (!$whole) {
+            @unlink($path);
+
+            return 'out_not_written';
+        }
+
+        return null;
     }
 
     private static function when(int $seconds): string
@@ -235,7 +280,7 @@ final class Process
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function show(array $arguments, string $kind, callable $encode, callable $display, int $now): array
+    public static function show(array $arguments, string $kind, callable $encode, callable $display, int $now, ?callable $write = null): array
     {
         try {
             $expires = self::expires($arguments, $now);
@@ -272,14 +317,13 @@ final class Process
         }
         $said = self::fallback($said, $reserve, 'made');
         if ($out !== null) {
-            $handle = @fopen($out, 'xb');
-            if ($handle === false) {
-                return file_exists($out)
-                    ? self::refused('out_exists', $out . ' is there already and was left as it is. Give the name of a new file.')
-                    : self::refused('out_not_written', $out . ' could not be written.');
+            $failed = self::writeNew($out, $picture, $write);
+            if ($failed === 'out_exists') {
+                return self::refused('out_exists', $out . ' is there already and was left as it is. Give the name of a new file.');
             }
-            fwrite($handle, $picture);
-            fclose($handle);
+            if ($failed !== null) {
+                return self::refused('out_not_written', $out . ' could not be written whole. Nothing was left there, so the same name can be given again.');
+            }
             $how = $format === 'text' ? 'Drawn as text, it reads on a terminal with a dark background; on a light one, use .png or .svg. ' : '';
 
             return $said + ['status' => 'written', 'file' => $out, 'format' => $format, 'bytes' => strlen($picture),
@@ -290,7 +334,11 @@ final class Process
             return self::unreachable('no_temporary_folder', 'No private folder could be made in the temporary directory for the picture. Check the temporary directory.');
         }
         $path = $folder . DIRECTORY_SEPARATOR . 'card.png';
-        file_put_contents($path, $picture);
+        if (self::writeNew($path, $picture, $write) !== null) {
+            Programs::clean($folder);
+
+            return self::unreachable('temporary_file_not_written', 'The picture could not be written whole in the temporary directory for the viewer. Check the space there.');
+        }
         try {
             $viewer = $display($path);
         } catch (Unreachable $error) {
@@ -305,6 +353,20 @@ final class Process
     }
 
     /**
+     * The first SEEN_CHARS characters of a text that is no card, as valid UTF-8.
+     * A code may carry any bytes, and a cut by bytes can split a letter such as
+     * ø in two: either way json_encode would refuse the whole answer, and the
+     * core would get nothing. Bytes that are not UTF-8 become U+FFFD, and the
+     * cut is by characters, as Python makes it.
+     */
+    public static function seenText(string $text): string
+    {
+        $valid = json_decode((string) json_encode($text, JSON_INVALID_UTF8_SUBSTITUTE));
+
+        return (is_string($valid) && preg_match('/^.{0,' . self::SEEN_CHARS . '}/su', $valid, $cut) === 1) ? $cut[0] : '';
+    }
+
+    /**
      * @param list<string> $texts
      * @return array<string, mixed>
      */
@@ -315,7 +377,7 @@ final class Process
             try {
                 $found = Card::read($text);
             } catch (NotUnderstood $why) {
-                $item = ['text' => substr($text, 0, self::SEEN_CHARS), 'reason' => $why->reason];
+                $item = ['text' => self::seenText($text), 'reason' => $why->reason];
                 if (!in_array($item, $other, true)) {
                     $other[] = $item;
                 }
@@ -353,10 +415,11 @@ final class Process
 
     /**
      * What a picture carries, read by the engine asked for, or here when aisense cannot be reached.
+     * A card is judged by the clock when it has been read, not when the call began.
      *
      * @return array<string, mixed>
      */
-    private static function seenIn(string $data, string $pictureKind, string $kind, string $engine, callable $decode, callable $readLocal, int $now): array
+    private static function seenIn(string $data, string $pictureKind, string $kind, string $engine, callable $decode, callable $readLocal, callable $clock): array
     {
         $used = $engine;
         $reserve = null;
@@ -385,14 +448,14 @@ final class Process
             return self::fallback(['status' => 'nothing_seen', 'reason' => 'nothing_seen', 'fix' => self::NOTHING_HERE, 'engine' => $used], $reserve, 'read');
         }
 
-        return self::fallback(self::cardsSeen($texts, $kind, $now) + ['engine' => $used], $reserve, 'read');
+        return self::fallback(self::cardsSeen($texts, $kind, (int) $clock()) + ['engine' => $used], $reserve, 'read');
     }
 
     /**
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function readFile(array $arguments, string $kind, callable $decode, callable $readLocal, int $now): array
+    public static function readFile(array $arguments, string $kind, callable $decode, callable $readLocal, callable $clock): array
     {
         try {
             $engine = self::engine($arguments['engine'] ?? null);
@@ -416,14 +479,18 @@ final class Process
             return self::refused('not_a_picture', $name . ' is not a PNG, JPEG, GIF or WebP picture. Take the picture in one of those formats, or convert it.');
         }
 
-        return self::seenIn($data, $pictureKind, $kind, $engine, $decode, $readLocal, $now);
+        return self::seenIn($data, $pictureKind, $kind, $engine, $decode, $readLocal, $clock);
     }
 
     /**
+     * Frames from the camera until a card is read in one. A scan lasts up to a
+     * minute, so each frame's codes are judged by the clock when that frame was
+     * read: a card that runs out halfway through is turned down.
+     *
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function scan(array $arguments, string $kind, callable $frames, callable $readFrame, int $now): array
+    public static function scan(array $arguments, string $kind, callable $frames, callable $readFrame, callable $clock): array
     {
         try {
             $seconds = self::whole($arguments['seconds'] ?? null, self::SECONDS_MIN, self::SECONDS_MAX, self::SECONDS_DEFAULT, 'seconds');
@@ -444,7 +511,7 @@ final class Process
                 if ($texts === []) {
                     continue;
                 }
-                $said = self::cardsSeen($texts, $kind, $now);
+                $said = self::cardsSeen($texts, $kind, (int) $clock());
                 if ($said['status'] === 'seen' || $said['status'] === 'expired') {
                     return $said + ['engine' => 'local', 'frames' => $count, 'frame_size' => [$width, $height]];
                 }
@@ -469,7 +536,7 @@ final class Process
      * The answer to one request. The seams are for tests: by default aisenseapi.com,
      * zbarimg, this machine's screen and camera, and its clock.
      *
-     * @param array{encode?: callable, decode?: callable, read_local?: callable, display?: callable, frames?: callable, read_frame?: callable, clock?: callable} $seams
+     * @param array{encode?: callable, decode?: callable, read_local?: callable, display?: callable, frames?: callable, read_frame?: callable, clock?: callable, write?: callable} $seams
      * @return array<string, mixed>
      */
     public static function handle(mixed $request, array $seams = []): array
@@ -480,7 +547,9 @@ final class Process
         $display = $seams['display'] ?? [Screen::class, 'show'];
         $frames = $seams['frames'] ?? [Camera::class, 'frames'];
         $readFrame = $seams['read_frame'] ?? [Reader::class, 'readFrame'];
-        $now = (int) (($seams['clock'] ?? 'time')());
+        $clock = $seams['clock'] ?? 'time';
+        $write = $seams['write'] ?? null;
+        $now = (int) $clock();
         if (!is_array($request) || ($request['aamio_addon'] ?? null) !== self::CONTRACT) {
             return self::answer(self::refused('not_contract_2', 'This add-on speaks contract ' . self::CONTRACT . " of aamio's add-ons, and the request is not on it. Upgrade aamio, or install the version of aisenseapi/aamio-qrcast made for yours."));
         }
@@ -496,13 +565,13 @@ final class Process
             return self::answer(self::card($arguments, $now));
         }
         if ($short === 'show') {
-            return self::answer(self::show($arguments, $kind, $encode, $display, $now));
+            return self::answer(self::show($arguments, $kind, $encode, $display, $now, $write));
         }
         if ($short === 'read') {
-            return self::answer(self::readFile($arguments, $kind, $decode, $readLocal, $now));
+            return self::answer(self::readFile($arguments, $kind, $decode, $readLocal, $clock));
         }
         if ($short === 'scan') {
-            return self::answer(self::scan($arguments, $kind, $frames, $readFrame, $now));
+            return self::answer(self::scan($arguments, $kind, $frames, $readFrame, $clock));
         }
 
         return self::answer(self::refused('unknown_call', 'The add-on ' . self::NAME . ' has no ' . json_encode($kind) . ' called ' . json_encode($name) . '. aamio addon ' . self::NAME . ' --help lists its commands, and aamio addon list its tools.'));
@@ -512,11 +581,31 @@ final class Process
     public static function main(): int
     {
         $request = json_decode((string) stream_get_contents(STDIN), true);
-        $said = self::handle($request);
-        fwrite(STDOUT, (string) json_encode($said, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        [$json, $code] = self::written(self::handle($request));
+        fwrite(STDOUT, $json);
         fflush(STDOUT);
 
-        return $said['exit_code'];
+        return $code;
+    }
+
+    /**
+     * An answer as JSON, and the exit code that goes with it. Bytes that are
+     * not UTF-8 become U+FFFD rather than cost the whole answer, and an answer
+     * that cannot be written at all is replaced by one that says so: the core
+     * never gets nothing and tells the user to reinstall.
+     *
+     * @param array<string, mixed> $said
+     * @return array{0: string, 1: int}
+     */
+    public static function written(array $said): array
+    {
+        $json = json_encode($said, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($json === false) {
+            $said = self::answer(self::unreachable('answer_not_written', 'The add-on could not write its answer as JSON: ' . json_last_error_msg() . '. That is a fault in the add-on; report it at https://github.com/aisenseapi/aamio-addon-qrcast.'));
+            $json = (string) json_encode($said, JSON_UNESCAPED_SLASHES);
+        }
+
+        return [$json, (int) $said['exit_code']];
     }
 
     private static function absolute(string $path): string

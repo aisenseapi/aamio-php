@@ -23,14 +23,15 @@ namespace Aamio\Earshot;
  * never goes into an answer. The engine makes and reads the sound: aisense, the
  * default, at aisenseapi.com, or local, on this machine with Codec, which makes
  * the same sound byte for byte and sends nothing. When aisenseapi.com cannot be
- * reached, the local engine does the work instead and the answer says so. The
- * same as aamio-python's aamio_earshot.process.
+ * reached or cannot do it, the local engine does the work instead, and the
+ * answer says so and whether the card or the recording had gone to
+ * aisenseapi.com all the same. The same as aamio-python's aamio_earshot.process.
  */
 final class Process
 {
     public const CONTRACT = 2;
     public const NAME = 'earshot';
-    public const VERSION = '0.3.1';
+    public const VERSION = '0.3.2';
     public const TOOL = 'aamio_addon_earshot_';
     public const EXIT_CODES = ['card' => 0, 'played' => 0, 'written' => 0, 'heard' => 0, 'nothing_heard' => 3, 'not_understood' => 3, 'expired' => 3, 'invalid' => 2, 'unreachable' => 5];
     public const REPEAT_MAX = 3;
@@ -144,7 +145,12 @@ final class Process
     }
 
     /**
-     * What an answer says when aisenseapi.com could not be reached and the work was done here.
+     * What an answer says when aisenseapi.com did not do the work and it was done here.
+     *
+     * The request went out before anything failed, so the card or the recording
+     * may be at aisenseapi.com all the same: certainly when it answered, with a
+     * 503 say, and perhaps when the connection broke. sent says which, yes or
+     * maybe.
      *
      * @param array<string, mixed> $said
      * @return array<string, mixed>
@@ -152,11 +158,49 @@ final class Process
     private static function fallback(array $said, ?Unreachable $error, string $done): array
     {
         if ($error !== null) {
-            $said['fallback'] = ['from' => 'aisense', 'reason' => $error->reason];
-            $said['engine_note'] = 'aisenseapi.com could not be reached (' . $error->reason . '), so the sound was ' . $done . ' on this machine instead, as aisense would have, and nothing went to it.';
+            [$what, $work] = $done === 'made' ? ['card', 'the sound was made on this machine instead, as aisense would have'] : ['recording', 'the recording was read on this machine instead'];
+            $said['fallback'] = ['from' => 'aisense', 'reason' => $error->reason, 'sent' => $error->answered ? 'yes' : 'maybe'];
+            $said['engine_note'] = $error->answered
+                ? 'aisenseapi.com answered but did not do it (' . $error->reason . '), so ' . $work . '. The ' . $what . ' had gone to aisenseapi.com with the request.'
+                : 'aisenseapi.com could not be reached (' . $error->reason . '), so ' . $work . '. The ' . $what . ' may have reached aisenseapi.com before the connection failed.';
         }
 
         return $said;
+    }
+
+    /**
+     * $data in a new file, whole or not at all: fwrite may take part of it, so
+     * it is written until every byte is or a write fails, and a file that could
+     * not be written to the end is removed again, as this call made it.
+     *
+     * @param null|callable(resource, string): (int|false) $write fwrite, or a stand-in for tests
+     * @return ?string null, or out_exists or out_not_written
+     */
+    public static function writeNew(string $path, string $data, ?callable $write = null): ?string
+    {
+        $write ??= static fn ($handle, string $bytes): int|false => @fwrite($handle, $bytes);
+        $handle = @fopen($path, 'xb');
+        if ($handle === false) {
+            return file_exists($path) ? 'out_exists' : 'out_not_written';
+        }
+        $done = 0;
+        $length = strlen($data);
+        while ($done < $length) {
+            $put = $write($handle, substr($data, $done, 1048576));
+            if ($put === false || $put === 0) {
+                break;
+            }
+            $done += $put;
+        }
+        $whole = $done === $length && @fflush($handle);
+        $whole = @fclose($handle) && $whole;
+        if (!$whole) {
+            @unlink($path);
+
+            return 'out_not_written';
+        }
+
+        return null;
     }
 
     /**
@@ -223,7 +267,7 @@ final class Process
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function broadcast(array $arguments, string $kind, callable $encode, callable $play, callable $pause, int $now): array
+    public static function broadcast(array $arguments, string $kind, callable $encode, callable $play, callable $pause, int $now, ?callable $write = null): array
     {
         try {
             $expires = self::expires($arguments, $now);
@@ -268,14 +312,13 @@ final class Process
         }
         $said = self::fallback(['card' => $text, 'mode' => $mode, 'duration_seconds' => self::secondsOf($sound), 'expires_at' => $expires, 'engine' => $used], $reserve, 'made');
         if ($out !== null) {
-            $handle = @fopen($out, 'xb');
-            if ($handle === false) {
-                return file_exists($out)
-                    ? self::refused('out_exists', $out . ' is there already and was left as it is. Give the name of a new file.')
-                    : self::refused('out_not_written', $out . ' could not be written.');
+            $failed = self::writeNew($out, $sound, $write);
+            if ($failed === 'out_exists') {
+                return self::refused('out_exists', $out . ' is there already and was left as it is. Give the name of a new file.');
             }
-            fwrite($handle, $sound);
-            fclose($handle);
+            if ($failed !== null) {
+                return self::refused('out_not_written', $out . ' could not be written whole. Nothing was left there, so the same name can be given again.');
+            }
 
             return $said + ['status' => 'written', 'file' => $out, 'bytes' => strlen($sound), 'note' => 'Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it.'];
         }
@@ -284,8 +327,12 @@ final class Process
             return self::unreachable(new Unreachable('no_temporary_folder', 'No private folder could be made in the temporary directory for the sound. Check the temporary directory.'));
         }
         $path = $folder . DIRECTORY_SEPARATOR . 'card.wav';
+        if (self::writeNew($path, $sound, $write) !== null) {
+            self::clean($folder);
+
+            return self::unreachable(new Unreachable('temporary_file_not_written', 'The sound could not be written whole in the temporary directory for the player. Check the space there.'));
+        }
         try {
-            file_put_contents($path, $sound);
             $player = '';
             for ($turn = 0; $turn < $repeat; $turn++) {
                 if ($turn > 0) {
@@ -321,7 +368,9 @@ final class Process
                 $said = self::localDecode($sound, $mode);
             } else {
                 try {
-                    $said = $decode($sound, $mode);
+                    // aisense reads the plain PCM header only, so a recorder's
+                    // WAVE_FORMAT_EXTENSIBLE goes as the same samples under that one.
+                    $said = $decode(Codec::classicWav($sound), $mode);
                 } catch (Unreachable $error) {
                     $reserve = $error;
                     $used = 'local';
@@ -365,10 +414,15 @@ final class Process
     }
 
     /**
+     * Records for up to 40 seconds and reads what was heard. The card is judged
+     * by the clock when the recording ended, the latest it can have been
+     * played, not when the call began: a card that runs out while the
+     * microphone is open is turned down.
+     *
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function listen(array $arguments, string $kind, callable $decode, callable $record, int $now): array
+    public static function listen(array $arguments, string $kind, callable $decode, callable $record, callable $clock): array
     {
         try {
             $seconds = self::whole($arguments['seconds'] ?? null, self::SECONDS_MIN, self::SECONDS_MAX, self::SECONDS_DEFAULT, 'seconds');
@@ -388,6 +442,7 @@ final class Process
             } catch (Unreachable $error) {
                 return self::unreachable($error);
             }
+            $heardAt = (int) $clock();
             $sound = is_file($path) ? @file_get_contents($path, false, null, 0, Service::$maxRecordingBytes + 1) : false;
         } finally {
             // Gone from the disk before it goes anywhere.
@@ -397,14 +452,14 @@ final class Process
             return self::unreachable(new Unreachable('recorder_failed', 'The recorder said it was done, and left no recording. Check the microphone, or record the sound another way and read the file with decode.'));
         }
 
-        return self::heard($sound, $mode, $kind, $decode, $now, $engine) + ['recorded_seconds' => $seconds, 'recorder' => $recorder];
+        return self::heard($sound, $mode, $kind, $decode, $heardAt, $engine) + ['recorded_seconds' => $seconds, 'recorder' => $recorder];
     }
 
     /**
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function decodeFile(array $arguments, string $kind, callable $decode, int $now): array
+    public static function decodeFile(array $arguments, string $kind, callable $decode, callable $clock): array
     {
         try {
             $mode = self::mode($arguments['mode'] ?? null, Service::DECODE_MODES, 'auto');
@@ -428,14 +483,14 @@ final class Process
             return self::refused('not_a_wav', $name . ' is not a WAV file. Record or convert it to uncompressed 16-bit PCM WAV at 44.1 or 48 kHz: MP3, AAC and WebM are not read.');
         }
 
-        return self::heard($sound, $mode, $kind, $decode, $now, $engine);
+        return self::heard($sound, $mode, $kind, $decode, (int) $clock(), $engine);
     }
 
     /**
      * The answer to one request. The seams are for tests: by default the calls
      * to aisenseapi.com, this machine's speaker and microphone, and its clock.
      *
-     * @param array{encode?: callable, decode?: callable, play?: callable, record?: callable, pause?: callable, clock?: callable} $seams
+     * @param array{encode?: callable, decode?: callable, play?: callable, record?: callable, pause?: callable, clock?: callable, write?: callable} $seams
      * @return array<string, mixed>
      */
     public static function handle(mixed $request, array $seams = []): array
@@ -447,7 +502,9 @@ final class Process
         $pause = $seams['pause'] ?? static function (float $seconds): void {
             usleep((int) ($seconds * 1000000));
         };
-        $now = (int) (($seams['clock'] ?? 'time')());
+        $clock = $seams['clock'] ?? 'time';
+        $write = $seams['write'] ?? null;
+        $now = (int) $clock();
         if (!is_array($request) || ($request['aamio_addon'] ?? null) !== self::CONTRACT) {
             return self::answer(self::refused('not_contract_2', 'This add-on speaks contract ' . self::CONTRACT . " of aamio's add-ons, and the request is not on it. Upgrade aamio, or install the version of aisenseapi/aamio-earshot made for yours."));
         }
@@ -463,13 +520,13 @@ final class Process
             return self::answer(self::card($arguments, $now));
         }
         if ($short === 'broadcast') {
-            return self::answer(self::broadcast($arguments, $kind, $encode, $play, $pause, $now));
+            return self::answer(self::broadcast($arguments, $kind, $encode, $play, $pause, $now, $write));
         }
         if ($short === 'listen') {
-            return self::answer(self::listen($arguments, $kind, $decode, $record, $now));
+            return self::answer(self::listen($arguments, $kind, $decode, $record, $clock));
         }
         if ($short === 'decode') {
-            return self::answer(self::decodeFile($arguments, $kind, $decode, $now));
+            return self::answer(self::decodeFile($arguments, $kind, $decode, $clock));
         }
 
         return self::answer(self::refused('unknown_call', 'The add-on ' . self::NAME . ' has no ' . json_encode($kind) . ' called ' . json_encode($name) . '. aamio addon ' . self::NAME . ' --help lists its commands, and aamio addon list its tools.'));
@@ -479,11 +536,31 @@ final class Process
     public static function main(): int
     {
         $request = json_decode((string) stream_get_contents(STDIN), true);
-        $said = self::handle($request);
-        fwrite(STDOUT, (string) json_encode($said, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        [$json, $code] = self::written(self::handle($request));
+        fwrite(STDOUT, $json);
         fflush(STDOUT);
 
-        return $said['exit_code'];
+        return $code;
+    }
+
+    /**
+     * An answer as JSON, and the exit code that goes with it. Bytes that are
+     * not UTF-8 become U+FFFD rather than cost the whole answer, and an answer
+     * that cannot be written at all is replaced by one that says so: the core
+     * never gets nothing and tells the user to reinstall.
+     *
+     * @param array<string, mixed> $said
+     * @return array{0: string, 1: int}
+     */
+    public static function written(array $said): array
+    {
+        $json = json_encode($said, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($json === false) {
+            $said = self::answer(self::unreachable(new Unreachable('answer_not_written', 'The add-on could not write its answer as JSON: ' . json_last_error_msg() . '. That is a fault in the add-on; report it at https://github.com/aisenseapi/aamio-addon-earshot.')));
+            $json = (string) json_encode($said, JSON_UNESCAPED_SLASHES);
+        }
+
+        return [$json, (int) $said['exit_code']];
     }
 
     private static function absolute(string $path): string
