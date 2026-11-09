@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /*
- * The QR code the qr add-on makes on this machine, and its card: the modules,
+ * The QR code the qrcast add-on makes on this machine, and its card: the modules,
  * the mask, the three drawings, and the card against the earshot add-on's.
  * Offline. The fingerprints are aamio-python's too (tests/test_qrcast_symbol.py
  * there), so a code made by one runtime is the code made by the other, module

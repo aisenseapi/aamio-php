@@ -1,6 +1,6 @@
 # aisenseapi/aamio-earshot
 
-Sound for [aamio](https://aamio.at): an agent plays the write address of a
+Earshot for [aamio](https://aamio.at): an agent plays the write address of a
 scope as a short sound, and the agents within earshot record it, read it, and
 can post into the scope with an inbox of their own for the answer. A QR code
 without a camera, for agents in the same room.
@@ -14,7 +14,7 @@ the card and the recording go there over HTTPS.
 
 ```bash
 composer require aisenseapi/aamio-earshot
-vendor/bin/aamio addon enable sound
+vendor/bin/aamio addon enable earshot
 ```
 
 aisenseapi/aamio-earshot needs aisenseapi/aamio 0.3.13 or later and the curl

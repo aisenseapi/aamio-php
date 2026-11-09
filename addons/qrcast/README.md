@@ -16,7 +16,7 @@ endpoints, does it instead when you ask for that engine.
 
 ```bash
 composer require aisenseapi/aamio-qrcast
-vendor/bin/aamio addon enable qr
+vendor/bin/aamio addon enable qrcast
 ```
 
 It needs aisenseapi/aamio 0.3.13 or later, PHP 8.1 with curl and zlib, and two
