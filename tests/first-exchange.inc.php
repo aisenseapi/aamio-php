@@ -156,7 +156,7 @@ try {
     Http::$override = $exchangeHeld;
 }
 $reads = $readsOf($fake->calls, [$uInbox->w, $private['w']]);
-$check(count($got) === 1 && ($got[0]['body']['text'] ?? null) === 'arrived during the wait' && count($reads) === 4 && str_starts_with($reads[0], '/' . $uInbox->w) && !str_contains($reads[0], '/wait/') && str_starts_with($reads[1], '/' . $private['w']) && !str_contains($reads[1], '/wait/') && str_starts_with($reads[2], '/' . $uInbox->w) && str_ends_with($reads[2], '/wait/20') && str_starts_with($reads[3], '/' . $private['w']) && !str_contains($reads[3], '/wait/'), 'with nothing waiting the inbox waits, and the private thread is asked again when the wait ends', json_encode($reads));
+$check(count($got) === 1 && ($got[0]['body']['text'] ?? null) === 'arrived during the wait' && count($reads) === 5 && str_starts_with($reads[0], '/' . $uInbox->w) && !str_contains($reads[0], '/wait/') && $reads[1] === '/' . $private['w'] && str_starts_with($reads[2], '/' . $private['w'] . '/after/1') && !str_contains($reads[2], '/wait/') && str_starts_with($reads[3], '/' . $uInbox->w) && str_ends_with($reads[3], '/wait/20') && str_starts_with($reads[4], '/' . $private['w']) && !str_contains($reads[4], '/wait/'), 'with nothing waiting the inbox waits, and the private thread is asked again when the wait ends, the row at its cursor checked once before it is read from there', json_encode($reads));
 $check($u->attentionTaken() === [], 'and nothing about it is worth attention');
 $t->close();
 $u->close();

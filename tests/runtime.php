@@ -59,6 +59,8 @@ final class FakeService
     /** A presence lookup answers 503. */
     public bool $lookupDown = false;
     public int $pageSize = 200;
+    /** A service without read limits, that sends every row after the cursor whatever X-Max-Bytes says. */
+    public bool $ignoreBudget = false;
     public int $now;
     private int $seq = 0;
 
@@ -188,7 +190,7 @@ final class FakeService
             // whole messages only, because half a signed message does not verify.
             $extra = [];
             $asked = (int) ($headers['X-Limit'] ?? 0);
-            $budget = (int) ($headers['X-Max-Bytes'] ?? 0);
+            $budget = $this->ignoreBudget ? 0 : (int) ($headers['X-Max-Bytes'] ?? 0);
 
             if ($asked > 0 || $budget > 0) {
                 $kept = [];
@@ -220,7 +222,7 @@ final class FakeService
                 $messages = $kept;
             }
 
-            return [200, ['w' => $w, 'exists' => true, 'created_at' => $thread['created_at'] ?? $this->now, 'count' => count($thread['messages']), 'messages' => $messages, 'next' => $messages === [] ? $after : end($messages)['seq'], 'waited' => 0] + $extra + ($reset === null ? [] : ['reset' => $reset]), []];
+            return [200, ['w' => $w, 'exists' => true, 'created_at' => $thread['created_at'] ?? $this->now, 'expire_at' => $thread['expire_at'], 'count' => count($thread['messages']), 'messages' => $messages, 'next' => $messages === [] ? $after : end($messages)['seq'], 'waited' => 0] + $extra + ($reset === null ? [] : ['reset' => $reset]), []];
         }
 
         return [404, ['error' => 'Not found', 'fix' => 'no such route in the fake'], []];

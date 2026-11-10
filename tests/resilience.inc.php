@@ -78,7 +78,7 @@ Http::$override = static fn () => [200, ['created_at' => 1000, 'messages' => [$f
 $a->poll($channel);
 $lines = [array_intersect_key($forgedMessage, array_flip(['seq', 'at', 'sha256', 'from']))];
 // A receipt as the service gives it, for the thread these were read on.
-$receiptOf = static fn (array $lines, array $keys): array => ['schema' => 'aamio-receipt-v1', 'w' => $openW, 'created_at' => 1000, 'expire_at' => 2000000000, 'issued_at' => 1001, 'count' => count($lines), 'messages' => $lines, 'keys' => $keys, 'root' => Receipt::root($lines), 'commitment' => 'sha256:' . Receipt::root($lines)];
+$receiptOf = static fn (array $lines, array $keys): array => ['schema' => 'aamio-receipt-v1', 'w' => $openW, 'created_at' => 1000, 'expire_at' => $channel->expireAt, 'issued_at' => 1001, 'count' => count($lines), 'messages' => $lines, 'keys' => $keys, 'root' => Receipt::root($lines), 'commitment' => 'sha256:' . Receipt::root($lines)];
 $receipt = $receiptOf($lines, [$b->keys->public]);
 Http::$override = static fn () => [200, $receipt];
 $taken = $a->receipt('resilience');

@@ -25,7 +25,7 @@ final class Http
     public static $override = null;
 
     /** @return array{0:int,1:mixed,2:array<string,string>} */
-    public static function call(string $method, string $url, ?string $body = null, array $headers = [], int $timeout = 40): array
+    public static function call(string $method, string $url, ?string $body = null, array $headers = [], int $timeout = 40, bool $keepStatus = false): array
     {
         if (self::$override !== null) {
             return (self::$override)($method, $url, $body, $headers, $timeout);
@@ -72,6 +72,14 @@ final class Http
         // the follow-up review of 25 September 2026).
         if ($text === false) {
             $reason = curl_error($handle);
+            // The status came before the body broke off. With keepStatus it is
+            // the answer's: a 503 cut short was reported as 0 (a review of 10
+            // November 2026). Without, the answer is unknown, as it always was,
+            // since a write that was stored is not undone by a broken reply.
+            $code = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+            if ($keepStatus && $code > 0) {
+                return [$code, ['error' => 'the answer broke off: ' . $reason, 'fix' => 'The status came before the body broke off; ask again for what it was about.'], $responseHeaders];
+            }
 
             return [0, ['error' => 'no answer: ' . $reason, 'fix' => 'The request may have landed. Keep the bytes, mark the send unknown, and retry only when somebody has decided it is safe to.'], []];
         }

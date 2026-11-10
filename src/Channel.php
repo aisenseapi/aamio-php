@@ -55,6 +55,29 @@ final class Channel
      */
     public ?int $observedCreatedAt = null;
 
+    /** And when that thread expires: a thread a write opened has the service's own lifetime. */
+    public ?int $observedExpireAt = null;
+
+    /**
+     * The hash of the row at the cursor, as the service gave it. A thread opened
+     * again at the same address in the same second, with the same lifetime and
+     * list, looks the same in every field the service gives, and a cursor taken
+     * from the old one passed over its first messages (a review of 10 November
+     * 2026). Before a stored cursor is used again, the row at it is asked for
+     * and its hash compared with this one.
+     */
+    public ?string $afterSha256 = null;
+
+    /**
+     * Whether that was done for this cursor: a channel opened in this process
+     * has nothing to doubt, one read from state.json has, and a read checks
+     * once in a read.
+     */
+    public bool $cursorChecked = true;
+
+    /** Whether the last poll stopped at its byte budget, as messages are handed over, and left the rest at the service. */
+    public bool $stoppedAtBudget = false;
+
     /**
      * $createdAt is which thread at this address the cursor and the hashes
      * belong to. A restart can take the thread and a write can open a new one
@@ -86,6 +109,8 @@ final class Channel
         $this->createdAt = null;
         $this->observed = [];
         $this->observedCreatedAt = null;
+        $this->observedExpireAt = null;
+        $this->afterSha256 = null;
     }
 
     public function secondsLeft(int $now): int
@@ -98,7 +123,7 @@ final class Channel
         $seen = array_values(array_filter(array_keys($this->seen), static fn ($hash): bool => is_string($hash) && preg_match('/^[0-9a-f]{64}$/D', $hash) === 1));
         sort($seen);
 
-        return ['label' => $this->label, 'read_key' => $this->readKey, 'w' => $this->w, 'expire_at' => $this->expireAt, 'allow' => array_values($this->allow), 'after' => $this->after, 'created_at' => $this->createdAt, 'gone' => $this->gone, 'muted' => $this->muted, 'seen' => $seen];
+        return ['label' => $this->label, 'read_key' => $this->readKey, 'w' => $this->w, 'expire_at' => $this->expireAt, 'allow' => array_values($this->allow), 'after' => $this->after, 'after_sha256' => $this->afterSha256, 'created_at' => $this->createdAt, 'gone' => $this->gone, 'muted' => $this->muted, 'seen' => $seen];
     }
 
     public static function fromState(array $item): self
@@ -109,6 +134,11 @@ final class Channel
         }
         $channel->gone = ($item['gone'] ?? null) === true;
         $channel->muted = ($item['muted'] ?? null) === true;
+        $sha = $item['after_sha256'] ?? null;
+        $channel->afterSha256 = is_string($sha) && preg_match('/\A[0-9a-f]{64}\z/', $sha) === 1 ? $sha : null;
+        // Read from a file: whatever happened to the service since it was
+        // written, the cursor is checked before it is used again.
+        $channel->cursorChecked = false;
 
         return $channel;
     }
