@@ -1030,14 +1030,9 @@ final class Runtime
         return self::scopeView($held);
     }
 
-    /**
-     * What scopeAdd would hold, and the list it would keep or null when nothing
-     * changes. Nothing is kept here. Planned against the list given, the one a
-     * weighing has planned so far, or else the one held.
-     */
-    private function scopeAddPlan(mixed $name, mixed $key = null, mixed $address = null, ?array $book = null): array
+    /** What scopeAdd would hold, and the list it would keep or null when nothing changes. Nothing is kept here. */
+    private function scopeAddPlan(mixed $name, mixed $key = null, mixed $address = null): array
     {
-        $book ??= $this->scopes;
         $name = self::scopeNameOk($name);
         if ($key === null && $address === null) {
             throw new \InvalidArgumentException('give the key, to read and post, or the address, to post only');
@@ -1052,17 +1047,11 @@ final class Runtime
         if ($address !== null && $derived !== $address) {
             throw new \InvalidArgumentException('that key does not give that address, so one of the two is wrong');
         }
-        $index = null;
-        foreach ($book as $i => $scope) {
-            if (strtolower($scope['name']) === strtolower($name)) {
-                $index = $i;
-                break;
-            }
-        }
-        if ($index !== null && $book[$index]['address'] !== $derived) {
+        $index = $this->scopeIndex($name);
+        if ($index !== null && $this->scopes[$index]['address'] !== $derived) {
             throw new \InvalidArgumentException('there is a scope called ' . $name . ' already, with another address. Remove it or choose another name');
         }
-        foreach ($index === null ? $book : [] as $i => $scope) {
+        foreach ($index === null ? $this->scopes : [] as $i => $scope) {
             if ($scope['address'] === $derived) {
                 $index = $i;
                 break;
@@ -1071,13 +1060,13 @@ final class Runtime
         if ($index === null) {
             $held = ['name' => $name, 'key' => $key, 'address' => $derived];
 
-            return [$held, [...$book, $held]];
+            return [$held, [...$this->scopes, $held]];
         }
-        $held = $book[$index];
+        $held = $this->scopes[$index];
         if ($key !== null && empty($held['key'])) {
             // Held to post only until now. The key adds reading.
             $held['key'] = $key;
-            $scopes = $book;
+            $scopes = $this->scopes;
             $scopes[$index] = $held;
 
             return [$held, $scopes];
@@ -1165,7 +1154,7 @@ final class Runtime
      * whatever it holds and wherever it sits, so whoever reads the message
      * never sees a key in it.
      */
-    private function takeScopeShare(array &$entry, bool $apply = true, bool $weigh = false, ?array &$planned = null): void
+    private function takeScopeShare(array &$entry, bool $apply = true, bool $weigh = false): void
     {
         if (!is_array($entry['body'] ?? null)) {
             return;
@@ -1196,7 +1185,7 @@ final class Runtime
             try {
                 $local = $this->sharedScopeName($partner, $share['name'] ?? null);
                 $address = $key === null ? ($share['address'] ?? null) : null;
-                [$held, $keep] = $this->scopeAddPlan($local, $key, $address, $weigh ? $planned : null);
+                [$held, $keep] = $this->scopeAddPlan($local, $key, $address);
             } catch (\Throwable $error) {
                 // This share alone, and nothing held that was not saved. The
                 // rest of the messages are delivered either way.
@@ -1208,15 +1197,12 @@ final class Runtime
             $shown = array_merge($view, self::scopeView($held), ['kept' => true]);
             $unsaved = $view + ['note' => self::SCOPE_NOT_SAVED];
             if ($weigh) {
-                // Weighed, nothing is kept, and the shares weighed before it in
-                // the same answer are held as they will be. Two of one name were
-                // both weighed as kept, and the second was handed over with the
-                // longer note of a conflict, 4313 bytes through a budget of 4268
-                // (a review of 10 November 2026). It is shown in the longer of
-                // the two forms it can take: kept, or not saved.
-                if ($keep !== null) {
-                    $planned = $keep;
-                }
+                // Weighed, nothing is kept, against the scopes the messages
+                // before it left: two of one name were both weighed as kept, and
+                // the second came with the longer note of a conflict, 4313 bytes
+                // through a budget of 4268 (a review of 10 November 2026). It is
+                // shown in the longer of the two forms it can take: kept, or not
+                // saved.
                 $view = strlen(Codec::json($shown)) >= strlen(Codec::json($unsaved)) ? $shown : $unsaved;
             } else {
                 try {
@@ -2993,60 +2979,32 @@ final class Runtime
         // The budget is kept here as well, for what is handed over, measured as
         // it is handed over: the service counts its own form of each message,
         // and a read of 512 bytes handed over 712 (a review of 10 November 2026).
-        // Worked out before anything is observed, remembered, shared or bound,
-        // so a message that does not fit is not taken at all, and the cursor
-        // stays before it.
+        // Each message is weighed when the ones before it have been taken, their
+        // shares saved or not, their addresses bound and their hashes remembered,
+        // so it is weighed against what this read has done rather than against a
+        // plan. Planned ahead, a share was weighed as held under a name whose save
+        // then failed, and came under a longer one: 2164 bytes through a budget of
+        // 2124 (a review of the same evening). A message that does not fit is not
+        // taken at all: nothing is shared, bound, remembered or observed for it,
+        // and the cursor stays before it.
         $oversized = null;
-        if ($maxBytes !== null && $handed !== []) {
-            $used = 0;
-            $fits = 0;
-            $seenHere = [];
-            $boundHere = [];
-            $scopesHere = null;
-            foreach ($handed as $message) {
-                $weight = $this->weightAsHandedOver($channel, $message, $seenHere, $boundHere, $scopesHere);
-                if ($fits > 0 && $used + $weight > $maxBytes) {
+        $used = 0;
+        $budgetAt = null;
+        $entries = [];
+        foreach ($handed as $message) {
+            if ($maxBytes !== null) {
+                $weight = $this->weightAsHandedOver($channel, $message);
+                if ($entries !== [] && $used + $weight > $maxBytes) {
+                    $budgetAt = (int) $entries[count($entries) - 1]['seq'];
                     break;
                 }
                 // Alone and still over the budget: it has come, so it is handed
                 // over on its own rather than kept back for ever.
-                if ($fits === 0 && $weight > $maxBytes) {
+                if ($entries === [] && $weight > $maxBytes) {
                     $oversized = [(int) ($message['seq'] ?? 0), $weight];
                 }
                 $used += $weight;
-                $fits++;
             }
-            if ($fits < count($handed)) {
-                $budgetAt = (int) ($handed[$fits - 1]['seq'] ?? 0);
-                $within = static fn (array $item): bool => (int) ($item['seq'] ?? 0) <= $budgetAt;
-                $handed = array_values(array_filter($handed, $within));
-                $keptOut = array_values(array_filter($keptOut, $within));
-                $read['observed'] = array_values(array_filter((array) ($read['observed'] ?? []), $within));
-                $stopAt = $budgetAt;
-                $channel->stoppedAtBudget = true;
-            }
-        }
-        if ($oversized !== null) {
-            $this->note($channel, 'over_budget', 'message ' . $oversized[0] . ' on this channel is ' . $oversized[1] . ' bytes as handed over here, larger than the whole byte budget of ' . $maxBytes . ' this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.');
-        }
-        // The rows belong to the thread they were read on. After the service
-        // restarted, a receipt of the new thread at the same address was
-        // compared with rows of the old one (a review of 10 November 2026).
-        if (($read['observed'] ?? []) !== [] && [$channel->observedCreatedAt, $channel->observedExpireAt, $channel->observedInstance] !== [$channel->createdAt, $channel->expireAt, $channel->instance]) {
-            $channel->observed = [];
-            $channel->observedCreatedAt = $channel->createdAt;
-            $channel->observedExpireAt = $channel->expireAt;
-            $channel->observedInstance = $channel->instance;
-        }
-        foreach ($read['observed'] ?? [] as $observed) {
-            $channel->observed[$observed['seq']] = $observed;
-            if ($observed['unverified_because'] !== null && $observed['service_verified']) {
-                $disposition = $observed['kept_out'] ? 'kept out by this channel\'s list' : 'handed over as unverified';
-                $this->note($channel, 'unverified', 'message ' . $observed['seq'] . ' was called verified by the service and does not check out here: ' . $observed['unverified_because'] . '. It is ' . $disposition . '. This can indicate a faulty service or an operator that lies.', [$observed['seq']]);
-            }
-        }
-        $entries = [];
-        foreach ($handed as $message) {
             $entry = $this->readEntry($channel, $message);
             $from = $entry['from_key'];
             $body = $entry['body'];
@@ -3096,6 +3054,32 @@ final class Runtime
             }
             $entries[] = $entry;
         }
+        if ($budgetAt !== null) {
+            $within = static fn (array $item): bool => (int) ($item['seq'] ?? 0) <= $budgetAt;
+            $keptOut = array_values(array_filter($keptOut, $within));
+            $read['observed'] = array_values(array_filter((array) ($read['observed'] ?? []), $within));
+            $stopAt = $budgetAt;
+            $channel->stoppedAtBudget = true;
+        }
+        if ($oversized !== null) {
+            $this->note($channel, 'over_budget', 'message ' . $oversized[0] . ' on this channel is ' . $oversized[1] . ' bytes as handed over here, larger than the whole byte budget of ' . $maxBytes . ' this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.');
+        }
+        // The rows belong to the thread they were read on. After the service
+        // restarted, a receipt of the new thread at the same address was
+        // compared with rows of the old one (a review of 10 November 2026).
+        if (($read['observed'] ?? []) !== [] && [$channel->observedCreatedAt, $channel->observedExpireAt, $channel->observedInstance] !== [$channel->createdAt, $channel->expireAt, $channel->instance]) {
+            $channel->observed = [];
+            $channel->observedCreatedAt = $channel->createdAt;
+            $channel->observedExpireAt = $channel->expireAt;
+            $channel->observedInstance = $channel->instance;
+        }
+        foreach ($read['observed'] ?? [] as $observed) {
+            $channel->observed[$observed['seq']] = $observed;
+            if ($observed['unverified_because'] !== null && $observed['service_verified']) {
+                $disposition = $observed['kept_out'] ? 'kept out by this channel\'s list' : 'handed over as unverified';
+                $this->note($channel, 'unverified', 'message ' . $observed['seq'] . ' was called verified by the service and does not check out here: ' . $observed['unverified_because'] . '. It is ' . $disposition . '. This can indicate a faulty service or an operator that lies.', [$observed['seq']]);
+            }
+        }
         if ($entries !== []) {
             // The cursor moves and the hashes are stored in the same save, before the caller sees a message.
             $channel->after = max($channel->after, (int) end($entries)['seq']);
@@ -3134,19 +3118,15 @@ final class Runtime
 
     /**
      * The bytes of a message as this read would hand it over, worked out on a
-     * copy and keeping nothing: the scope share in it as shown when it is
-     * taken, after the shares earlier in the same answer, a replay of one
-     * earlier in the same answer, the binding conflicts it would carry, and the
-     * archive's mark. Compact JSON in UTF-8, as the message goes out.
+     * copy and keeping nothing, when the messages before it in the answer have
+     * been taken: the scope share in it at the longer of the forms it can take,
+     * a replay, the binding conflicts it would carry, and the archive's mark.
+     * Compact JSON in UTF-8, as the message goes out.
      */
-    private function weightAsHandedOver(Channel $channel, array $message, array &$seenHere, array &$boundHere, ?array &$scopesHere): int
+    private function weightAsHandedOver(Channel $channel, array $message): int
     {
         $entry = $this->readEntry($channel, $message);
-        if (is_string($entry['sha256'] ?? null)) {
-            $entry['replay'] = ($entry['replay'] ?? false) || isset($seenHere[$entry['sha256']]);
-            $seenHere[$entry['sha256']] = true;
-        }
-        $this->takeScopeShare($entry, true, true, $scopesHere);
+        $this->takeScopeShare($entry, true, true);
         $from = $entry['from_key'] ?? null;
         if (is_array($entry['body'] ?? null) && ($entry['verified'] ?? false) === true && is_string($from) && $from !== '') {
             foreach (['reply_to', 'channel'] as $field) {
@@ -3154,10 +3134,8 @@ final class Runtime
                 if (!is_string($address) || !Address::isW($address)) {
                     continue;
                 }
-                $bound = $this->peers[$address] ?? ($boundHere[$address] ?? null);
-                if ($bound === null) {
-                    $boundHere[$address] = $from;
-                } elseif ($bound !== $from) {
+                $bound = $this->peers[$address] ?? null;
+                if ($bound !== null && $bound !== $from) {
                     $entry['binding_conflicts'][] = ['field' => $field, 'address' => $address, 'claimed_by' => $from, 'bound_to' => $bound];
                 }
             }

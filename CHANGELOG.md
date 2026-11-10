@@ -41,10 +41,13 @@ not what moved in the source.
   the weighing let 1036 bytes through a budget of 768. A send still carries `trace_error`.
 - A scope share that cannot be saved says `not kept: could not be saved`, and
   `attention` says why as `scope_not_saved`. The message is weighed at the
-  longer of the two forms the share can take. And a share is weighed
-  against the shares before it in the same answer: two of one name were both
-  weighed as kept, and the second came with the longer note of a conflict, 4313
-  bytes through a budget of 4268.
+  longer of the two forms the share can take. And each message is weighed
+  when the ones before it in the answer have been taken, not against a plan of
+  them: two shares of one name were both weighed as kept, and the second came
+  with the longer note of a conflict, 4313 bytes through a budget of 4268; and
+  when the first save of a share failed, the next share of the same key was
+  weighed as held under the first one's name and came under its own longer
+  one, 2164 bytes through a budget of 2124.
 - A receipt names a signer only for a line it lists as this process read it,
   and its keys must be the signers of its lines, each once: one that left a
   signer out was signed as if nobody had signed.

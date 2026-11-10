@@ -531,5 +531,64 @@ $check(
 $shareFrom->close();
 $shareTo->close();
 
+// The first save of a share fails and the next one succeeds: each message is weighed when the ones before it were
+// taken. Planned ahead, the second share was weighed as held under the first one's name, which was never saved, and
+// came under its own longer one: 2164 bytes through a budget of 2124 (the review of the same evening).
+$blocker = null;
+$unblock = static function (string $line) use (&$blocker): void {
+    if ($blocker !== null && str_contains($line, 'scopes.json could not be written')) {
+        @rmdir($blocker);
+        $blocker = null;
+    }
+};
+$flakyHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-flaky-scopes';
+mkdir($flakyHome, 0700, true);
+$flaky = new Runtime($flakyHome, 'https://fake.test', ['r10'], false, $unblock);
+$flakySender = $r10Open();
+$flaky->partnerAdd('sender', $flakySender->keys->public);
+$flakySender->partnerAdd('receiver', $flaky->keys->public);
+$flaky->read();
+$flakySender->read();
+$flakyKey = Address::newScopeKey();
+$flakySender->send('receiver', 'Scope t', ['aamio_scope' => ['name' => 't', 'key' => $flakyKey]]);
+$flakySender->send('receiver', 'Scope again', ['aamio_scope' => ['name' => str_repeat('n', 58), 'key' => $flakyKey]]);
+$flakySender->send('receiver', 'one short text');
+$flakySender->send('receiver', 'two short text');
+$fake->ignoreBudget = true;
+try {
+    $blocker = $flakyHome . DIRECTORY_SEPARATOR . 'scopes.json.tmp';
+    mkdir($blocker);
+    $whole = $flaky->read();
+    $sizes = array_map(static fn (array $entry): int => strlen(Codec::json($entry)), $whole);
+    $views = array_map(static fn (array $entry) => $entry['body']['data']['aamio_scope'] ?? null, $whole);
+    $flaky->attentionTaken();
+    $flaky->channels['inbox']->forgetThread();
+    $flaky->channels['inbox']->seen = [];
+    foreach ($flaky->scopeList() as $kept) {
+        $flaky->scopeRemove($kept['name']);
+    }
+    $blocker = $flakyHome . DIRECTORY_SEPARATOR . 'scopes.json.tmp';
+    mkdir($blocker);
+    $got = $flaky->read(0, 50, array_sum($sizes) - 1);
+    $afterBudget = $flaky->channels['inbox']->after;
+    $flaky->attentionTaken();
+    $rest = $flaky->read(0, 50, array_sum($sizes) - 1);
+} finally {
+    $fake->ignoreBudget = false;
+    if ($blocker !== null) {
+        @rmdir($blocker);
+    }
+}
+$textsOfFlaky = static fn (array $entries): array => array_map(static fn (array $entry) => $entry['body']['text'] ?? null, $entries);
+$check(
+    count($whole) === 4 && ($views[0]['kept'] ?? null) === false && ($views[1]['kept'] ?? null) === true && strlen((string) ($views[1]['name'] ?? '')) > 50
+        && count($got) === 3 && array_sum(array_map(static fn (array $entry): int => strlen(Codec::json($entry)), $got)) <= array_sum($sizes) - 1 && $afterBudget === 3
+        && $textsOfFlaky($rest) === ['two short text'],
+    'a share whose first save failed and whose next save worked keeps the budget: the fourth waits, the cursor stops at 3, and the next read hands it over once',
+    json_encode([$sizes, $views, count($got), $afterBudget, $textsOfFlaky($rest)])
+);
+$flaky->close();
+$flakySender->close();
+
 $pc->close();
 $pcSender->close();
