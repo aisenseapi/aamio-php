@@ -73,18 +73,20 @@ $boardRead = $a->board->repliesThread(['id' => 'key', 'w' => $openW, 'allow' => 
 $check($boardRead['replies'] === [] && count($boardRead['kept_out']) === 2 && str_contains($boardRead['kept_out'][0]['unverified_because'], 'signature'), 'board reader enforces local policy and retains verification reasons');
 $check(count($a->board->replies($openW, 'key')['replies']) === 2, 'compatibility board reader remains explicitly listless');
 
-$channel->observed = []; $channel->after = 0;
-Http::$override = static fn () => [200, ['messages' => [$forgedMessage], 'next' => 1]];
+$channel->observed = []; $channel->after = 0; $channel->createdAt = null;
+Http::$override = static fn () => [200, ['created_at' => 1000, 'messages' => [$forgedMessage], 'next' => 1]];
 $a->poll($channel);
 $lines = [array_intersect_key($forgedMessage, array_flip(['seq', 'at', 'sha256', 'from']))];
-$receipt = ['count' => 1, 'messages' => $lines, 'keys' => [$b->keys->public], 'root' => Receipt::root($lines)];
+// A receipt as the service gives it, for the thread these were read on.
+$receiptOf = static fn (array $lines, array $keys): array => ['schema' => 'aamio-receipt-v1', 'w' => $openW, 'created_at' => 1000, 'expire_at' => 2000000000, 'issued_at' => 1001, 'count' => count($lines), 'messages' => $lines, 'keys' => $keys, 'root' => Receipt::root($lines), 'commitment' => 'sha256:' . Receipt::root($lines)];
+$receipt = $receiptOf($lines, [$b->keys->public]);
 Http::$override = static fn () => [200, $receipt];
 $taken = $a->receipt('resilience');
 $check($taken['held_locally'] === 1 && $taken['local_root_matches'] === true && $taken['keys'] === [$b->keys->public] && $taken['keys_unverified_count'] === 1 && $taken['signers_not_verified_locally'] === [1], 'receipt observes kept-out metadata without turning a forged key claim into a contact name');
-$receipt['messages'][0]['at'] = 999; $receipt['root'] = Receipt::root($receipt['messages']);
+$receipt['messages'][0]['at'] = 999; $receipt = $receiptOf($receipt['messages'], [$b->keys->public]);
 Http::$override = static fn () => [200, $receipt];
 $taken = $a->receipt('resilience');
 $check($taken['local_root_matches'] === false && $taken['local_differences'] === [['seq' => 1, 'fields' => ['at']]], 'receipt names the locally differing field');
-$receipt = ['count' => 0, 'messages' => [], 'keys' => [], 'root' => Receipt::root([])];
+$receipt = $receiptOf([], []);
 Http::$override = static fn () => [200, $receipt];
 $check($a->receipt('resilience')['local_root_matches'] === false, 'runtime reports fewer receipt lines as a mismatch');

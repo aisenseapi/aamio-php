@@ -17,6 +17,8 @@ final class Client
     public const DEFAULT_TTL = 600;
     /** The most one message may be, as the service takes it. The service refuses more with 413. */
     public const MAX_MESSAGE_BYTES = 65536;
+    /** The largest X-Max-Bytes the service takes: one to eight digits. */
+    public const MAX_BYTES_HEADER = 99999999;
 
     /** @var array<string, array|null> gates read, per address, once */
     private array $gates = [];
@@ -322,7 +324,11 @@ final class Client
         }
 
         if ($maxBytes !== null) {
-            $headers['X-Max-Bytes'] = (string) $maxBytes;
+            // The service takes the header as one to eight digits and holds any
+            // budget to the thread's maximum, a megabyte, so a larger one is sent
+            // as the largest it takes: nine digits were answered 400 and the read
+            // came back empty (a review of 10 November 2026).
+            $headers['X-Max-Bytes'] = (string) min($maxBytes, self::MAX_BYTES_HEADER);
         }
 
         [$status, $answer] = Http::call('GET', $this->url($path), null, $headers, $this->timeout + 25);

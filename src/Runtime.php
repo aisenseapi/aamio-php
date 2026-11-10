@@ -2779,6 +2779,7 @@ final class Runtime
     {
         $channel->leftWaiting = 0;
         $channel->moreAtService = false;
+        $channel->moreAtLimit = false;
         // A muted channel is read no more, whoever calls: read() skips it, and
         // a library caller that asks straight out gets the same answer instead
         // of the removed partner's messages.
@@ -2859,9 +2860,14 @@ final class Runtime
             );
         }
 
-        // And what it held back that does fit: more messages after the ones sent.
+        // And what it held back that does fit: more messages after the ones
+        // sent. The service says more both when the count this read asked for
+        // was reached and when the byte budget was, and the note says which: a
+        // read for one message blamed a budget nobody had set (a review of 10
+        // November 2026). Every row the service sent is observed or cut below.
         if (($answer['more'] ?? null) === true) {
             $channel->moreAtService = true;
+            $channel->moreAtLimit = $limit !== null && count((array) ($read['observed'] ?? [])) >= $limit;
         }
         // Where this poll stops, when the limit is reached before the end of
         // what the service returned: the seq of the last message handed over.
@@ -2879,6 +2885,13 @@ final class Runtime
             $keptOut = array_values(array_filter($keptOut, $within));
             $channel->leftWaiting -= count($handed) + count($keptOut);
             $read['observed'] = array_values(array_filter((array) ($read['observed'] ?? []), $within));
+        }
+        // The rows belong to the thread they were read on. After the service
+        // restarted, a receipt of the new thread at the same address was
+        // compared with rows of the old one (a review of 10 November 2026).
+        if (($read['observed'] ?? []) !== [] && $channel->observedCreatedAt !== $channel->createdAt) {
+            $channel->observed = [];
+            $channel->observedCreatedAt = $channel->createdAt;
         }
         foreach ($read['observed'] ?? [] as $observed) {
             $channel->observed[$observed['seq']] = $observed;
@@ -3536,11 +3549,12 @@ final class Runtime
         $collected = [];
         $leftWaiting = 0;
         $heldBack = [];
+        $atLimit = [];
         $notAsked = [];
         $notAskedAfter = [];
 
         /** One channel asked, for what this call still has room for; how it answered, or null. */
-        $ask = function (Channel $channel, int $seconds, array &$passedOver) use (&$collected, &$leftWaiting, &$heldBack, $limit, $maxBytes): ?string {
+        $ask = function (Channel $channel, int $seconds, array &$passedOver) use (&$collected, &$leftWaiting, &$heldBack, &$atLimit, $limit, $maxBytes): ?string {
             // A channel is only asked for what this call still has room for.
             // poll() moves the cursor and saves it before the caller sees a
             // message, so whatever was fetched beyond the limit and cut off
@@ -3568,7 +3582,11 @@ final class Runtime
             $leftWaiting += $channel->leftWaiting;
 
             if ($channel->moreAtService) {
-                $heldBack[] = $channel->label;
+                if ($channel->moreAtLimit) {
+                    $atLimit[] = $channel->label;
+                } else {
+                    $heldBack[] = $channel->label;
+                }
             }
 
             return $state;
@@ -3599,28 +3617,93 @@ final class Runtime
             }
         }
 
+        $budgetSaid = null;
         if ($heldBack !== []) {
             // The service said it had more than the budget allowed. It was written
             // down on the channel and never said out loud, so a read that stopped
             // early looked exactly like one that had finished.
-            $this->noteTrouble('read', 'more', 'the service had more waiting on '
-                . implode(', ', array_values(array_unique($heldBack)))
-                . ' than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over.');
+            $held = implode(', ', array_values(array_unique($heldBack)));
+            $budgetSaid = $maxBytes !== null
+                ? 'the service had more waiting on ' . $held . ' than the byte budget this read asked for, so it sent what fits and kept the rest. Read again for it: the cursor stands at the last message handed over.'
+                : 'the service says it has more waiting on ' . $held . ' than it sent. Nothing was passed over: the cursor stands at the last message handed over, so read again for the rest.';
         }
-        if ($leftWaiting > 0 || $notAsked !== [] || $notAskedAfter !== []) {
+        $limitSaid = null;
+        if ($leftWaiting > 0 || $notAsked !== [] || $notAskedAfter !== [] || $atLimit !== []) {
             // Nothing is lost, and the caller still has to hear it: a read that
             // stopped at its limit is not a read of everything.
-            $this->noteTrouble('read', 'more', 'this read stopped at its limit of ' . $limit . ' message(s). '
+            $limitSaid = 'this read stopped at its limit of ' . $limit . ' message(s). '
+                . ($atLimit !== [] ? 'The service has more waiting on ' . implode(', ', array_values(array_unique($atLimit))) . '. ' : '')
                 . ($leftWaiting > 0 ? $leftWaiting . ' more that the service had already returned were left where they are. ' : '')
                 . ($notAsked !== [] ? count($notAsked) . ' channel(s) were not asked this time: ' . implode(', ', $notAsked) . '. ' : '')
                 . ($notAskedAfter !== [] ? count($notAskedAfter) . ' channel(s) were asked before the wait and not after it: ' . implode(', ', $notAskedAfter) . '. ' : '')
-                . 'Nothing was passed over: every cursor stands at the last message this read dealt with, so read again for the rest.');
+                . 'Nothing was passed over: every cursor stands at the last message this read dealt with, so read again for the rest.';
+        }
+        // One note for the read, under one key: a second note under the same key
+        // used to replace the first, so a read that met both its limit and a
+        // byte budget said only one of them.
+        if ($budgetSaid !== null && $limitSaid !== null) {
+            $this->noteTrouble('read', 'more', $limitSaid . ' ' . ucfirst($budgetSaid));
+        } elseif ($budgetSaid !== null || $limitSaid !== null) {
+            $this->noteTrouble('read', 'more', $budgetSaid ?? $limitSaid);
         }
 
         return $collected;
     }
 
     // ------------------------------------------------------------ receipt --
+
+    /**
+     * Why a service's answer is not a receipt for the thread at $w, or null when
+     * it is one: the v1 schema, the address that was asked for, its times, one
+     * line in order for every message it counts, and a root its commitment
+     * names. The same check as aamio-js's and aamio-python's, with the same words.
+     */
+    public static function receiptFault(mixed $data, string $w): ?string
+    {
+        if (!is_array($data) || ($data !== [] && array_is_list($data))) {
+            return 'it is not an object';
+        }
+        if (($data['schema'] ?? null) !== 'aamio-receipt-v1') {
+            return 'its schema is ' . json_encode($data['schema'] ?? null, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ', not aamio-receipt-v1';
+        }
+        if (($data['w'] ?? null) !== $w) {
+            return 'it is for ' . json_encode($data['w'] ?? null, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ', not for ' . $w . ', the address asked for';
+        }
+        foreach (['created_at', 'expire_at', 'issued_at'] as $field) {
+            if (!is_int($data[$field] ?? null) || $data[$field] < 0) {
+                return 'its ' . $field . ' is not a time';
+            }
+        }
+        $messages = $data['messages'] ?? null;
+        if (!is_array($messages) || !array_is_list($messages)) {
+            return 'it has no list of messages';
+        }
+        if (!is_int($data['count'] ?? null) || $data['count'] !== count($messages)) {
+            return 'it counts ' . json_encode($data['count'] ?? null, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ' messages and has ' . count($messages) . ' lines';
+        }
+        $previous = 0;
+        foreach ($messages as $index => $m) {
+            $fine = is_array($m) && is_int($m['seq'] ?? null) && $m['seq'] > $previous && is_int($m['at'] ?? null) && $m['at'] >= 0
+                && is_string($m['sha256'] ?? null) && preg_match('/\A[0-9a-f]{64}\z/', $m['sha256']) === 1
+                && (($m['from'] ?? null) === null || is_string($m['from']));
+            if (!$fine) {
+                return 'line ' . ($index + 1) . ' is not a message line in order';
+            }
+            $previous = $m['seq'];
+        }
+        if (!is_string($data['root'] ?? null) || preg_match('/\A[0-9a-f]{64}\z/', $data['root']) !== 1) {
+            return 'its root is not a sha256 in hex';
+        }
+        if (($data['commitment'] ?? null) !== 'sha256:' . $data['root']) {
+            return 'its commitment is not sha256: and its root';
+        }
+        $keys = $data['keys'] ?? null;
+        if ($keys !== null && (!is_array($keys) || !array_is_list($keys) || array_filter($keys, static fn ($key): bool => !is_string($key)) !== [])) {
+            return 'its keys are not a list of keys';
+        }
+
+        return null;
+    }
 
     public function receipt(string $label = 'inbox', bool $anchor = false): array
     {
@@ -3633,7 +3716,20 @@ final class Runtime
             throw new \RuntimeException('receipt failed: ' . $taken['status'] . ' ' . json_encode($taken['body']));
         }
         $data = $taken['body'];
-        $entries = array_values($channel->observed);
+        // Checked as a receipt for this channel before anything is compared,
+        // signed or anchored: one for another address, and one that counted
+        // seven messages and listed one, were signed with root_adds_up true (a
+        // review of 10 November 2026).
+        $fault = self::receiptFault($data, $channel->w);
+        if ($fault !== null) {
+            throw new \RuntimeException('receipt failed: the service\'s answer is not a receipt for this channel: ' . $fault . '. Nothing was compared, signed or anchored.');
+        }
+        // What this process read counts only for the thread it was read on. After
+        // the service restarted, a new thread at the same address was compared
+        // with what was read of the old one, and its signer named as checked here.
+        $sameThread = $channel->observedCreatedAt !== null && $channel->observedCreatedAt === $data['created_at'];
+        $earlier = $channel->observed !== [] && !$sameThread ? $channel->observedCreatedAt : null;
+        $entries = $sameThread ? array_values($channel->observed) : [];
         usort($entries, static fn (array $a, array $b): int => $a['seq'] <=> $b['seq']);
         $held = count($entries);
         $comparable = $held === (int) $data['count'];
@@ -3665,7 +3761,9 @@ final class Runtime
         if ($held > (int) $data['count']) {
             $result['local_check'] = 'Mismatch: the receipt counts fewer messages than this process read. The thread was replaced or the service lost messages.';
         } elseif (!$comparable) {
-            $result['local_check'] = sprintf('Not compared: this process holds %d of the %d messages the receipt counts. root_adds_up checks arithmetic only; our signature records what was fetched, not that its claims are true. Take the receipt in the process that read the messages for the independent comparison.', $held, $data['count']);
+            $result['local_check'] = sprintf('Not compared: this process holds %d of the %d messages the receipt counts.', $held, $data['count'])
+                . ($earlier !== null ? sprintf(' What this process read at this address was on an earlier thread, opened at %d; this receipt is for the one opened at %d, so none of that counts here.', $earlier, $data['created_at']) : '')
+                . ' root_adds_up checks arithmetic only; our signature records what was fetched, not that its claims are true. Take the receipt in the process that read the messages for the independent comparison.';
         }
         if ($anchor) {
             $idem = substr(Codec::sha256hex('aamio-listen:' . $this->keys->hash . ':' . $data['root']), 0, 32);

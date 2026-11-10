@@ -45,6 +45,16 @@ final class Channel
      */
     public bool $moreAtService = false;
 
+    /** Whether that was the count the read asked for, reached, rather than its byte budget: the service says more for both. */
+    public bool $moreAtLimit = false;
+
+    /**
+     * The thread the observations were read on: the one opened at this time at
+     * this address. A thread opened at the same address after the service
+     * restarted is another one, and its receipt is never compared with them.
+     */
+    public ?int $observedCreatedAt = null;
+
     /**
      * $createdAt is which thread at this address the cursor and the hashes
      * belong to. A restart can take the thread and a write can open a new one
@@ -75,6 +85,7 @@ final class Channel
         $this->after = 0;
         $this->createdAt = null;
         $this->observed = [];
+        $this->observedCreatedAt = null;
     }
 
     public function secondsLeft(int $now): int

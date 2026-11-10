@@ -170,7 +170,7 @@ final class FakeService
                 }
                 $root = hash('sha256', $lines);
 
-                return [200, ['schema' => 'aamio-receipt-v1', 'w' => $w, 'created_at' => $this->now, 'expire_at' => $thread['expire_at'], 'count' => count($thread['messages']), 'bytes' => 0, 'allow' => $thread['allow'], 'messages' => array_map(static fn (array $msg): array => ['seq' => $msg['seq'], 'at' => $msg['at'], 'sha256' => $msg['sha256'], 'from' => $msg['from']], $thread['messages']), 'keys' => [], 'root' => $root, 'commitment' => 'sha256:' . $root, 'issued_at' => $this->now, 'how' => 'lines'], []];
+                return [200, ['schema' => 'aamio-receipt-v1', 'w' => $w, 'created_at' => $thread['created_at'] ?? $this->now, 'expire_at' => $thread['expire_at'], 'count' => count($thread['messages']), 'bytes' => 0, 'allow' => $thread['allow'], 'messages' => array_map(static fn (array $msg): array => ['seq' => $msg['seq'], 'at' => $msg['at'], 'sha256' => $msg['sha256'], 'from' => $msg['from']], $thread['messages']), 'keys' => array_values(array_unique(array_filter(array_column($thread['messages'], 'from'), 'is_string'))), 'root' => $root, 'commitment' => 'sha256:' . $root, 'issued_at' => $this->now, 'how' => 'lines'], []];
             }
             if ($method === 'DELETE') {
                 unset($this->threads[$w]);
@@ -901,6 +901,7 @@ require __DIR__ . '/cli-stdout.inc.php';
 require __DIR__ . '/first-exchange.inc.php';
 require __DIR__ . '/partner-add.inc.php';
 require __DIR__ . '/release-check.inc.php';
+require __DIR__ . '/release-check-2026-11-10.inc.php';
 require __DIR__ . '/addons.inc.php';
 require dirname(__DIR__) . '/addons/domain-keys/tests/process.inc.php';
 
