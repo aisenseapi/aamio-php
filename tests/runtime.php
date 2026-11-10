@@ -56,6 +56,8 @@ final class FakeService
     public bool $explode = false;
     /** Every read answers 503, a service that is there and will not read. */
     public bool $down = false;
+    /** A presence lookup answers 503. */
+    public bool $lookupDown = false;
     public int $pageSize = 200;
     public int $now;
     private int $seq = 0;
@@ -81,6 +83,9 @@ final class FakeService
             return $this->board($method, $path, $body, $json, $headers);
         }
         if ($path === '/p/lookup' || $path === '/p/watch') {
+            if ($this->lookupDown) {
+                return [503, ['error' => 'the store could not be read just now', 'fix' => 'ask again shortly'], []];
+            }
             $matches = [];
             foreach ($this->presence as $key => $record) {
                 foreach ((array) ($json['prefixes'] ?? []) as $prefix) {

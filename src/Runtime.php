@@ -2090,7 +2090,10 @@ final class Runtime
         $found = $this->client->presenceLookup($prefixes, $wait);
         $names = array_map(static fn (array $p): string => $p['name'], $partners);
         if ($found['status'] !== 200) {
-            return ['online' => [], 'offline' => $names, 'error' => 'lookup failed: ' . $found['status'] . ' ' . json_encode($found['body'])];
+            // What was settled here before the service was asked stays said: a
+            // name that is nobody's went missing from the answer when the lookup
+            // failed (a review of 10 November 2026).
+            return ['online' => [], 'offline' => $names, 'error' => 'lookup failed: ' . $found['status'] . ' ' . json_encode($found['body'])] + ($unknown !== [] ? ['unknown' => $unknown] : []);
         }
         $online = [];
         $seen = [];

@@ -170,3 +170,12 @@ $book = json_decode((string) @file_get_contents($served . DIRECTORY_SEPARATOR . 
 $entries = array_values(array_diff(scandir($place) ?: [], ['.', '..']));
 sort($entries);
 $check($status === 0 && is_array($book) && array_column($book, 'name') === ['bob'] && !is_file($other . DIRECTORY_SEPARATOR . 'partners.json') && $entries === ["Aamio-%TEAM% \$TEAM it's"], 'the way by hand, run as written in ' . ($hand['shell'] ?? '?') . ', changes the home this server holds and no other', $status . ' ' . $out . ' ' . json_encode($entries));
+
+// A lookup that fails still says which names are nobody's, as one that succeeds does.
+$r = $rcOpen($rcHome());
+$r->partnerAdd('Ada', Keys::generate()->public);
+$fake->lookupDown = true;
+$downLookup = $r->lookup(['Ada', 'nobody']);
+$fake->lookupDown = false;
+$check(($downLookup['online'] ?? null) === [] && ($downLookup['offline'] ?? null) === ['Ada'] && str_contains((string) ($downLookup['error'] ?? ''), '503') && ($downLookup['unknown'] ?? null) === ['nobody'], 'a lookup the service fails still says which names are nobody\'s', json_encode($downLookup));
+$r->close();
