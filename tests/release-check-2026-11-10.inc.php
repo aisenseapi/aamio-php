@@ -385,5 +385,151 @@ $check(
     json_encode([$serverAt, $kept[0], $plainCall[0]])
 );
 
+// --------------------------------------------- the post-check of the evening
+// code/php/docs/aamio-trad-id-etterkontroll-2026-11-10.md in the service.
+echo "the post-check of the evening: the expiry of the thread that is there, a cursor kept without the instance, a budget a trace or a share cannot break\n";
+
+Http::$override = $fake;
+$signedOn = static fn (string $w, int $seq, string $text, Keys $keys): array => ['seq' => $seq, 'at' => $fake->now + $seq, 'type' => 'text', 'body' => $text, 'sha256' => hash('sha256', $text), 'from' => $keys->public, 'sig' => $keys->sign(Keys::threadSigningInput($w, $text)), 'verified' => true, 'sealed' => false];
+$on = static fn (array $entries, string $label): array => array_values(array_filter($entries, static fn (array $entry): bool => ($entry['channel'] ?? null) === $label));
+$replays = static fn (array $entries): array => array_map(static fn (array $entry): array => [$entry['seq'], $entry['body']['text'] ?? null, $entry['replay'] ?? null], $entries);
+$state = static fn (Runtime $runtime, string $wanted): array => array_values(array_filter($runtime->attentionTaken(), static fn (array $note): bool => $note['state'] === $wanted));
+
+// A thread the service read from the start after a restart: the channel takes its expiry with its instance, a shorter
+// one or a longer one than it was opened with, and state.json keeps it.
+$ev = $r10Open();
+$evW = str_repeat('j', 20);
+$fake->threads[$evW] = ['id' => 'ev-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 3600, 'allow' => [], 'messages' => [$plain(1, 'one'), $plain(2, 'two')], 'gate' => [], 'instance' => str_repeat('k', 16)];
+$ev->channels['side'] = new Channel('side', 'ev-read-key', $evW, $fake->now + 3600);
+$evSide = $ev->channels['side'];
+$ev->read();
+$fake->threads[$evW] = ['id' => 'ev-read-key', 'created_at' => $fake->now + 5, 'expire_at' => $fake->now + 605, 'allow' => [], 'messages' => [$plain(1, 'after the restart')], 'gate' => [], 'instance' => str_repeat('m', 16)];
+$got = $on($ev->read(), 'side');
+$restarted = $state($ev, 'restarted');
+$check(
+    $textsOf($got) === ['after the restart'] && count($restarted) === 1 && str_contains($restarted[0]['what'], 'past the last message')
+        && $evSide->instance === str_repeat('m', 16) && $evSide->expireAt === $fake->now + 605 && Channel::fromState($evSide->toState())->expireAt === $fake->now + 605,
+    'a thread the service read from the start is followed in its expiry, a shorter one, and state.json keeps it',
+    json_encode([$textsOf($got), $restarted, $evSide->expireAt])
+);
+$fake->threads[$evW] = ['id' => 'ev-read-key', 'created_at' => $fake->now + 9, 'expire_at' => $fake->now + 7209, 'allow' => [], 'messages' => [], 'gate' => [], 'instance' => str_repeat('n', 16)];
+$ev->read();
+$ev->attentionTaken();
+$check($evSide->instance === str_repeat('n', 16) && $evSide->expireAt === $fake->now + 7209, 'and a longer one', json_encode($evSide->expireAt));
+unset($ev->channels['side']);
+
+// A cursor kept without the thread's instance, as a client that does not keep it leaves a home: read again from the
+// start once, all of it, and what came before marked replay.
+$evW2 = str_repeat('p', 20);
+$fake->threads[$evW2] = ['id' => 'ev2-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 3600, 'allow' => [], 'messages' => [$plain(1, 'h1'), $plain(2, 'h2'), $plain(3, 'h3')], 'gate' => [], 'instance' => str_repeat('q', 16)];
+$kept = new Channel('kept', 'ev2-read-key', $evW2, $fake->now + 3600, [], 2, $fake->now);
+$kept->seen = [hash('sha256', 'h1') => true, hash('sha256', 'h2') => true];
+$ev->channels['kept'] = $kept;
+$got = $on($ev->read(), 'kept');
+$reread = $state($ev, 'reread');
+$check(
+    $replays($got) === [[1, 'h1', true], [2, 'h2', true], [3, 'h3', false]] && count($reread) === 1
+        && str_contains($reread[0]['what'], 'cursor, 2, was kept by a client that did not keep the thread\'s instance') && $kept->instance === str_repeat('q', 16) && $kept->after === 3,
+    'a cursor kept without the thread\'s instance is read again from the start once, all of it, what came before marked replay',
+    json_encode([$replays($got), $reread])
+);
+$got = $on($ev->read(), 'kept');
+$check($got === [] && $state($ev, 'reread') === [], 'once');
+unset($ev->channels['kept']);
+
+// Another sender's message with the same text, and so the same hash, reaches the agent when such a cursor is read
+// again: on the same thread, and as the first message of one opened again in the same second.
+$bob = Keys::generate();
+$evW3 = str_repeat('r', 20);
+$fake->threads[$evW3] = ['id' => 'ev3-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 3600, 'allow' => [], 'messages' => [$signedOn($evW3, 1, 'OK', $pcSender->keys), $signedOn($evW3, 2, 'OK', $bob)], 'gate' => [], 'instance' => str_repeat('s', 16)];
+$ok = new Channel('ok', 'ev3-read-key', $evW3, $fake->now + 3600, [], 1, $fake->now);
+$ok->seen = [hash('sha256', 'OK') => true];
+$ev->channels['ok'] = $ok;
+$senders = static fn (array $entries): array => array_map(static fn (array $entry): array => [$entry['seq'], $entry['from_key']], $entries);
+$got = $on($ev->read(), 'ok');
+$check($senders($got) === [[1, $pcSender->keys->public], [2, $bob->public]], 'another sender\'s OK with the same hash comes, on the same thread', json_encode($senders($got)));
+$fake->threads[$evW3] = array_replace($fake->threads[$evW3], ['messages' => [$signedOn($evW3, 1, 'OK', $bob)], 'instance' => str_repeat('t', 16)]);
+$ok->after = 1;
+$ok->instance = null;
+$got = $on($ev->read(), 'ok');
+$ev->attentionTaken();
+$check($senders($got) === [[1, $bob->public]], 'and as the first message of a thread opened again in the same second', json_encode($senders($got)));
+unset($ev->channels['ok']);
+$ev->close();
+
+// A trace that cannot be written takes no read over its budget: said in attention, not on the message.
+$tr = $r10Open();
+$trW = str_repeat('u', 20);
+$fake->threads[$trW] = ['id' => 'tr-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($trW, 1, 't1', $pcSender->keys), $signedOn($trW, 2, 't2', $pcSender->keys)], 'gate' => [], 'instance' => str_repeat('v', 16)];
+$tr->channels['side'] = new Channel('side', 'tr-read-key', $trW, $fake->now + 600);
+@mkdir($tr->home . DIRECTORY_SEPARATOR . 'trace.json', 0700, true);
+$whole = $on($tr->read(), 'side');
+$untraced = $state($tr, 'untraced');
+$sizes = array_map(static fn (array $entry): int => strlen(Codec::json($entry)), $whole);
+$tr->channels['side']->forgetThread();
+$tr->channels['side']->seen = [];
+$got = $on($tr->read(0, 50, array_sum($sizes) - 1), 'side');
+$check(
+    count($whole) === 2 && array_filter($whole, static fn (array $entry): bool => array_key_exists('trace_error', $entry)) === [] && count($untraced) === 1
+        && count($got) === 1 && strlen(Codec::json($got[0])) <= array_sum($sizes) - 1,
+    'a trace that cannot be written takes no read over its budget: said in attention, not on the message, and the second waits',
+    json_encode([$sizes, $untraced, count($got)])
+);
+$tr->close();
+
+// A scope share that cannot be saved is weighed no lighter than it is shown, kept nowhere, and said in attention.
+$sc = $r10Open();
+$sc->partnerAdd('sender', $pcSender->keys->public);
+$scTake = (function (array &$entry, bool $weigh): void {
+    $this->takeScopeShare($entry, true, $weigh);
+})->bindTo($sc, Runtime::class);
+@mkdir($sc->home . DIRECTORY_SEPARATOR . 'scopes.json', 0700, true);
+$weighed = $share() + ['seq' => 4, 'channel' => 'inbox', 'w' => str_repeat('i', 20)];
+$scTake($weighed, true);
+$taken = $share() + ['seq' => 4, 'channel' => 'inbox', 'w' => str_repeat('i', 20)];
+$scTake($taken, false);
+$notSaved = $state($sc, 'scope_not_saved');
+$check(
+    $taken['body']['data']['aamio_scope'] === ['shared_as' => 'team', 'can_read' => true, 'kept' => false, 'note' => 'not kept: could not be saved']
+        && strlen(Codec::json($taken)) <= strlen(Codec::json($weighed)) && $sc->scopeList() === [] && count($notSaved) === 1 && ($notSaved[0]['seqs'] ?? null) === [4],
+    'a scope share that cannot be saved is weighed no lighter than it is shown, kept nowhere, and said in attention',
+    json_encode([$taken['body']['data']['aamio_scope'], $notSaved])
+);
+$sc->close();
+
+// Two shares of one name in one answer are weighed as they are handed over: the second with the conflict it carries.
+$shareFrom = $r10Open();
+$shareTo = $r10Open();
+$shareFrom->partnerAdd('receiver', $shareTo->keys->public);
+$shareTo->partnerAdd('sender', $shareFrom->keys->public);
+$shareTo->read();
+$shareFrom->read();
+$shareFrom->scopeNew('team');
+$shareFrom->scopeShare('team', 'receiver', 'read');
+$shareFrom->scopeRemove('team');
+$shareFrom->scopeNew('team');
+$shareFrom->scopeShare('team', 'receiver', 'read');
+$fake->ignoreBudget = true;
+try {
+    $whole = $shareTo->read();
+    $sizes = array_map(static fn (array $entry): int => strlen(Codec::json($entry)), $whole);
+    $views = array_map(static fn (array $entry) => $entry['body']['data']['aamio_scope'] ?? null, $whole);
+    $shareTo->channels['inbox']->forgetThread();
+    $shareTo->channels['inbox']->seen = [];
+    $shareTo->scopeRemove('sender.team');
+    $shareTo->attentionTaken();
+    $got = $shareTo->read(0, 50, array_sum($sizes) - 1);
+} finally {
+    $fake->ignoreBudget = false;
+}
+$check(
+    count($whole) === 2 && ($views[0]['kept'] ?? null) === true && ($views[1]['kept'] ?? null) === false && str_contains((string) ($views[1]['note'] ?? ''), 'already')
+        && count($got) === 1 && strlen(Codec::json($got[0])) <= array_sum($sizes) - 1,
+    'two shares of one name in one answer are weighed as they are handed over, the second with its conflict, and the budget holds',
+    json_encode([$sizes, $views, count($got)])
+);
+$shareFrom->close();
+$shareTo->close();
+
 $pc->close();
 $pcSender->close();

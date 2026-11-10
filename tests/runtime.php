@@ -708,6 +708,7 @@ mkdir($homeB . '/scopes.json.tmp');
 $a->scopeShare('third', 'Bea', 'read');
 $a->send('Bea', 'after the share');
 $batch = $b->read();
+$notSavedNotes = array_values(array_filter($b->attentionTaken(), static fn (array $note): bool => $note['state'] === 'scope_not_saved'));
 rmdir($homeB . '/scopes.json.tmp');
 $thirdView = [];
 $arrived = false;
@@ -715,7 +716,8 @@ foreach ($batch as $m) {
     $thirdView = $m['body']['data']['aamio_scope'] ?? $thirdView;
     $arrived = $arrived || ($m['body']['text'] ?? null) === 'after the share';
 }
-$check(($thirdView['kept'] ?? null) === false && str_contains($thirdView['note'] ?? '', 'could not write') && $arrived && array_column($b->scopeList(), 'name') === ['drop'], 'a share that cannot be saved is not reported kept, and the rest of the batch still arrives');
+// The message says it in the form it was weighed at, and attention says why (a review of 10 November 2026).
+$check(($thirdView['kept'] ?? null) === false && ($thirdView['note'] ?? null) === 'not kept: could not be saved' && count($notSavedNotes) === 1 && str_contains($notSavedNotes[0]['what'], 'could not write') && $arrived && array_column($b->scopeList(), 'name') === ['drop'], 'a share that cannot be saved is not reported kept, attention says why, and the rest of the batch still arrives', json_encode([$thirdView, $notSavedNotes]));
 
 echo "files that cannot be read\n";
 $homeD = $root . DIRECTORY_SEPARATOR . 'd';

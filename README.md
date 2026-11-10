@@ -414,8 +414,13 @@ empty when all is well, and handed over once. `expired`: the thread has
 expired. `unread`: the service did not answer for that channel, so there may
 be messages waiting. `gone`: there is no thread at the address any more, and a
 gone inbox is opened again. `restarted`: a new thread opened at the same
-address and was read from the start. `filtered`: board replies left messages
-out, and read shows them. `more`: the read stopped at its `limit`; nothing was
+address and was read from the start. `reread`: the channel's cursor was kept
+without the thread's instance, by an earlier version or another client, so the
+thread was read again from the start once, and what came before comes marked
+`replay`. `archive_failed`, `scope_not_saved` and `untraced`: a message read
+could not be written to the archive, a scope it shared could not be saved, or
+the trace could not be written; the message came, and the note says what went
+wrong. `filtered`: board replies left messages out, and read shows them. `more`: the read stopped at its `limit`; nothing was
 passed over, every cursor stands at the last message handed over, so read
 again. The MCP tool `aamio_read` carries the same field.
 

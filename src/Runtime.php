@@ -48,6 +48,10 @@ final class Runtime
     private const KEPT_FILES = ['partners.json' => 'list', 'scopes.json' => 'list', 'state.json' => 'object', 'outbox.json' => 'object', 'effects.json' => 'object'];
 
     private const SCOPE_NAME = '/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/D';
+    // What a scope share says when scopes.json could not be written, and attention
+    // says why. Shorter than the form a kept share takes, which a share is
+    // weighed at when that is the longer.
+    private const SCOPE_NOT_SAVED = 'not kept: could not be saved';
 
     public readonly string $home;
     public readonly string $host;
@@ -1026,9 +1030,14 @@ final class Runtime
         return self::scopeView($held);
     }
 
-    /** What scopeAdd would hold, and the list it would keep or null when nothing changes. Nothing is kept here. */
-    private function scopeAddPlan(mixed $name, mixed $key = null, mixed $address = null): array
+    /**
+     * What scopeAdd would hold, and the list it would keep or null when nothing
+     * changes. Nothing is kept here. Planned against the list given, the one a
+     * weighing has planned so far, or else the one held.
+     */
+    private function scopeAddPlan(mixed $name, mixed $key = null, mixed $address = null, ?array $book = null): array
     {
+        $book ??= $this->scopes;
         $name = self::scopeNameOk($name);
         if ($key === null && $address === null) {
             throw new \InvalidArgumentException('give the key, to read and post, or the address, to post only');
@@ -1043,11 +1052,17 @@ final class Runtime
         if ($address !== null && $derived !== $address) {
             throw new \InvalidArgumentException('that key does not give that address, so one of the two is wrong');
         }
-        $index = $this->scopeIndex($name);
-        if ($index !== null && $this->scopes[$index]['address'] !== $derived) {
+        $index = null;
+        foreach ($book as $i => $scope) {
+            if (strtolower($scope['name']) === strtolower($name)) {
+                $index = $i;
+                break;
+            }
+        }
+        if ($index !== null && $book[$index]['address'] !== $derived) {
             throw new \InvalidArgumentException('there is a scope called ' . $name . ' already, with another address. Remove it or choose another name');
         }
-        foreach ($index === null ? $this->scopes : [] as $i => $scope) {
+        foreach ($index === null ? $book : [] as $i => $scope) {
             if ($scope['address'] === $derived) {
                 $index = $i;
                 break;
@@ -1056,13 +1071,13 @@ final class Runtime
         if ($index === null) {
             $held = ['name' => $name, 'key' => $key, 'address' => $derived];
 
-            return [$held, [...$this->scopes, $held]];
+            return [$held, [...$book, $held]];
         }
-        $held = $this->scopes[$index];
+        $held = $book[$index];
         if ($key !== null && empty($held['key'])) {
             // Held to post only until now. The key adds reading.
             $held['key'] = $key;
-            $scopes = $this->scopes;
+            $scopes = $book;
             $scopes[$index] = $held;
 
             return [$held, $scopes];
@@ -1150,7 +1165,7 @@ final class Runtime
      * whatever it holds and wherever it sits, so whoever reads the message
      * never sees a key in it.
      */
-    private function takeScopeShare(array &$entry, bool $apply = true, bool $weigh = false): void
+    private function takeScopeShare(array &$entry, bool $apply = true, bool $weigh = false, ?array &$planned = null): void
     {
         if (!is_array($entry['body'] ?? null)) {
             return;
@@ -1181,13 +1196,41 @@ final class Runtime
             try {
                 $local = $this->sharedScopeName($partner, $share['name'] ?? null);
                 $address = $key === null ? ($share['address'] ?? null) : null;
-                // Weighed, it is shown as it will be kept, and nothing is kept.
-                $kept = $weigh ? self::scopeView($this->scopeAddPlan($local, $key, $address)[0]) : $this->scopeAdd($local, $key, $address);
-                $view = array_merge($view, $kept, ['kept' => true]);
+                [$held, $keep] = $this->scopeAddPlan($local, $key, $address, $weigh ? $planned : null);
             } catch (\Throwable $error) {
                 // This share alone, and nothing held that was not saved. The
                 // rest of the messages are delivered either way.
                 $view['note'] = 'not kept: ' . $error->getMessage();
+                $entry['body']['data']['aamio_scope'] = $view;
+
+                return;
+            }
+            $shown = array_merge($view, self::scopeView($held), ['kept' => true]);
+            $unsaved = $view + ['note' => self::SCOPE_NOT_SAVED];
+            if ($weigh) {
+                // Weighed, nothing is kept, and the shares weighed before it in
+                // the same answer are held as they will be. Two of one name were
+                // both weighed as kept, and the second was handed over with the
+                // longer note of a conflict, 4313 bytes through a budget of 4268
+                // (a review of 10 November 2026). It is shown in the longer of
+                // the two forms it can take: kept, or not saved.
+                if ($keep !== null) {
+                    $planned = $keep;
+                }
+                $view = strlen(Codec::json($shown)) >= strlen(Codec::json($unsaved)) ? $shown : $unsaved;
+            } else {
+                try {
+                    if ($keep !== null) {
+                        $this->saveScopes($keep);
+                    }
+                    $view = $shown;
+                } catch (\Throwable $error) {
+                    // Said in attention, with what went wrong, and on the
+                    // message in the form it was weighed at.
+                    $view = $unsaved;
+                    $seq = $entry['seq'] ?? null;
+                    $this->noteTrouble(is_string($entry['channel'] ?? null) ? $entry['channel'] : 'scopes', 'scope_not_saved', 'message ' . (is_int($seq) ? $seq : 'without a seq') . ' shared scope ' . (is_string($share['name'] ?? null) ? $share['name'] : '(unnamed)') . ', and scopes.json could not be written: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage() . '. The scope is not kept.', is_string($entry['w'] ?? null) ? $entry['w'] : null, is_int($seq) ? [$seq] : null);
+                }
             }
         }
         $entry['body']['data']['aamio_scope'] = $view;
@@ -2867,13 +2910,34 @@ final class Runtime
 
             return $this->poll($channel, 0, $limit, $maxBytes);
         }
+        // A cursor kept by a client that did not keep the thread's instance,
+        // this one before 10 November 2026 among them, cannot be checked against
+        // it: a thread opened again at this address in the same second, with the
+        // same lifetime and list, looks the same in every other field, and its
+        // first messages were passed over without a word (a review of 10
+        // November 2026). So the thread is read again from the start, once, and
+        // all of it is handed over: what this channel handed over before comes
+        // again marked replay, as after a restart. Nothing is passed over by its
+        // hash, which is the hash of the text alone: another sender's message
+        // with the same text has it too (the same review).
+        if (!$another && !$reset && $channel->after > 0 && $channel->instance === null && $instance !== null) {
+            $this->note($channel, 'reread', 'this channel\'s cursor, ' . $channel->after . ', was kept by a client that did not keep the thread\'s instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, and nothing is passed over.');
+            $channel->after = 0;
+
+            return $this->poll($channel, 0, $limit, $maxBytes);
+        }
         if ($reset) {
             $this->note($channel, 'restarted', (is_array($reset) && is_string($reset['what'] ?? null)) ? $reset['what'] : 'the service read this thread from the start');
             $channel->observed = [];
         }
-        // The channel follows the thread that is there: one taken up after its
-        // cursor was forgotten may expire at another time than the one opened.
-        if ($channel->createdAt === null && $expires !== null) {
+        // The channel follows the thread that is there, all of it at once: one
+        // taken up after its cursor was forgotten, or read from the start by the
+        // service after a restart, may expire at another time than the one
+        // opened. A channel that took the new instance and kept the old expiry
+        // chose an inbox that had expired, and one that expired later was given
+        // up early (a review of 10 November 2026). The list this channel was
+        // opened with is its own, and stays.
+        if (($channel->createdAt === null || $another || $reset) && $expires !== null) {
             $channel->expireAt = $expires;
         }
         $channel->createdAt = $created;
@@ -2938,8 +3002,9 @@ final class Runtime
             $fits = 0;
             $seenHere = [];
             $boundHere = [];
+            $scopesHere = null;
             foreach ($handed as $message) {
-                $weight = $this->weightAsHandedOver($channel, $message, $seenHere, $boundHere);
+                $weight = $this->weightAsHandedOver($channel, $message, $seenHere, $boundHere, $scopesHere);
                 if ($fits > 0 && $used + $weight > $maxBytes) {
                     break;
                 }
@@ -3002,13 +3067,12 @@ final class Runtime
             // And the trace: what came from this key, and what it says it read of
             // ours. Verified only, since an unsigned message can claim to be from
             // anyone and to have read anything. Whatever goes wrong in the trace
-            // costs the trace, never this batch.
+            // costs the trace, never this batch, and is said in attention, not on
+            // the message: a message has to be the size it was weighed at, and an
+            // error added after the weighing let 1036 bytes through a budget of
+            // 768 (a review of 10 November 2026).
             if ($entry['verified'] === true && $from) {
-                $received = $this->traceSafely('received', fn (): ?string => $this->traceReceived($channel, $entry));
-
-                if ($received !== null) {
-                    $entry['trace_error'] = $received;
-                }
+                $this->traceSafely('received', fn (): ?string => $this->traceReceived($channel, $entry));
             }
             $channel->received[] = $entry;
             // Received, readable, archived and handled are four different things.
@@ -3070,19 +3134,19 @@ final class Runtime
 
     /**
      * The bytes of a message as this read would hand it over, worked out on a
-     * copy and keeping nothing: the scope share in it as shown when it is not
-     * taken, a replay of one earlier in the same answer, the binding conflicts
-     * it would carry, and the archive's mark. Compact JSON in UTF-8, as the
-     * message goes out.
+     * copy and keeping nothing: the scope share in it as shown when it is
+     * taken, after the shares earlier in the same answer, a replay of one
+     * earlier in the same answer, the binding conflicts it would carry, and the
+     * archive's mark. Compact JSON in UTF-8, as the message goes out.
      */
-    private function weightAsHandedOver(Channel $channel, array $message, array &$seenHere, array &$boundHere): int
+    private function weightAsHandedOver(Channel $channel, array $message, array &$seenHere, array &$boundHere, ?array &$scopesHere): int
     {
         $entry = $this->readEntry($channel, $message);
         if (is_string($entry['sha256'] ?? null)) {
             $entry['replay'] = ($entry['replay'] ?? false) || isset($seenHere[$entry['sha256']]);
             $seenHere[$entry['sha256']] = true;
         }
-        $this->takeScopeShare($entry, true, true);
+        $this->takeScopeShare($entry, true, true, $scopesHere);
         $from = $entry['from_key'] ?? null;
         if (is_array($entry['body'] ?? null) && ($entry['verified'] ?? false) === true && is_string($from) && $from !== '') {
             foreach (['reply_to', 'channel'] as $field) {
@@ -3634,7 +3698,7 @@ final class Runtime
     {
         $key = $where . '|' . $state;
         $note = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
-        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict', 'archive_failed'], true) && $seqs !== null) {
+        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict', 'archive_failed', 'scope_not_saved'], true) && $seqs !== null) {
             $previous = $this->attention[$key] ?? [];
             $note['seqs'] = array_merge($previous['seqs'] ?? [], $seqs);
             $note['count'] = count($note['seqs']);
