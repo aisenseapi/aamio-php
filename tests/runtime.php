@@ -61,6 +61,8 @@ final class FakeService
     public int $pageSize = 200;
     /** A service without read limits, that sends every row after the cursor whatever X-Max-Bytes says. */
     public bool $ignoreBudget = false;
+    /** A service from before instances: no thread is named by one. */
+    public bool $noInstance = false;
     public int $now;
     private int $seq = 0;
 
@@ -118,8 +120,12 @@ final class FakeService
             $sub = $m[2] ?? '';
             if ($method === 'PUT') {
                 $this->threads[$w] = ['id' => $headers['X-Read'], 'created_at' => $this->now, 'expire_at' => $this->now + (int) ($headers['X-TTL'] ?? 600), 'allow' => isset($headers['X-Allow']) && $headers['X-Allow'] !== '' ? explode(',', $headers['X-Allow']) : [], 'messages' => [], 'gate' => $json['gate'] ?? []];
+                // Each thread an instance of its own, as the service names it (aamio_thread_instance).
+                if (!$this->noInstance) {
+                    $this->threads[$w]['instance'] = bin2hex(random_bytes(8));
+                }
 
-                return [201, ['w' => $w, 'created_at' => $this->now, 'expire_at' => $this->threads[$w]['expire_at'], 'ttl' => (int) ($headers['X-TTL'] ?? 600), 'count' => 0, 'bytes' => 0, 'allow' => $this->threads[$w]['allow']], []];
+                return [201, ['w' => $w, 'created_at' => $this->now, 'expire_at' => $this->threads[$w]['expire_at'], 'ttl' => (int) ($headers['X-TTL'] ?? 600), 'count' => 0, 'bytes' => 0, 'allow' => $this->threads[$w]['allow']] + (isset($this->threads[$w]['instance']) ? ['instance' => $this->threads[$w]['instance']] : []), []];
             }
             $thread = $this->threads[$w] ?? null;
             if ($sub === 'gate') {
@@ -152,7 +158,7 @@ final class FakeService
                 $message = ['seq' => $seq, 'at' => $this->now + $seq, 'type' => is_array($json) ? 'json' : 'text', 'body' => (string) $body, 'sha256' => hash('sha256', (string) $body), 'from' => $headers['X-Key'] ?? null, 'sig' => $headers['X-Sig'] ?? null, 'verified' => isset($headers['X-Key']), 'sealed' => Keys::isEnvelope((string) $body)];
                 $this->threads[$w]['messages'][] = $message;
 
-                return [201, ['w' => $w, 'seq' => $seq, 'at' => $message['at'], 'sha256' => $message['sha256'], 'verified' => $message['verified'], 'sealed' => $message['sealed'], 'count' => $seq, 'expire_at' => $thread['expire_at']], []];
+                return [201, ['w' => $w, 'seq' => $seq, 'at' => $message['at'], 'sha256' => $message['sha256'], 'verified' => $message['verified'], 'sealed' => $message['sealed'], 'count' => $seq, 'expire_at' => $thread['expire_at']] + (isset($thread['instance']) ? ['instance' => $thread['instance']] : []), []];
             }
             if ($method === 'GET' && $sub === '' && $this->down) {
                 return [503, ['error' => 'the fake will not read', 'fix' => 'ask again later'], []];
@@ -172,7 +178,7 @@ final class FakeService
                 }
                 $root = hash('sha256', $lines);
 
-                return [200, ['schema' => 'aamio-receipt-v1', 'w' => $w, 'created_at' => $thread['created_at'] ?? $this->now, 'expire_at' => $thread['expire_at'], 'count' => count($thread['messages']), 'bytes' => 0, 'allow' => $thread['allow'], 'messages' => array_map(static fn (array $msg): array => ['seq' => $msg['seq'], 'at' => $msg['at'], 'sha256' => $msg['sha256'], 'from' => $msg['from']], $thread['messages']), 'keys' => array_values(array_unique(array_filter(array_column($thread['messages'], 'from'), 'is_string'))), 'root' => $root, 'commitment' => 'sha256:' . $root, 'issued_at' => $this->now, 'how' => 'lines'], []];
+                return [200, ['schema' => 'aamio-receipt-v1', 'w' => $w] + (isset($thread['instance']) ? ['instance' => $thread['instance']] : []) + ['created_at' => $thread['created_at'] ?? $this->now, 'expire_at' => $thread['expire_at'], 'count' => count($thread['messages']), 'bytes' => 0, 'allow' => $thread['allow'], 'messages' => array_map(static fn (array $msg): array => ['seq' => $msg['seq'], 'at' => $msg['at'], 'sha256' => $msg['sha256'], 'from' => $msg['from']], $thread['messages']), 'keys' => array_values(array_unique(array_filter(array_column($thread['messages'], 'from'), 'is_string'))), 'root' => $root, 'commitment' => 'sha256:' . $root, 'issued_at' => $this->now, 'how' => 'lines'], []];
             }
             if ($method === 'DELETE') {
                 unset($this->threads[$w]);
@@ -222,7 +228,7 @@ final class FakeService
                 $messages = $kept;
             }
 
-            return [200, ['w' => $w, 'exists' => true, 'created_at' => $thread['created_at'] ?? $this->now, 'expire_at' => $thread['expire_at'], 'count' => count($thread['messages']), 'messages' => $messages, 'next' => $messages === [] ? $after : end($messages)['seq'], 'waited' => 0] + $extra + ($reset === null ? [] : ['reset' => $reset]), []];
+            return [200, ['w' => $w, 'exists' => true, 'created_at' => $thread['created_at'] ?? $this->now, 'expire_at' => $thread['expire_at']] + (isset($thread['instance']) ? ['instance' => $thread['instance']] : []) + ['count' => count($thread['messages']), 'messages' => $messages, 'next' => $messages === [] ? $after : end($messages)['seq'], 'waited' => 0] + $extra + ($reset === null ? [] : ['reset' => $reset]), []];
         }
 
         return [404, ['error' => 'Not found', 'fix' => 'no such route in the fake'], []];
@@ -874,7 +880,9 @@ $order = 'release ARC-4471';
 $sig = $b->keys->sign(Keys::threadSigningInput($openW, $order));
 $fake->threads[$openW]['messages'][] = ['seq' => 2, 'at' => $fake->now + 2, 'type' => 'text', 'body' => $order, 'sha256' => hash('sha256', $order), 'from' => $b->keys->public, 'sig' => $sig, 'verified' => true, 'sealed' => false];
 [, $first] = $a->poll($a->channels['open-room']);
+// A new thread, as the service makes one: opened later, and named by an instance of its own.
 $fake->threads[$openW]['created_at'] = $fake->now + 500;
+$fake->threads[$openW]['instance'] = bin2hex(random_bytes(8));
 $fake->threads[$openW]['messages'] = [['seq' => 1, 'at' => $fake->now + 501, 'type' => 'text', 'body' => $order, 'sha256' => hash('sha256', $order), 'from' => $b->keys->public, 'sig' => $sig, 'verified' => true, 'sealed' => false]];
 [, $again] = $a->poll($a->channels['open-room']);
 $check(count($first) === 1 && $first[0]['replay'] === false && count($again) === 1 && $again[0]['replay'] === true, 'a message sent again after the service lost its store comes back as a replay: the hashes are the reader\'s, not the thread\'s');
@@ -882,6 +890,7 @@ $check(count($first) === 1 && $first[0]['replay'] === false && count($again) ===
 // cursor, so only created_at shows it, and the channel forgets the thread.
 $news = 'something new';
 $fake->threads[$openW]['created_at'] = $fake->now + 900;
+$fake->threads[$openW]['instance'] = bin2hex(random_bytes(8));
 $fake->threads[$openW]['messages'] = [
     ['seq' => 1, 'at' => $fake->now + 901, 'type' => 'text', 'body' => $news, 'sha256' => hash('sha256', $news), 'from' => $b->keys->public, 'sig' => $b->keys->sign(Keys::threadSigningInput($openW, $news)), 'verified' => true, 'sealed' => false],
     ['seq' => 2, 'at' => $fake->now + 902, 'type' => 'text', 'body' => $order, 'sha256' => hash('sha256', $order), 'from' => $b->keys->public, 'sig' => $sig, 'verified' => true, 'sealed' => false],

@@ -17,6 +17,7 @@ declare(strict_types=1);
  * and $check in scope.
  */
 
+use Aamio\Address;
 use Aamio\Channel;
 use Aamio\Codec;
 use Aamio\Http;
@@ -53,7 +54,7 @@ $before = $receiver->receipt('inbox');
 $check(
     $before['root_adds_up'] === true && $before['held_locally'] === 0 && $before['local_root_matches'] === null
         && $before['keys'] === [$sender->keys->public] && $before['keys_unverified_count'] === 1
-        && str_contains($before['local_check'], 'on another thread, opened at ' . $fake->now . ' and expiring at ' . $inbox->expireAt . '; this receipt is for the one opened at ' . ($fake->now + 5) . ' and expiring at ' . $inbox->expireAt),
+        && str_contains($before['local_check'], 'on another thread, instance ') && str_contains($before['local_check'], 'this receipt is for the one opened at ' . ($fake->now + 5) . ' and expiring at ' . $inbox->expireAt),
     'a receipt of a thread opened again at the same address compares nothing read on the old one, and names no partner for it',
     json_encode($before)
 );
@@ -172,57 +173,63 @@ $pcSender->read();
 $pcInbox = $pc->channels['inbox'];
 $textsOf = static fn (array $entries): array => array_map(static fn (array $entry) => $entry['body']['text'] ?? null, $entries);
 
-// An inbox a write opened again in the same second, with the service's own lifetime: told by when it expires. A state
-// written by a client that kept no hash at the cursor, so the lifetime alone tells.
+// An inbox a write opened again in the same second, with the service's own lifetime and an instance of its own: told
+// by its instance, read without a receipt first.
 $pcSender->send('receiver', 'on the first thread');
 $pc->read();
-$pcInbox->afterSha256 = null;
-$fake->threads[$pcInbox->w] = ['id' => $pcInbox->readKey, 'created_at' => $pcInbox->createdAt, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => []];
+$firstInstance = $pcInbox->instance;
+$fake->threads[$pcInbox->w] = ['id' => $pcInbox->readKey, 'created_at' => $pcInbox->createdAt, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => [], 'instance' => str_repeat('a', 16)];
 $pcSender->send('receiver', 'on the new thread');
 $got = $pc->read();
 $restarted = array_values(array_filter($pc->attentionTaken(), static fn (array $note): bool => $note['state'] === 'restarted'));
 $check(
-    $textsOf($got) === ['on the new thread'] && count($restarted) === 1 && str_contains($restarted[0]['what'], 'expiring at ' . ($fake->now + 600) . ', where this channel knew one') && $pcInbox->expireAt === $fake->now + 600,
-    'an inbox a write opened again in the same second is told by when it expires, read without a receipt first, and the channel follows it',
+    is_string($firstInstance) && $textsOf($got) === ['on the new thread'] && count($restarted) === 1
+        && str_contains($restarted[0]['what'], 'instance ' . str_repeat('a', 16) . ' where this channel knew instance ' . $firstInstance) && $pcInbox->expireAt === $fake->now + 600,
+    'an inbox a write opened again in the same second is told by its instance, read without a receipt first, and the channel follows it',
     json_encode([$textsOf($got), $restarted])
 );
 
-// The owner opening the same address again in the same second, with the same lifetime and list: told by the hash at
-// the cursor, and a receipt first names nobody for a line this process did not read.
-$fake->threads[$pcInbox->w] = array_replace($fake->threads[$pcInbox->w], ['messages' => []]);
+// The owner opening the same address again in the same second, with the same lifetime and list: another thread by its
+// instance alone, and a receipt first compares nothing read on the old one and names nobody for its line.
+$fake->threads[$pcInbox->w] = array_replace($fake->threads[$pcInbox->w], ['messages' => [], 'instance' => str_repeat('b', 16)]);
 $pcSender->send('receiver', 'on the third thread');
 $before = $pc->receipt('inbox');
 $check(
-    $before['local_root_matches'] === false && $before['local_differences'] === [['seq' => 1, 'fields' => ['sha256']]] && $before['keys'] === [$pcSender->keys->public] && $before['keys_unverified_count'] === 1,
-    'a receipt of a thread the fields cannot tell from the one read is compared, and names nobody for a line this process did not read',
+    $before['held_locally'] === 0 && $before['local_root_matches'] === null && $before['keys'] === [$pcSender->keys->public] && $before['keys_unverified_count'] === 1
+        && str_contains($before['local_check'], 'on another thread, instance ' . str_repeat('a', 16)) && str_contains($before['local_check'], 'this receipt is for instance ' . str_repeat('b', 16)),
+    'a receipt of a thread opened again with the same fields compares nothing read on the old one, and names nobody for its line',
     json_encode($before)
 );
 $got = $pc->read();
-$check(
-    $textsOf($got) === ['on the third thread'] && array_filter($pc->attentionTaken(), static fn (array $note): bool => $note['state'] === 'restarted' && str_contains($note['what'], 'seq 1, is not the one read there')) !== [],
-    'and the read after it is told by the hash at the cursor, and reads the thread from the start',
-    json_encode($textsOf($got))
-);
+$check($textsOf($got) === ['on the third thread'] && array_filter($pc->attentionTaken(), static fn (array $note): bool => $note['state'] === 'restarted') !== [], 'and the read after it is told by the instance, and reads the thread from the start', json_encode($textsOf($got)));
 $check($pc->receipt('inbox')['keys'] === ['sender'], 'after which the receipt names the partner again');
 
-// An open thread with the service's own lifetime, opened again by a write in the same second: every field the same.
+// An open thread with the service's own lifetime, opened again by a write in the same second: every other field the same.
 $sideW = str_repeat('d', 20);
 $plain = static fn (int $seq, string $text): array => ['seq' => $seq, 'at' => $fake->now + $seq, 'type' => 'text', 'body' => $text, 'sha256' => hash('sha256', $text), 'from' => null, 'sig' => null, 'verified' => false, 'sealed' => false];
-$fake->threads[$sideW] = ['id' => 'side-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$plain(1, 'on the first side thread')], 'gate' => []];
+$fake->threads[$sideW] = ['id' => 'side-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$plain(1, 'on the first side thread')], 'gate' => [], 'instance' => str_repeat('c', 16)];
 $pc->channels['side'] = new Channel('side', 'side-read-key', $sideW, $fake->now + 600);
 $side = $pc->channels['side'];
 $got = $pc->read();
-$check($textsOf($got) === ['on the first side thread'] && $side->after === 1 && $side->afterSha256 === hash('sha256', 'on the first side thread'), 'an open side thread is read, and the hash at its cursor kept');
-$fake->threads[$sideW] = array_replace($fake->threads[$sideW], ['messages' => [$plain(1, 'on the new side thread')]]);
+$check($textsOf($got) === ['on the first side thread'] && $side->instance === str_repeat('c', 16), 'an open side thread is read, and the instance it is named by kept');
+$fake->threads[$sideW] = array_replace($fake->threads[$sideW], ['messages' => [$plain(1, 'on the new side thread')], 'instance' => str_repeat('e', 16)]);
 $got = $pc->read();
-$check($textsOf($got) === ['on the new side thread'], 'an open thread opened again in the same second with the same lifetime is told by the hash at the cursor', json_encode($textsOf($got)));
+$check($textsOf($got) === ['on the new side thread'], 'an open thread opened again in the same second with the same lifetime is told by its instance', json_encode($textsOf($got)));
 $pc->attentionTaken();
 $loaded = Channel::fromState($side->toState());
-$check($loaded->afterSha256 === $side->afterSha256 && $loaded->cursorChecked === false, 'the hash at the cursor is kept in state.json, and a channel read from it is checked before its cursor is used');
+$check($loaded->instance === str_repeat('e', 16), 'the instance is kept in state.json, so a process that starts on the home knows its thread');
+
+// From a service that names no instance, the lifetime still tells a thread a write opened in the same second.
+unset($fake->threads[$sideW]['instance']);
+$side->forgetThread();
+$fake->threads[$sideW] = ['id' => 'side-read-key', 'created_at' => $fake->now + 20, 'expire_at' => $fake->now + 3620, 'allow' => [], 'messages' => [$plain(1, 'old')], 'gate' => []];
+$pc->read();
+$fake->threads[$sideW] = ['id' => 'side-read-key', 'created_at' => $fake->now + 20, 'expire_at' => $fake->now + 620, 'allow' => [], 'messages' => [$plain(1, 'new')], 'gate' => []];
+$got = $pc->read();
+$check($textsOf($got) === ['new'] && array_filter($pc->attentionTaken(), static fn (array $note): bool => $note['state'] === 'restarted' && str_contains($note['what'], 'expiring at ' . ($fake->now + 620))) !== [], 'from a service that names no instance, a thread a write opened in the same second is told by when it expires', json_encode($textsOf($got)));
 
 // A byte budget, as messages are handed over: the service sends what its own measure lets through, and one fits here.
-$fake->threads[$sideW]['messages'] = [];
-$fake->threads[$sideW]['created_at'] = $fake->now + 30;
+$fake->threads[$sideW] = ['id' => 'side-read-key', 'created_at' => $fake->now + 30, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [], 'gate' => [], 'instance' => str_repeat('f', 16)];
 $side->forgetThread();
 foreach (['h1', 'h2', 'h3'] as $n => $text) {
     $fake->threads[$sideW]['messages'][] = $plain($n + 1, $text);
@@ -270,6 +277,43 @@ $taken = $pc->receipt('side');
 $check($taken['count'] === 3 && $taken['root_adds_up'] === true && $taken['local_root_matches'] === true && $taken['keys'] === ['sender'], 'a receipt whose keys are the signers of its lines is taken, one key for two lines', json_encode($taken));
 unset($pc->channels['side']);
 
+// An archive that fails takes no read over its budget: the mark is weighed at its longer value, and what went wrong is
+// said in attention, not on the message.
+$archiving = new Runtime($root . DIRECTORY_SEPARATOR . 'release-check-10-archive', 'https://fake.test', ['r10'], true, $r10Quiet);
+$archiving->partnerAdd('sender', $pcSender->keys->public);
+$archiving->read();
+$archSide = str_repeat('h', 20);
+$fake->threads[$archSide] = ['id' => 'arch-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$plain(1, 'a1'), $plain(2, 'a2')], 'gate' => [], 'instance' => str_repeat('g', 16)];
+$archiving->channels['side'] = new Channel('side', 'arch-read-key', $archSide, $fake->now + 600);
+@mkdir($archiving->home . DIRECTORY_SEPARATOR . 'archive', 0700, true);
+@mkdir($archiving->home . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl', 0700, true);
+$all = $archiving->read();
+$sizes = array_map(static fn (array $entry): int => strlen(Codec::json($entry)), array_values(array_filter($all, static fn (array $entry): bool => ($entry['channel'] ?? null) === 'side')));
+$archiveFailed = array_values(array_filter($archiving->attentionTaken(), static fn (array $note): bool => $note['state'] === 'archive_failed'));
+$archiving->channels['side']->forgetThread();
+$archiving->channels['side']->seen = [];
+$got = array_values(array_filter($archiving->read(0, 50, array_sum($sizes) - 1), static fn (array $entry): bool => ($entry['channel'] ?? null) === 'side'));
+$check(
+    count($sizes) === 2 && count($archiveFailed) === 1 && ($archiveFailed[0]['count'] ?? 0) === 2 && count($got) === 1 && !array_key_exists('archive_error', $got[0]) && $got[0]['archived'] === false,
+    'an archive that fails takes no read over its budget: one byte under the two, the second waits, and the failure is said in attention',
+    json_encode([$sizes, $archiveFailed, count($got)])
+);
+$archiving->close();
+
+// A scope share is weighed as it will be shown, and the weighing keeps nothing.
+$scopeKey = Address::newScopeKey();
+$share = static fn (): array => ['verified' => true, 'encrypted' => true, 'known_contact' => true, 'from_key' => $pcSender->keys->public, 'replay' => false, 'body' => ['text' => 'a scope', 'data' => ['aamio_scope' => ['name' => 'team', 'key' => $scopeKey]]]];
+$take = (function (array &$entry, bool $weigh): void {
+    $this->takeScopeShare($entry, true, $weigh);
+})->bindTo($pc, Runtime::class);
+$weighed = $share();
+$scopesBefore = $pc->scopeList();
+$take($weighed, true);
+$scopesWeighed = $pc->scopeList();
+$taken = $share();
+$take($taken, false);
+$check($scopesWeighed === $scopesBefore && $weighed === $taken && strlen(Codec::json($weighed)) === strlen(Codec::json($taken)), 'a scope share is weighed as it will be shown, and the weighing keeps nothing', json_encode([$weighed, $taken]));
+
 // An anchoring tool that answered with an error made no proof, whatever its text names.
 $diagnostic = json_encode(['proof_id' => 'proof-diagnostic']);
 Http::$override = static function (string $method, string $url, ?string $body, array $headers, mixed ...$rest) use ($fake, $diagnostic): array {
@@ -280,8 +324,17 @@ Http::$override = static function (string $method, string $url, ?string $body, a
     return $fake($method, $url, $body, $headers);
 };
 $anchored = $pc->receipt('inbox', true)['anchor'];
+Http::$override = static function (string $method, string $url, ?string $body, array $headers, mixed ...$rest) use ($fake): array {
+    if (str_contains($url, 'verifyum')) {
+        return [200, ['jsonrpc' => '2.0', 'id' => 1, 'result' => ['content' => [['type' => 'text', 'text' => json_encode(['proof_id' => ' '])]], 'isError' => false]], []];
+    }
+
+    return $fake($method, $url, $body, $headers);
+};
+$blank = $pc->receipt('inbox', true)['anchor'];
 Http::$override = $fake;
 $check($anchored === ['error' => 200, 'detail' => $diagnostic], 'an anchoring tool that answered with an error made no proof, whatever its text names', json_encode($anchored));
+$check(($blank['error'] ?? null) === 200, 'and a proof_id of blanks names no proof', json_encode($blank));
 
 // An answer that broke off after its status line keeps the status where it is asked for: a 503 cut short was 0.
 $serverScript = $root . DIRECTORY_SEPARATOR . 'broken-off-server.php';

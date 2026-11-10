@@ -1018,6 +1018,17 @@ final class Runtime
     /** A scope made elsewhere: the key, to read and post, or the address, to post only. */
     public function scopeAdd(mixed $name, mixed $key = null, mixed $address = null): array
     {
+        [$held, $keep] = $this->scopeAddPlan($name, $key, $address);
+        if ($keep !== null) {
+            $this->saveScopes($keep);
+        }
+
+        return self::scopeView($held);
+    }
+
+    /** What scopeAdd would hold, and the list it would keep or null when nothing changes. Nothing is kept here. */
+    private function scopeAddPlan(mixed $name, mixed $key = null, mixed $address = null): array
+    {
         $name = self::scopeNameOk($name);
         if ($key === null && $address === null) {
             throw new \InvalidArgumentException('give the key, to read and post, or the address, to post only');
@@ -1044,19 +1055,20 @@ final class Runtime
         }
         if ($index === null) {
             $held = ['name' => $name, 'key' => $key, 'address' => $derived];
-            $this->saveScopes([...$this->scopes, $held]);
-        } else {
-            $held = $this->scopes[$index];
-            if ($key !== null && empty($held['key'])) {
-                // Held to post only until now. The key adds reading.
-                $held['key'] = $key;
-                $scopes = $this->scopes;
-                $scopes[$index] = $held;
-                $this->saveScopes($scopes);
-            }
+
+            return [$held, [...$this->scopes, $held]];
+        }
+        $held = $this->scopes[$index];
+        if ($key !== null && empty($held['key'])) {
+            // Held to post only until now. The key adds reading.
+            $held['key'] = $key;
+            $scopes = $this->scopes;
+            $scopes[$index] = $held;
+
+            return [$held, $scopes];
         }
 
-        return self::scopeView($held);
+        return [$held, null];
     }
 
     public function scopeList(): array
@@ -1138,7 +1150,7 @@ final class Runtime
      * whatever it holds and wherever it sits, so whoever reads the message
      * never sees a key in it.
      */
-    private function takeScopeShare(array &$entry, bool $apply = true): void
+    private function takeScopeShare(array &$entry, bool $apply = true, bool $weigh = false): void
     {
         if (!is_array($entry['body'] ?? null)) {
             return;
@@ -1168,7 +1180,10 @@ final class Runtime
         } else {
             try {
                 $local = $this->sharedScopeName($partner, $share['name'] ?? null);
-                $view = array_merge($view, $this->scopeAdd($local, $key, $key === null ? ($share['address'] ?? null) : null), ['kept' => true]);
+                $address = $key === null ? ($share['address'] ?? null) : null;
+                // Weighed, it is shown as it will be kept, and nothing is kept.
+                $kept = $weigh ? self::scopeView($this->scopeAddPlan($local, $key, $address)[0]) : $this->scopeAdd($local, $key, $address);
+                $view = array_merge($view, $kept, ['kept' => true]);
             } catch (\Throwable $error) {
                 // This share alone, and nothing held that was not saved. The
                 // rest of the messages are delivered either way.
@@ -2790,16 +2805,6 @@ final class Runtime
         if ($channel->muted) {
             return ['muted', []];
         }
-        // The cursor is used again only on the thread it belongs to: the row at
-        // it is asked for on its own, and its hash compared with the one kept.
-        if ($channel->after > 0 && $channel->afterSha256 !== null && !$channel->cursorChecked) {
-            $channel->cursorChecked = true;
-            if ($this->cursorStillHolds($channel) === false) {
-                $this->note($channel, 'restarted', 'the message at this channel\'s cursor, seq ' . $channel->after . ', is not the one read there, so the thread at this address is a new one and it is read again from the start');
-                $channel->forgetThread();
-                $this->saveState();
-            }
-        }
         // The channel's own allowlist goes with the read: the client checks
         // every message itself and keeps out what the list does not allow.
         // The limit goes with it too, so the service sends what was asked for
@@ -2812,9 +2817,6 @@ final class Runtime
         }
         if ($read['status'] !== 200) {
             $this->note($channel, 'unread', 'the service answered ' . $read['status'] . ', so this channel was not read and there may be messages waiting');
-            // A service that did not answer may have restarted: the cursor is
-            // checked again before it is used.
-            $channel->cursorChecked = false;
 
             return ['error', []];
         }
@@ -2850,9 +2852,17 @@ final class Runtime
         // A thread is known by when it was opened and when it expires. One that a
         // write opened after the service restarted has the service's own
         // lifetime, so it is told apart even when it was opened in the same second.
-        $another = $channel->createdAt !== null && (($created !== null && $created !== $channel->createdAt) || ($expires !== null && $expires !== $channel->expireAt));
+        $instance = is_string($answer['instance'] ?? null) ? $answer['instance'] : null;
+        // The instance the service names the thread by decides where there is
+        // one; when and how long it was opened for, where there is none.
+        $known = $channel->instance !== null && $instance !== null;
+        $another = $known
+            ? $instance !== $channel->instance
+            : $channel->createdAt !== null && (($created !== null && $created !== $channel->createdAt) || ($expires !== null && $expires !== $channel->expireAt));
         if ($another && !$reset) {
-            $this->note($channel, 'restarted', 'the thread at this address is a new one, opened at ' . $created . ' and expiring at ' . $expires . ', where this channel knew one opened at ' . $channel->createdAt . ' and expiring at ' . $channel->expireAt . ', so it is read again from the start');
+            $this->note($channel, 'restarted', $known
+                ? 'the thread at this address is a new one, instance ' . $instance . ' where this channel knew instance ' . $channel->instance . ', so it is read again from the start'
+                : 'the thread at this address is a new one, opened at ' . $created . ' and expiring at ' . $expires . ', where this channel knew one opened at ' . $channel->createdAt . ' and expiring at ' . $channel->expireAt . ', so it is read again from the start');
             $channel->forgetThread();
 
             return $this->poll($channel, 0, $limit, $maxBytes);
@@ -2867,6 +2877,9 @@ final class Runtime
             $channel->expireAt = $expires;
         }
         $channel->createdAt = $created;
+        if ($instance !== null) {
+            $channel->instance = $instance;
+        }
 
         // What the budget kept out. The service answers a byte budget honestly:
         // whole messages only, because a signed message cut in half does not
@@ -2951,18 +2964,14 @@ final class Runtime
         if ($oversized !== null) {
             $this->note($channel, 'over_budget', 'message ' . $oversized[0] . ' on this channel is ' . $oversized[1] . ' bytes as handed over here, larger than the whole byte budget of ' . $maxBytes . ' this read asked for. It had already come, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.');
         }
-        // The service's hash of each row this poll deals with, for the cursor.
-        $hashes = [];
-        foreach ($read['observed'] ?? [] as $row) {
-            $hashes[(int) ($row['seq'] ?? 0)] = is_string($row['sha256'] ?? null) ? $row['sha256'] : null;
-        }
         // The rows belong to the thread they were read on. After the service
         // restarted, a receipt of the new thread at the same address was
         // compared with rows of the old one (a review of 10 November 2026).
-        if (($read['observed'] ?? []) !== [] && ($channel->observedCreatedAt !== $channel->createdAt || $channel->observedExpireAt !== $channel->expireAt)) {
+        if (($read['observed'] ?? []) !== [] && [$channel->observedCreatedAt, $channel->observedExpireAt, $channel->observedInstance] !== [$channel->createdAt, $channel->expireAt, $channel->instance]) {
             $channel->observed = [];
             $channel->observedCreatedAt = $channel->createdAt;
             $channel->observedExpireAt = $channel->expireAt;
+            $channel->observedInstance = $channel->instance;
         }
         foreach ($read['observed'] ?? [] as $observed) {
             $channel->observed[$observed['seq']] = $observed;
@@ -3013,14 +3022,19 @@ final class Runtime
                     $entry['archive_off'] = true;
                 }
             } catch (\Throwable $error) {
+                // Said in attention, not on the message: a message has to be the
+                // size it was weighed at, and an error of any length added after
+                // the weighing let 1070 bytes through a budget of 776 (a review of
+                // 10 November 2026). false is the longer of the two marks, and the
+                // one the budget counts.
                 $entry['archived'] = false;
-                $entry['archive_error'] = $error->getMessage();
+                $this->note($channel, 'archive_failed', 'message ' . $entry['seq'] . ' was handed over and could not be written to the archive: ' . $error->getMessage() . '. The archive does not have it.', [(int) $entry['seq']]);
             }
             $entries[] = $entry;
         }
         if ($entries !== []) {
             // The cursor moves and the hashes are stored in the same save, before the caller sees a message.
-            $this->cursorTo($channel, max($channel->after, (int) end($entries)['seq']), $hashes);
+            $channel->after = max($channel->after, (int) end($entries)['seq']);
             $this->saveState();
         }
         if ($keptOut !== []) {
@@ -3028,7 +3042,7 @@ final class Runtime
             // every call. And said, since a message that does not arrive has to
             // be told from one that was never sent.
             $seqs = array_map('intval', array_column($keptOut, 'seq'));
-            $this->cursorTo($channel, max($channel->after, max($seqs)), $hashes);
+            $channel->after = max($channel->after, max($seqs));
             $this->saveState();
             $openedFor = in_array('*', $channel->allow, true) ? 'any key, signed only' : count($channel->allow) . ' named key(s)';
             $this->note($channel, 'kept_out', 'This channel was opened for ' . $openedFor . ', and these messages did not satisfy its list as checked here. They are not handed over and not archived.', $seqs);
@@ -3043,45 +3057,15 @@ final class Runtime
         // one it did look at.
         if ($stopAt !== null) {
             if ($stopAt > 0) {
-                $this->cursorTo($channel, $stopAt, $hashes);
+                $channel->after = $stopAt;
                 $this->saveState();
             }
         } elseif (is_int($answer['next'] ?? null)) {
-            $this->cursorTo($channel, $answer['next'], $hashes);
+            $channel->after = $answer['next'];
             $this->saveState();
         }
 
         return ['ok', $entries];
-    }
-
-    /** The cursor moves to exactly this, with the hash of the row at it when it moves. */
-    private function cursorTo(Channel $channel, int $to, array $hashes): void
-    {
-        if ($to !== $channel->after) {
-            $channel->afterSha256 = $hashes[$to] ?? null;
-        }
-        $channel->after = $to;
-    }
-
-    /**
-     * Whether the row at this channel's cursor is still the one read there: it
-     * is asked for on its own and its hash compared with the one kept. True
-     * when it is, false when the thread at the address is another one, and null
-     * when the service did not say, which the read that follows reports.
-     */
-    private function cursorStillHolds(Channel $channel): ?bool
-    {
-        try {
-            $read = $this->client->read($channel->w, $channel->readKey, $channel->after - 1, 0, [], 1, null);
-        } catch (\Throwable) {
-            return null;
-        }
-        if ($read['status'] !== 200 || !is_array($read['body'] ?? null) || ($read['body']['exists'] ?? null) === false) {
-            return null;
-        }
-        $row = ($read['observed'] ?? [])[0] ?? null;
-
-        return is_array($row) && (int) ($row['seq'] ?? 0) === $channel->after && ($row['sha256'] ?? null) === $channel->afterSha256;
     }
 
     /**
@@ -3098,7 +3082,7 @@ final class Runtime
             $entry['replay'] = ($entry['replay'] ?? false) || isset($seenHere[$entry['sha256']]);
             $seenHere[$entry['sha256']] = true;
         }
-        $this->takeScopeShare($entry, false);
+        $this->takeScopeShare($entry, true, true);
         $from = $entry['from_key'] ?? null;
         if (is_array($entry['body'] ?? null) && ($entry['verified'] ?? false) === true && is_string($from) && $from !== '') {
             foreach (['reply_to', 'channel'] as $field) {
@@ -3114,10 +3098,11 @@ final class Runtime
                 }
             }
         }
-        if ($this->archiveEnabled && !$this->homeReleased) {
-            $entry['archived'] = true;
-        } else {
-            $entry['archived'] = false;
+        // The archive's mark is weighed at its longer value, false: a write that
+        // fails turns true into false after the weighing, and a budget must hold
+        // for what is handed over. One written is a byte under.
+        $entry['archived'] = false;
+        if (!($this->archiveEnabled && !$this->homeReleased)) {
             $entry['archive_off'] = true;
         }
 
@@ -3649,7 +3634,7 @@ final class Runtime
     {
         $key = $where . '|' . $state;
         $note = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
-        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict'], true) && $seqs !== null) {
+        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict', 'archive_failed'], true) && $seqs !== null) {
             $previous = $this->attention[$key] ?? [];
             $note['seqs'] = array_merge($previous['seqs'] ?? [], $seqs);
             $note['count'] = count($note['seqs']);
@@ -3691,9 +3676,6 @@ final class Runtime
         $leftWaiting = 0;
         $heldBack = [];
         $heldHere = [];
-        foreach ($this->channels as $channel) {
-            $channel->cursorChecked = false;
-        }
         $atLimit = [];
         $notAsked = [];
         $notAskedAfter = [];
@@ -3885,9 +3867,11 @@ final class Runtime
         // What this process read counts only for the thread it was read on. After
         // the service restarted, a new thread at the same address was compared
         // with what was read of the old one, and its signer named as checked here.
-        $sameThread = $channel->observedCreatedAt !== null && $channel->observedCreatedAt === $data['created_at']
-            && ($channel->observedExpireAt === null || $channel->observedExpireAt === $data['expire_at']);
-        $earlier = $channel->observed !== [] && !$sameThread ? [$channel->observedCreatedAt, $channel->observedExpireAt] : null;
+        $sameThread = is_string($data['instance'] ?? null) && $channel->observedInstance !== null
+            ? $channel->observedInstance === $data['instance']
+            : $channel->observedCreatedAt !== null && $channel->observedCreatedAt === $data['created_at'] && ($channel->observedExpireAt === null || $channel->observedExpireAt === $data['expire_at']);
+        $earlier = $channel->observed !== [] && !$sameThread ? ['instance' => $channel->observedInstance, 'created_at' => $channel->observedCreatedAt, 'expire_at' => $channel->observedExpireAt] : null;
+        $which = static fn (array $thread): string => (is_string($thread['instance'] ?? null) ? 'instance ' . $thread['instance'] . ', ' : 'the one ') . 'opened at ' . ($thread['created_at'] ?? '?') . ' and expiring at ' . ($thread['expire_at'] ?? '?');
         $entries = $sameThread ? array_values($channel->observed) : [];
         usort($entries, static fn (array $a, array $b): int => $a['seq'] <=> $b['seq']);
         $held = count($entries);
@@ -3934,7 +3918,7 @@ final class Runtime
             $result['local_check'] = 'Mismatch: the receipt counts fewer messages than this process read. The thread was replaced or the service lost messages.';
         } elseif (!$comparable) {
             $result['local_check'] = sprintf('Not compared: this process holds %d of the %d messages the receipt counts.', $held, $data['count'])
-                . ($earlier !== null ? sprintf(' What this process read at this address was on another thread, opened at %d and expiring at %d; this receipt is for the one opened at %d and expiring at %d, so none of that counts here.', $earlier[0], $earlier[1], $data['created_at'], $data['expire_at']) : '')
+                . ($earlier !== null ? ' What this process read at this address was on another thread, ' . $which($earlier) . '; this receipt is for ' . $which($data) . ', so none of that counts here.' : '')
                 . ' root_adds_up checks arithmetic only; our signature records what was fetched, not that its claims are true. Take the receipt in the process that read the messages for the independent comparison.';
         }
         if ($anchor) {
@@ -3948,7 +3932,8 @@ final class Runtime
             // with an error: one that named a proof_id in its error was shown as
             // a proof (a review of 10 November 2026).
             $toolError = $tool !== null && ($tool['isError'] ?? false) === true;
-            $made = $status === 200 && !$toolError && is_array($proof) && is_string($proof['proof_id'] ?? null);
+            // A proof_id of blanks names no proof (a review of 10 November 2026).
+            $made = $status === 200 && !$toolError && is_array($proof) && is_string($proof['proof_id'] ?? null) && trim($proof['proof_id']) !== '';
             $result['anchor'] = $made ? $proof : ['error' => $status, 'detail' => $toolError && is_string($text) ? $text : $reply];
         }
         $this->archive($label, ['kind' => 'receipt', 'at' => time(), 'result' => $result]);
