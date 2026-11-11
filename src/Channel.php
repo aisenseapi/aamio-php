@@ -13,8 +13,12 @@ namespace Aamio;
  */
 final class Channel
 {
-    /** A record in seen_from: the hash of the bytes, and the signer's tag or -. */
-    private const SEEN_FROM = '/^[0-9a-f]{64}:(?:[0-9a-f]{16}|-)$/D';
+    /**
+     * A record in seen_from: the hash of the bytes, and the signer's tag, or -,
+     * or ? beside a hash an earlier version kept without its signer, once that
+     * hash is met again: who sent it then is not known, and stays not known.
+     */
+    private const SEEN_FROM = '/^[0-9a-f]{64}:(?:[0-9a-f]{16}|-|\?)$/D';
 
     /** @var array<string, true> */
     public array $seen = [];
@@ -136,11 +140,15 @@ final class Channel
 
     /**
      * Whether this channel handed these bytes over before from this signer, or
-     * unsigned when they are unsigned. Bytes it handed over from another signer
-     * make this another message. A hash kept without its signer, by a version
-     * from before the records, is taken as it always was: a replay.
+     * unsigned when they are unsigned: true when it did, and false when it did
+     * not, since bytes it handed over from another signer make this another
+     * message. Null when it cannot be told: an earlier version kept the hash
+     * without its signer, and this signer has no record of its own. Taken as a
+     * copy, another signer's first answer with the same text was passed over,
+     * and taken as new, the same signer's copy was acted on twice (a review of
+     * 11 November 2026), so it is said as it is.
      */
-    public function isReplay(?string $digest, ?string $fromKey): bool
+    public function replayState(?string $digest, ?string $fromKey): ?bool
     {
         if ($digest === null) {
             return false;
@@ -148,18 +156,45 @@ final class Channel
         if (isset($this->seenFrom[self::seenRecord($digest, $fromKey)])) {
             return true;
         }
+        $any = false;
         foreach (array_keys($this->seenFrom) as $record) {
             if (str_starts_with((string) $record, $digest . ':')) {
-                return false;
+                $any = true;
             }
         }
+        if (isset($this->seenFrom[$digest . ':?']) || (!$any && isset($this->seen[$digest]))) {
+            return null;
+        }
 
-        return isset($this->seen[$digest]);
+        return false;
     }
 
-    /** A message handed over: its hash, and who it came from. */
+    /** Whether this is known to be a copy: replayState, with not known taken as no. */
+    public function isReplay(?string $digest, ?string $fromKey): bool
+    {
+        return $this->replayState($digest, $fromKey) === true;
+    }
+
+    /**
+     * A message handed over: its hash, and who it came from. A hash an earlier
+     * version kept without its signer keeps that, as ?, beside the first signer
+     * recorded for it, so the next signer with the same bytes is not taken for
+     * a new one with certainty.
+     */
     public function remember(string $digest, ?string $fromKey): void
     {
+        if (isset($this->seen[$digest])) {
+            $any = false;
+            foreach (array_keys($this->seenFrom) as $record) {
+                if (str_starts_with((string) $record, $digest . ':')) {
+                    $any = true;
+                    break;
+                }
+            }
+            if (!$any) {
+                $this->seenFrom[$digest . ':?'] = true;
+            }
+        }
         $this->seen[$digest] = true;
         $this->seenFrom[self::seenRecord($digest, $fromKey)] = true;
     }

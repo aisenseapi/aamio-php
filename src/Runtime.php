@@ -1181,6 +1181,8 @@ final class Runtime
             $view['note'] = 'not kept: a scope is only taken when it comes sealed from a partner in your address book';
         } elseif ($entry['replay'] ?? false) {
             $view['note'] = 'not kept again: this message arrived before, and a scope removed since stays removed';
+        } elseif ($entry['replay_unknown'] ?? false) {
+            $view['note'] = 'not kept: these bytes arrived here before, recorded by an earlier version without who sent them, so this may be that message again, and a scope removed since stays removed';
         } else {
             try {
                 $local = $this->sharedScopeName($partner, $share['name'] ?? null);
@@ -2007,9 +2009,14 @@ final class Runtime
         $out = [];
         $seen = [];
         $skipped = [];
+        // One delivery is one row: the address, the seq, the time and the hash of
+        // its bytes. The hash alone is of the text, and of two signers who sent
+        // the same answer to one post, the second was left out once the list
+        // came from the archive (a review of 11 November 2026).
+        $delivery = static fn (array $entry): string => json_encode([$entry['w'] ?? null, $entry['seq'] ?? null, $entry['at'] ?? null, $entry['sha256'] ?? null]);
         foreach ($this->channels as $channel) {
             foreach ($channel->received as $entry) {
-                $seen[$entry['sha256']] = true;
+                $seen[$delivery($entry)] = true;
                 if ($wanted($entry)) {
                     $out[] = $entry;
                 } else {
@@ -2026,10 +2033,10 @@ final class Runtime
         sort($labels);
         foreach ($labels as $label) {
             foreach ($this->archived($label, 'received') as $entry) {
-                if (isset($seen[$entry['sha256'] ?? ''])) {
+                if (isset($seen[$delivery($entry)])) {
                     continue;
                 }
-                $seen[$entry['sha256'] ?? ''] = true;
+                $seen[$delivery($entry)] = true;
                 if ($wanted($entry)) {
                     $entry['from_archive'] = true;
                     $out[] = $entry;
@@ -2806,7 +2813,8 @@ final class Runtime
             $known = $this->nameForKey($from);
             [$body, $meta] = $this->open($message);
             $digest = $message['sha256'] ?? null;
-            return ['channel' => $channel->label, 'w' => $channel->w, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => $message['verified'], 'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'), 'sha256' => $digest, 'replay' => $channel->isReplay(is_string($digest) ? $digest : null, ($message['verified'] ?? false) === true && is_string($from) ? $from : null), 'body' => $body, 'unverified_because' => $message['unverified_because'] ?? null] + $meta;
+            $replay = $channel->replayState(is_string($digest) ? $digest : null, ($message['verified'] ?? false) === true && is_string($from) ? $from : null);
+            return ['channel' => $channel->label, 'w' => $channel->w, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => $message['verified'], 'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'), 'sha256' => $digest, 'replay' => $replay === true, 'body' => $body, 'unverified_because' => $message['unverified_because'] ?? null] + $meta + ($replay === null ? ['replay_unknown' => true] : []);
         } catch (\Throwable $error) {
             $why = 'the message could not be checked here: ' . (new \ReflectionClass($error))->getShortName();
             return ['channel' => $channel->label, 'w' => $channel->w, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => false, 'from_key' => null, 'known_contact' => false, 'sender' => 'unsigned', 'sha256' => null, 'replay' => false, 'body' => ['text' => $message['body'] ?? null], 'signed' => false, 'encrypted' => false, 'format' => 'unreadable', 'error' => $why, 'unverified_because' => $why];
@@ -2907,7 +2915,7 @@ final class Runtime
         // hash, which is the hash of the text alone: another sender's message
         // with the same text has it too (the same review).
         if (!$another && !$reset && $channel->after > 0 && $channel->instance === null && $instance !== null) {
-            $this->note($channel, 'reread', 'this channel\'s cursor, ' . $channel->after . ', was kept by a client that did not keep the thread\'s instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, and nothing is passed over.');
+            $this->note($channel, 'reread', 'this channel\'s cursor, ' . $channel->after . ', was kept by a client that did not keep the thread\'s instance, so it cannot be told whether the thread here is the one that cursor was kept on. It is read again from the start this once: what this channel handed over before comes again, marked replay, or replay_unknown where an earlier version kept it without who sent it, and nothing is passed over.');
             $channel->after = 0;
 
             return $this->poll($channel, 0, $limit, $maxBytes);
@@ -3053,6 +3061,13 @@ final class Runtime
                 $this->note($channel, 'archive_failed', 'message ' . $entry['seq'] . ' was handed over and could not be written to the archive: ' . $error->getMessage() . '. The archive does not have it.', [(int) $entry['seq']]);
             }
             $entries[] = $entry;
+        }
+        // Messages whose bytes this channel handed over before, which an earlier
+        // version recorded without who sent them: whether each is a copy cannot
+        // be told, and it is said rather than guessed.
+        $unknown = array_values(array_map(static fn (array $entry): int => (int) $entry['seq'], array_filter($entries, static fn (array $entry): bool => ($entry['replay_unknown'] ?? false) === true)));
+        if ($unknown !== []) {
+            $this->note($channel, 'replay_unknown', 'these carry the bytes of a message this channel handed over before, which an earlier version recorded without who sent it, so whether each is a copy cannot be told: each comes with replay false and replay_unknown true.', $unknown);
         }
         if ($budgetAt !== null) {
             $within = static fn (array $item): bool => (int) ($item['seq'] ?? 0) <= $budgetAt;
@@ -3676,7 +3691,7 @@ final class Runtime
     {
         $key = $where . '|' . $state;
         $note = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
-        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict', 'archive_failed', 'scope_not_saved'], true) && $seqs !== null) {
+        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict', 'archive_failed', 'scope_not_saved', 'replay_unknown'], true) && $seqs !== null) {
             $previous = $this->attention[$key] ?? [];
             $note['seqs'] = array_merge($previous['seqs'] ?? [], $seqs);
             $note['count'] = count($note['seqs']);

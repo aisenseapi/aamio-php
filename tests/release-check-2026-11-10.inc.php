@@ -430,9 +430,9 @@ $ev->channels['kept'] = $kept;
 $got = $on($ev->read(), 'kept');
 $reread = $state($ev, 'reread');
 $check(
-    $replays($got) === [[1, 'h1', true], [2, 'h2', true], [3, 'h3', false]] && count($reread) === 1
+    $replays($got) === [[1, 'h1', false], [2, 'h2', false], [3, 'h3', false]] && array_map(static fn (array $entry): bool => $entry['replay_unknown'] ?? false, $got) === [true, true, false] && count($reread) === 1
         && str_contains($reread[0]['what'], 'cursor, 2, was kept by a client that did not keep the thread\'s instance') && $kept->instance === str_repeat('q', 16) && $kept->after === 3,
-    'a cursor kept without the thread\'s instance is read again from the start once, all of it, what came before marked replay',
+    'a cursor kept without the thread\'s instance is read again from the start once, all of it, and what an earlier version kept without who sent it is said not to be known',
     json_encode([$replays($got), $reread])
 );
 $got = $on($ev->read(), 'kept');
@@ -623,20 +623,54 @@ $check(
     'who sent each hash travels with the channel through state.json, and what is not a record is left out',
     json_encode($kept['seen_from'])
 );
-// As an earlier version left a channel: the hash, and nobody named for it. Taken as it always was.
+// As an earlier version left a channel after A's "OK": the hash, and nobody named for it. Then, one process each, B,
+// A, B and A send "OK" again: the sequence of the review of 11 November 2026, where B's first was taken for a copy
+// and A's next for a new one. Whether each of the first two is a copy cannot be told, and it is said.
+unset($rp->channels['ok']);
 $rpW2 = str_repeat('t', 20);
-$fake->threads[$rpW2] = ['id' => 'rp2-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($rpW2, 1, 'OK', $carol)], 'gate' => [], 'instance' => str_repeat('v', 16)];
-$legacy = new Channel('legacy', 'rp2-read-key', $rpW2, $fake->now + 600);
+$fake->threads[$rpW2] = ['id' => 'rp2-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($rpW2, 1, 'OK', $pcSender->keys), $signedOn($rpW2, 2, 'OK', $carol), $signedOn($rpW2, 3, 'OK', $pcSender->keys), $signedOn($rpW2, 4, 'OK', $carol), $signedOn($rpW2, 5, 'OK', $pcSender->keys)], 'gate' => [], 'instance' => str_repeat('v', 16)];
+$legacy = new Channel('legacy', 'rp2-read-key', $rpW2, $fake->now + 600, [], 1, $fake->now);
+$legacy->instance = str_repeat('v', 16);
 $legacy->seen = [$okDigest => true];
-$rp->channels['legacy'] = $legacy;
-$marks = array_map(static fn (array $entry): array => [$entry['seq'], $entry['replay']], $on($rp->read(), 'legacy'));
-$rp->attentionTaken();
+$marks = [];
+$unknownSaid = [];
+for ($i = 0; $i < 4; $i++) {
+    $legacy = Channel::fromState($legacy->toState());
+    $rp->channels['legacy'] = $legacy;
+    foreach ($on($rp->read(0, 1), 'legacy') as $entry) {
+        $marks[] = [$entry['seq'], $entry['replay'], $entry['replay_unknown'] ?? false];
+    }
+    foreach ($state($rp, 'replay_unknown') as $note) {
+        $unknownSaid[] = $note['seqs'];
+    }
+}
 $check(
-    $marks === [[1, true]] && isset($legacy->seenFrom[Channel::seenRecord($okDigest, $carol->public)]),
-    'a hash kept without its signer is a replay as before, and from then on its signer is kept with it',
-    json_encode($marks)
+    $marks === [[2, false, true], [3, false, true], [4, true, false], [5, true, false]] && $unknownSaid === [[2], [3]] && isset($legacy->seenFrom[$okDigest . ':?']),
+    'a hash kept without its signer leaves it not known whose it was: B and A each say so, and then each is a copy of its own',
+    json_encode([$marks, $unknownSaid])
 );
 $rp->close();
+
+// Board replies: two signers who sent the same answer to one post are two deliveries, in every process (a review of
+// 11 November 2026: the second was left out once the list came from the archive).
+$brHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-board-replies';
+@mkdir($brHome . DIRECTORY_SEPARATOR . 'archive', 0700, true);
+$brLines = '';
+foreach ([[1, 'a-key'], [2, 'b-key']] as [$seq, $key]) {
+    $brLines .= json_encode(['kind' => 'received', 'channel' => 'board', 'w' => str_repeat('b', 20), 'seq' => $seq, 'at' => 1789470700 + $seq, 'verified' => true, 'from_key' => $key, 'sender' => 'unknown key', 'sha256' => str_repeat('c', 64), 'body' => ['post' => 'p1', 'text' => 'OK']]) . "\n";
+}
+file_put_contents($brHome . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'board.jsonl', $brLines);
+$brSeen = [];
+for ($i = 0; $i < 2; $i++) {
+    $br = new Runtime($brHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+    $brSeen[] = array_map(static fn (array $reply): array => [$reply['seq'], $reply['from_key']], $br->boardReplies('p1'));
+    $br->close();
+}
+$check(
+    $brSeen === [[[1, 'a-key'], [2, 'b-key']], [[1, 'a-key'], [2, 'b-key']]],
+    'two signers with the same answer to one post are both found in every process, once each',
+    json_encode($brSeen)
+);
 
 $pc->close();
 $pcSender->close();
