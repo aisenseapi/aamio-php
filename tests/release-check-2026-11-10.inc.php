@@ -566,12 +566,15 @@ try {
     $sizes = array_map(static fn (array $entry): int => strlen(Codec::json($entry)), $whole);
     $views = array_map(static fn (array $entry) => $entry['body']['data']['aamio_scope'] ?? null, $whole);
     $flaky->attentionTaken();
-    $flaky->channels['inbox']->forgetThread();
-    $flaky->channels['inbox']->seen = [];
-    $flaky->channels['inbox']->seenFrom = [];
     foreach ($flaky->scopeList() as $kept) {
         $flaky->scopeRemove($kept['name']);
     }
+    // The same four again, as new messages: an invitation read again after its
+    // scope was removed keeps nothing (a check of 11 November 2026).
+    $flakySender->send('receiver', 'Scope t', ['aamio_scope' => ['name' => 't', 'key' => $flakyKey]]);
+    $flakySender->send('receiver', 'Scope again', ['aamio_scope' => ['name' => str_repeat('n', 58), 'key' => $flakyKey]]);
+    $flakySender->send('receiver', 'one short text');
+    $flakySender->send('receiver', 'two short text');
     $blocker = $flakyHome . DIRECTORY_SEPARATOR . 'scopes.json.tmp';
     mkdir($blocker);
     $got = $flaky->read(0, 50, array_sum($sizes) - 1);
@@ -587,9 +590,9 @@ try {
 $textsOfFlaky = static fn (array $entries): array => array_map(static fn (array $entry) => $entry['body']['text'] ?? null, $entries);
 $check(
     count($whole) === 4 && ($views[0]['kept'] ?? null) === false && ($views[1]['kept'] ?? null) === true && strlen((string) ($views[1]['name'] ?? '')) > 50
-        && count($got) === 3 && array_sum(array_map(static fn (array $entry): int => strlen(Codec::json($entry)), $got)) <= array_sum($sizes) - 1 && $afterBudget === 3
+        && count($got) === 3 && array_sum(array_map(static fn (array $entry): int => strlen(Codec::json($entry)), $got)) <= array_sum($sizes) - 1 && $afterBudget === 7
         && $textsOfFlaky($rest) === ['two short text'],
-    'a share whose first save failed and whose next save worked keeps the budget: the fourth waits, the cursor stops at 3, and the next read hands it over once',
+    'a share whose first save failed and whose next save worked keeps the budget: the fourth waits, the cursor stops at the third, and the next read hands it over once',
     json_encode([$sizes, $views, count($got), $afterBudget, $textsOfFlaky($rest)])
 );
 $flaky->close();
@@ -706,7 +709,7 @@ $brCases = [
     'and so is the same signer'
         => [$brRows([['instance' => $x, 'from_key' => 'a-key'], ['instance' => $y, 'from_key' => 'a-key']]), [[['a-key', true], ['a-key', true]], [['a-key', true], ['a-key', true]]]],
     'the second one held in memory leaves the first shown from the archive'
-        => [$brRows([['instance' => $x, 'from_key' => 'a-key'], ['instance' => $y, 'from_key' => 'b-key']], [['from_key' => 'b-key', 'archived' => true]]), [[['b-key', false], ['a-key', true]], [['b-key', false], ['a-key', true]]]],
+        => [$brRows([['instance' => $x, 'from_key' => 'a-key'], ['instance' => $y, 'from_key' => 'b-key']], [['from_key' => 'b-key', 'archived' => true, 'instance' => $y]]), [[['b-key', false], ['a-key', true]], [['b-key', false], ['a-key', true]]]],
     'two rows from before the instance that show the same are both kept'
         => [$brRows([['from_key' => 'a-key'], ['from_key' => 'a-key']]), [[['a-key', true], ['a-key', true]], [['a-key', true], ['a-key', true]]]],
     'one delivery written down twice is one row'
@@ -757,6 +760,159 @@ $check(
     json_encode([count($usFirst), $usSaid, $usAfter, $usAgain[0]['replay'] ?? null])
 );
 $us->close();
+
+// An invitation read again after its scope was removed does not bring it back. scopes.json was written and
+// state.json was not, so after a restart the invitation came again as a message never seen, and the scope removed
+// since was taken back (a check of 11 November 2026, 14.23). A new invitation is another message, and is taken.
+$ivHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-invitation';
+mkdir($ivHome, 0700, true);
+$iv = new Runtime($ivHome, 'https://fake.test', ['r10'], false, $r10Quiet);
+$ivSender = $r10Open();
+$iv->partnerAdd('sender', $ivSender->keys->public);
+$ivSender->partnerAdd('receiver', $iv->keys->public);
+$iv->read();
+$ivSender->read();
+$iv->attentionTaken();
+$ivKey = Address::newScopeKey();
+$ivSender->send('receiver', 'Scope t', ['aamio_scope' => ['name' => 't', 'key' => $ivKey]]);
+mkdir($ivHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+[, $ivFirst] = $iv->poll($iv->channels['inbox']);
+$ivAfter = $iv->channels['inbox']->after;
+$iv->scopeRemove('sender.t');
+$ivListed = $iv->scopeList();
+$iv->close();
+rmdir($ivHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+$iv = new Runtime($ivHome, 'https://fake.test', ['r10'], false, $r10Quiet);
+[, $ivAgain] = $iv->poll($iv->channels['inbox']);
+$ivAgainListed = $iv->scopeList();
+$ivSender->send('receiver', 'Scope t', ['aamio_scope' => ['name' => 't', 'key' => $ivKey]]);
+[, $ivNew] = $iv->poll($iv->channels['inbox']);
+$ivView = static fn (array $entries): array => array_map(static fn (array $entry): array => [$entry['replay'], $entry['body']['data']['aamio_scope']['kept'] ?? null, $entry['body']['data']['aamio_scope']['note'] ?? null], $entries);
+$check(
+    $ivView($ivFirst) === [[false, true, null]] && $ivAfter === 0 && $ivListed === []
+        && count($ivAgain) === 1 && $ivAgain[0]['replay'] === false && ($ivAgain[0]['body']['data']['aamio_scope']['kept'] ?? null) === false
+        && str_contains((string) ($ivAgain[0]['body']['data']['aamio_scope']['note'] ?? ''), 'removed since') && $ivAgainListed === []
+        && $ivView($ivNew) === [[false, true, null]] && array_column($iv->scopeList(), 'name') === ['sender.t'] && !str_contains(Codec::json([$ivFirst, $ivAgain, $ivNew]), $ivKey),
+    'an invitation read again after its scope was removed does not bring it back, and a new invitation is taken',
+    json_encode([$ivView($ivFirst), $ivAfter, $ivView($ivAgain), $ivView($ivNew)])
+);
+$iv->close();
+$ivSender->close();
+
+// The record of a removed invitation is the one aamio-python reads and writes: the same scopes.json, removed the same
+// way, gives the same file, and the record is no entry this runtime cannot use.
+$vxHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-invitation-vector';
+mkdir($vxHome, 0700, true);
+$vxRecord = '565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3:b43cdfe1bf180ef4';
+$vxTaken = str_repeat('ab', 32) . ':b43cdfe1bf180ef4';
+file_put_contents($vxHome . DIRECTORY_SEPARATOR . 'scopes.json', json_encode([['name' => 'alice.team', 'key' => 'aamioscopevector0000000000', 'address' => '2o3wek6doqhqatib63vj', 'taken_from' => [$vxTaken]], ['removed_share' => $vxRecord]]));
+$vxLog = [];
+$vx = new Runtime($vxHome, 'https://fake.test', ['r10'], false, static function (string $line) use (&$vxLog): void {
+    $vxLog[] = $line;
+});
+$vxListed = array_column($vx->scopeList(), 'name');
+$vx->scopeRemove('alice.team');
+$vxFile = json_decode((string) file_get_contents($vxHome . DIRECTORY_SEPARATOR . 'scopes.json'), true);
+$vx->close();
+$check(
+    $vxListed === ['alice.team'] && $vxFile === [['removed_share' => $vxRecord], ['removed_share' => $vxTaken]]
+        && array_values(array_filter($vxLog, static fn (string $line): bool => str_contains($line, 'not scopes this runtime can use'))) === [],
+    'a removed invitation is remembered in the form aamio-python reads and writes, and is no entry this runtime cannot use',
+    json_encode([$vxListed, $vxFile])
+);
+
+// One signer's answer on two threads at one address, the second opened in the same second: seq 1 at the same time on
+// both, the second a copy. The process that read the second held it in memory, and that copy hid the first one's row
+// (a check of 11 November 2026). Each once, as handed over, there and in the next process.
+$bxW = str_repeat('qk', 10);
+$bxHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-board-two-threads';
+$fake->threads[$bxW] = ['id' => 'bx-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($bxW, 1, 'OK', $carol)], 'gate' => [], 'instance' => str_repeat('x', 16)];
+$bx = new Runtime($bxHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+$bx->channels['board'] = new Channel('board', 'bx-read-key', $bxW, $fake->now + 600);
+$bx->poll($bx->channels['board']);
+$bx->close();
+$fake->threads[$bxW]['instance'] = str_repeat('y', 16);
+$bx = new Runtime($bxHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+[, $bxGot] = $bx->poll($bx->channels['board']);
+$bxRows = static function (Runtime $reader): array {
+    $rows = array_map(static fn (array $reply): array => [$reply['instance'] ?? null, $reply['replay']], $reader->boardReplies());
+    sort($rows);
+
+    return $rows;
+};
+$bxListed = [$bxRows($bx)];
+$bx->close();
+$bx = new Runtime($bxHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+$bxListed[] = $bxRows($bx);
+$bx->close();
+$bxWant = [[str_repeat('x', 16), false], [str_repeat('y', 16), true]];
+$check(
+    array_column($bxGot, 'replay') === [true] && $bxListed === [$bxWant, $bxWant],
+    'one signer\'s answer on two threads at one address in one second is two replies with their marks, in memory and in the next process',
+    json_encode([array_column($bxGot, 'replay'), $bxListed])
+);
+
+// One answer whose cursor could not be written down, read again in the same process once the home could be written
+// to: two copies of one delivery, listed twice (the same check). Once, as first handed over, there and in the next
+// process.
+$byW = str_repeat('ql', 10);
+$byHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-board-read-again';
+$fake->threads[$byW] = ['id' => 'by-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($byW, 1, 'OK', $carol)], 'gate' => [], 'instance' => str_repeat('x', 16)];
+$by = new Runtime($byHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+$by->channels['board'] = new Channel('board', 'by-read-key', $byW, $fake->now + 600);
+$by->saveState();
+mkdir($byHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+[, $byFirst] = $by->poll($by->channels['board']);
+rmdir($byHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+[, $bySecond] = $by->poll($by->channels['board']);
+$byReplies = static fn (Runtime $reader): array => array_map(static fn (array $reply): array => [$reply['seq'], $reply['replay']], $reader->boardReplies());
+$byListed = [$byReplies($by)];
+$by->close();
+$by = new Runtime($byHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+$byListed[] = $byReplies($by);
+$by->close();
+$check(
+    array_column($byFirst, 'replay') === [false] && array_column($bySecond, 'replay') === [true] && $byListed === [[[1, false]], [[1, false]]],
+    'an answer handed over again after its cursor could not be written down is one reply, as first handed over, in memory and in the next process',
+    json_encode([array_column($byFirst, 'replay'), array_column($bySecond, 'replay'), $byListed])
+);
+
+// The first write of a read fails and the next would work: two writes in one read let attention say the cursor stayed
+// at 0 when the second had written 2 (a check of 11 November 2026). One write now, and attention says where it stands.
+$owW = str_repeat('qm', 10);
+$owHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-one-write';
+mkdir($owHome, 0700, true);
+$owBlocker = null;
+$owUnblock = static function (string $line) use (&$owBlocker): void {
+    if ($owBlocker !== null && str_contains($line, 'could not write down what it had read')) {
+        @rmdir($owBlocker);
+        $owBlocker = null;
+    }
+};
+$fake->threads[$owW] = ['id' => 'ow-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($owW, 1, 'one', $carol), $signedOn($owW, 2, 'two', $carol)], 'gate' => [], 'instance' => str_repeat('o', 16)];
+$ow = new Runtime($owHome, 'https://fake.test', ['r10'], false, $owUnblock);
+$ow->channels['ow'] = new Channel('ow', 'ow-read-key', $owW, $fake->now + 600);
+$ow->saveState();
+$owBlocker = $owHome . DIRECTORY_SEPARATOR . 'state.json.tmp';
+mkdir($owBlocker);
+[, $owGot] = $ow->poll($ow->channels['ow']);
+$owSaid = $state($ow, 'unsaved');
+$owKept = json_decode((string) file_get_contents($owHome . DIRECTORY_SEPARATOR . 'state.json'), true);
+$owOnDisk = null;
+foreach ($owKept['channels'] ?? [] as $kept) {
+    if (($kept['label'] ?? null) === 'ow') {
+        $owOnDisk = $kept['after'] ?? null;
+    }
+}
+$check(
+    count($owGot) === 2 && count($owSaid) === 1 && str_contains($owSaid[0]['what'], 'The cursor stays at ' . $ow->channels['ow']->after . '.') && $ow->channels['ow']->after === $owOnDisk,
+    'a read writes its cursor once, and what attention says of it is where it stands, in memory and on disk',
+    json_encode([count($owGot), $owSaid, $ow->channels['ow']->after, $owOnDisk])
+);
+if ($owBlocker !== null) {
+    @rmdir($owBlocker);
+}
+$ow->close();
 
 $pc->close();
 $pcSender->close();

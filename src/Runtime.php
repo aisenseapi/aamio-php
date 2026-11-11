@@ -956,18 +956,58 @@ final class Runtime
                 $aside[] = $entry;
             }
         }
-        if ($aside !== []) {
-            ($this->log)(sprintf('scopes.json: %d entries are not scopes this runtime can use, and stay in the file as they are', count($aside)));
+        // An invitation whose scope was removed is remembered among the rest,
+        // where an earlier version keeps it too, and is no typo to report.
+        $unusable = array_filter($aside, static fn (mixed $entry): bool => !self::isRemovedShare($entry));
+        if ($unusable !== []) {
+            ($this->log)(sprintf('scopes.json: %d entries are not scopes this runtime can use, and stay in the file as they are', count($unusable)));
         }
 
         return [$usable, $aside];
     }
 
-    /** Writes the scopes, and only then holds them: a save that fails changes nothing. */
-    private function saveScopes(array $scopes): void
+    /** How many invitations whose scope was removed scopes.json remembers. One is only read again while its thread lives, and the oldest go first. */
+    private const SCOPE_REMOVED_KEEP = 256;
+
+    /** An entry of scopes.json that remembers an invitation whose scope was removed, as aamio-python writes it too. */
+    private static function isRemovedShare(mixed $entry): bool
     {
-        $this->saveJson('scopes.json', [...$scopes, ...$this->scopesAside]);
+        $entry = $entry instanceof \stdClass ? (array) $entry : $entry;
+
+        return is_array($entry) && array_keys($entry) === ['removed_share'] && is_string($entry['removed_share'])
+            && preg_match('/^[0-9a-f]{64}:(?:[0-9a-f]{16}|-|\?)$/D', $entry['removed_share']) === 1;
+    }
+
+    /** @return array<string, true> */
+    private function removedShares(): array
+    {
+        $removed = [];
+        foreach ($this->scopesAside as $entry) {
+            if (self::isRemovedShare($entry)) {
+                $removed[((array) $entry)['removed_share']] = true;
+            }
+        }
+
+        return $removed;
+    }
+
+    /** What an invitation is known by: the hash of its bytes and its signer, as seen_from records it, or null. */
+    private static function shareRecord(array $entry): ?string
+    {
+        $digest = $entry['sha256'] ?? null;
+
+        return is_string($digest) && preg_match('/^[0-9a-f]{64}$/D', $digest) === 1
+            ? Channel::seenRecord($digest, is_string($entry['from_key'] ?? null) ? $entry['from_key'] : null)
+            : null;
+    }
+
+    /** Writes the scopes, and only then holds them: a save that fails changes nothing. */
+    private function saveScopes(array $scopes, ?array $aside = null): void
+    {
+        $aside ??= $this->scopesAside;
+        $this->saveJson('scopes.json', [...$scopes, ...$aside]);
         $this->scopes = $scopes;
+        $this->scopesAside = $aside;
     }
 
     private function scopeIndex(string $name): ?int
@@ -1080,12 +1120,33 @@ final class Runtime
         return array_map(static fn (array $scope): array => self::scopeView($scope), $this->scopes);
     }
 
+    /**
+     * Removes a scope, and remembers the invitations it came from in the same
+     * write. The cursor and the hashes of what was read live in state.json, and
+     * the scope in scopes.json. When state.json could not be written, the
+     * invitation came again after a restart as a message never seen, and a
+     * scope removed since was taken back (a check of 11 November 2026). Now the
+     * invitation is remembered here, and the same one read again keeps nothing.
+     * A new invitation is another message, and is taken.
+     */
     public function scopeRemove(string $name): array
     {
         $scope = $this->scopeNamed($name);
         $scopes = $this->scopes;
         unset($scopes[$this->scopeIndex($name)]);
-        $this->saveScopes(array_values($scopes));
+        $aside = $this->scopesAside;
+        $removed = $this->removedShares();
+        foreach ((array) ($scope['taken_from'] ?? []) as $share) {
+            if (is_string($share) && !isset($removed[$share]) && self::isRemovedShare(['removed_share' => $share])) {
+                $aside[] = ['removed_share' => $share];
+                $removed[$share] = true;
+            }
+        }
+        $kept = array_keys(array_filter($aside, static fn (mixed $entry): bool => self::isRemovedShare($entry)));
+        foreach (array_slice($kept, 0, max(0, count($kept) - self::SCOPE_REMOVED_KEEP)) as $index) {
+            unset($aside[$index]);
+        }
+        $this->saveScopes(array_values($scopes), array_values($aside));
 
         return ['removed' => $scope['name']];
     }
@@ -1183,11 +1244,28 @@ final class Runtime
             $view['note'] = 'not kept again: this message arrived before, and a scope removed since stays removed';
         } elseif ($entry['replay_unknown'] ?? false) {
             $view['note'] = 'not kept: these bytes arrived here before, recorded by an earlier version without who sent them, so this may be that message again, and a scope removed since stays removed';
+        } elseif (isset($this->removedShares()[self::shareRecord($entry) ?? ''])) {
+            $view['note'] = 'not kept again: this invitation was taken here before, and its scope was removed since. A scope removed stays removed: ask for it to be shared again';
         } else {
             try {
                 $local = $this->sharedScopeName($partner, $share['name'] ?? null);
                 $address = $key === null ? ($share['address'] ?? null) : null;
                 [$held, $keep] = $this->scopeAddPlan($local, $key, $address);
+                // Held already, nothing but the record of this invitation to write.
+                $plain = $keep === null;
+                // The invitation goes with the scope, in the same write, so that
+                // removing the scope can remember it.
+                $invitation = self::shareRecord($entry);
+                if ($invitation !== null && !in_array($invitation, (array) ($held['taken_from'] ?? []), true)) {
+                    $scopes = $keep ?? $this->scopes;
+                    foreach ($scopes as $i => $scope) {
+                        if ($scope['address'] === $held['address']) {
+                            $scopes[$i]['taken_from'] = [...(array) ($scope['taken_from'] ?? []), $invitation];
+                            $held = $scopes[$i];
+                        }
+                    }
+                    $keep = $scopes;
+                }
             } catch (\Throwable $error) {
                 // This share alone, and nothing held that was not saved. The
                 // rest of the messages are delivered either way.
@@ -1213,6 +1291,14 @@ final class Runtime
                     }
                     $view = $shown;
                 } catch (\Throwable $error) {
+                    if ($plain) {
+                        // Held from before, and shown as it is held: only the
+                        // record of this invitation was not written.
+                        ($this->log)(sprintf('scopes.json: the invitation in message %s was not recorded with scope %s: %s', (string) ($entry['seq'] ?? '?'), $held['name'], $error->getMessage()));
+                        $entry['body']['data']['aamio_scope'] = $shown;
+
+                        return;
+                    }
                     // Said in attention, with what went wrong, and on the
                     // message in the form it was weighed at.
                     $view = $unsaved;
@@ -2014,19 +2100,32 @@ final class Runtime
         // same address in the same second gives a message the same seq and the
         // same time as one of the old thread, so the address, the seq, the time
         // and the hash together still made two deliveries one (two reviews of 11
-        // November 2026). A row the archive keeps with its thread's instance is
-        // one delivery by its address, instance and seq. Any other row is told
-        // by all it shows, its verified signer too, and two rows that show the
+        // November 2026). A row with its thread's instance, as every copy in
+        // memory and every row the archive writes has it now, is one delivery
+        // by its address, instance and seq, and the first of its copies stands,
+        // as it was first handed over: a copy in memory that knew only what it
+        // showed hid an answer on the other thread, and a delivery read twice
+        // was listed twice (a check of the same day). Any other row is told by
+        // all it shows, its verified signer too, and two such rows that show the
         // same are both kept: nothing says they are one.
+        $one = static fn (array $entry): ?string => is_string($entry['instance'] ?? null) ? (string) json_encode([$entry['w'] ?? null, $entry['instance'], $entry['seq'] ?? null]) : null;
         $shown = static fn (array $entry): string => (string) json_encode([$entry['w'] ?? null, $entry['seq'] ?? null, $entry['at'] ?? null, $entry['sha256'] ?? null, $entry['from_key'] ?? null]);
-        // What this process handed over and wrote down has its row in the
-        // archive as well, and is shown once, as it was handed over. One that
-        // was not written down has no row there and stands for none: it would
-        // hide another delivery that shows the same.
+        // A copy in memory without the instance, from a service that names
+        // none, has its row in the archive as well when it was written down,
+        // and stands for one row there that shows the same. One that was not
+        // written down has no row there and stands for none: it would hide
+        // another delivery that shows the same.
         $onDisk = [];
+        $named = [];
         foreach ($this->channels as $channel) {
             foreach ($channel->received as $entry) {
-                if (($entry['archived'] ?? null) !== false) {
+                $delivery = $one($entry);
+                if ($delivery !== null) {
+                    if (isset($named[$delivery])) {
+                        continue;
+                    }
+                    $named[$delivery] = true;
+                } elseif (($entry['archived'] ?? null) !== false) {
                     $onDisk[$shown($entry)] = ($onDisk[$shown($entry)] ?? 0) + 1;
                 }
                 if ($wanted($entry)) {
@@ -2043,18 +2142,15 @@ final class Runtime
         // although they had arrived, been decrypted and been written down.
         $labels = array_unique(array_merge(array_keys($this->channels), ['board'], $this->archiveLabels()));
         sort($labels);
-        $named = [];
         foreach ($labels as $label) {
             foreach ($this->archived($label, 'received') as $entry) {
-                $instance = $entry['instance'] ?? null;
-                if (is_string($instance)) {
-                    $one = (string) json_encode([$entry['w'] ?? null, $instance, $entry['seq'] ?? null]);
-                    if (isset($named[$one])) {
+                $delivery = $one($entry);
+                if ($delivery !== null) {
+                    if (isset($named[$delivery])) {
                         continue;
                     }
-                    $named[$one] = true;
-                }
-                if (($onDisk[$shown($entry)] ?? 0) > 0) {
+                    $named[$delivery] = true;
+                } elseif (($onDisk[$shown($entry)] ?? 0) > 0) {
                     $onDisk[$shown($entry)]--;
                     continue;
                 }
@@ -3088,10 +3184,11 @@ final class Runtime
                 $entry['archived'] = false;
                 $this->note($channel, 'archive_failed', 'message ' . $entry['seq'] . ' was handed over and could not be written to the archive: ' . $error->getMessage() . '. The archive does not have it.', [(int) $entry['seq']]);
             }
-            // The copy this process keeps, with the archive's mark: board
-            // replies count a message held here and written down as its row in
-            // the archive, and one not written down as none.
-            $channel->received[] = $entry;
+            // The copy board replies keep, with the archive's mark and the
+            // thread's instance, which the message handed over does not carry:
+            // one delivery is known by its address, instance and seq in memory
+            // as it is in the archive (a check of 11 November 2026).
+            $channel->received[] = $entry + (is_string($channel->instance) ? ['instance' => $channel->instance] : []);
             $entries[] = $entry;
         }
         // Messages whose bytes this channel handed over before, which an earlier
@@ -3127,33 +3224,45 @@ final class Runtime
                 $this->note($channel, 'unverified', 'message ' . $observed['seq'] . ' was called verified by the service and does not check out here: ' . $observed['unverified_because'] . '. It is ' . $disposition . '. This can indicate a faulty service or an operator that lies.', [$observed['seq']]);
             }
         }
-        if ($entries !== []) {
-            // The cursor moves and the hashes are stored in the same save, before the caller sees a message.
-            $this->saveCursor($channel, max($channel->after, (int) end($entries)['seq']));
-        }
-        if ($keptOut !== []) {
-            // Past them as well, or the same messages are read and kept out on
-            // every call. And said, since a message that does not arrive has to
-            // be told from one that was never sent.
-            $seqs = array_map('intval', array_column($keptOut, 'seq'));
-            $this->saveCursor($channel, max($channel->after, max($seqs)));
-            $openedFor = in_array('*', $channel->allow, true) ? 'any key, signed only' : count($channel->allow) . ' named key(s)';
-            $this->note($channel, 'kept_out', 'This channel was opened for ' . $openedFor . ', and these messages did not satisfy its list as checked here. They are not handed over and not archived.', $seqs);
-        }
+        // The cursor moves once, to where this read leaves it, and is written
+        // down once, with the hashes, before the caller sees a message. Two
+        // writes in one read let attention say the cursor stayed at 0 when the
+        // second had written 1 (a check of 11 November 2026). It moves past
+        // messages the list kept out as well, or the same messages are read and
+        // kept out on every call.
+        //
         // After a reset the service's next is the cursor, and it is lower than
         // the one this channel held. Keeping the higher of the two would ask
         // past the new thread on every call and hand the same messages over
-        // each time.
-        //
-        // A poll that stopped at its limit is the exception: the service's next
-        // covers messages this call never looked at, so the cursor is the last
-        // one it did look at.
+        // each time. A poll that stopped at its limit is the exception: the
+        // service's next covers messages this call never looked at, so the
+        // cursor is the last one it did look at.
+        $to = $channel->after;
+        $moved = $entries !== [] || $keptOut !== [];
+        if ($entries !== []) {
+            $to = max($to, (int) end($entries)['seq']);
+        }
+        $seqs = array_map('intval', array_column($keptOut, 'seq'));
+        if ($seqs !== []) {
+            $to = max($to, max($seqs));
+        }
         if ($stopAt !== null) {
             if ($stopAt > 0) {
-                $this->saveCursor($channel, $stopAt);
+                $to = $stopAt;
+                $moved = true;
             }
         } elseif (is_int($answer['next'] ?? null)) {
-            $this->saveCursor($channel, $answer['next']);
+            $to = $answer['next'];
+            $moved = true;
+        }
+        if ($moved) {
+            $this->saveCursor($channel, $to);
+        }
+        if ($keptOut !== []) {
+            // Said, since a message that does not arrive has to be told from
+            // one that was never sent.
+            $openedFor = in_array('*', $channel->allow, true) ? 'any key, signed only' : count($channel->allow) . ' named key(s)';
+            $this->note($channel, 'kept_out', 'This channel was opened for ' . $openedFor . ', and these messages did not satisfy its list as checked here. They are not handed over and not archived.', $seqs);
         }
 
         return ['ok', $entries];

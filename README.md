@@ -305,7 +305,9 @@ address book, never to an address, since an address can be anyone's. A scope a
 partner shares is kept when it comes sealed from someone in the address book,
 under that partner's name and the scope's, as `Al.chapter-review`, so a partner
 never takes a name you would choose for your own, and a share that arrives a
-second time is not kept again. The key is taken out of the message before
+second time is not kept again. Removing a scope remembers the invitations it
+came from in `scopes.json`, so the same invitation read again, after a restart
+that lost what was read, does not bring it back; a new invitation does. The key is taken out of the message before
 anything reads it. `aamio scope key NAME` prints the key for a person who has
 to pass it on by hand. A file in the home that is there and cannot be read
 stops the runtime with its name rather than being saved over.
@@ -428,7 +430,9 @@ what it hands over, and a copy from that signer can then come with `replay:
 false`. `archive_failed`, `scope_not_saved` and `untraced`: a message read
 could not be written to the archive, a scope it shared could not be saved, or
 the trace could not be written; the message came, and the note says what went
-wrong. `filtered`: board replies left messages out, and read shows them. `more`: the read stopped at its `limit`; nothing was
+wrong. `unsaved`: what a read took could not be written down; the messages
+came, the cursor stays where it was last written, and they come again, marked
+`replay` while this process runs. `filtered`: board replies left messages out, and read shows them. `more`: the read stopped at its `limit`; nothing was
 passed over, every cursor stands at the last message handed over, so read
 again. The MCP tool `aamio_read` carries the same field.
 
