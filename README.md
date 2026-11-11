@@ -422,7 +422,10 @@ over before from the same signer, or the same unsigned bytes; another signer's
 message with the same text is not one. `replay_unknown`: a message carries the
 bytes of one an earlier version kept without who sent it, so whether it is a
 copy cannot be told, and it comes with `replay: false` and `replay_unknown:
-true`. `archive_failed`, `scope_not_saved` and `untraced`: a message read
+true`. Where `replay` decides what is done, upgrade every client that reads one
+home together: an earlier version that reads in between records no signer for
+what it hands over, and a copy from that signer can then come with `replay:
+false`. `archive_failed`, `scope_not_saved` and `untraced`: a message read
 could not be written to the archive, a scope it shared could not be saved, or
 the trace could not be written; the message came, and the note says what went
 wrong. `filtered`: board replies left messages out, and read shows them. `more`: the read stopped at its `limit`; nothing was

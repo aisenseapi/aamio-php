@@ -2007,16 +2007,28 @@ final class Runtime
             return is_array($body) && is_string($body['post'] ?? null);
         };
         $out = [];
-        $seen = [];
         $skipped = [];
-        // One delivery is one row: the address, the seq, the time and the hash of
-        // its bytes. The hash alone is of the text, and of two signers who sent
-        // the same answer to one post, the second was left out once the list
-        // came from the archive (a review of 11 November 2026).
-        $delivery = static fn (array $entry): string => json_encode([$entry['w'] ?? null, $entry['seq'] ?? null, $entry['at'] ?? null, $entry['sha256'] ?? null]);
+        // One delivery is one row. The hash alone is of the text, and of two
+        // signers who sent the same answer to one post the second was left out
+        // once the list came from the archive; and a thread opened again at the
+        // same address in the same second gives a message the same seq and the
+        // same time as one of the old thread, so the address, the seq, the time
+        // and the hash together still made two deliveries one (two reviews of 11
+        // November 2026). A row the archive keeps with its thread's instance is
+        // one delivery by its address, instance and seq. Any other row is told
+        // by all it shows, its verified signer too, and two rows that show the
+        // same are both kept: nothing says they are one.
+        $shown = static fn (array $entry): string => (string) json_encode([$entry['w'] ?? null, $entry['seq'] ?? null, $entry['at'] ?? null, $entry['sha256'] ?? null, $entry['from_key'] ?? null]);
+        // What this process handed over and wrote down has its row in the
+        // archive as well, and is shown once, as it was handed over. One that
+        // was not written down has no row there and stands for none: it would
+        // hide another delivery that shows the same.
+        $onDisk = [];
         foreach ($this->channels as $channel) {
             foreach ($channel->received as $entry) {
-                $seen[$delivery($entry)] = true;
+                if (($entry['archived'] ?? null) !== false) {
+                    $onDisk[$shown($entry)] = ($onDisk[$shown($entry)] ?? 0) + 1;
+                }
                 if ($wanted($entry)) {
                     $out[] = $entry;
                 } else {
@@ -2031,12 +2043,21 @@ final class Runtime
         // although they had arrived, been decrypted and been written down.
         $labels = array_unique(array_merge(array_keys($this->channels), ['board'], $this->archiveLabels()));
         sort($labels);
+        $named = [];
         foreach ($labels as $label) {
             foreach ($this->archived($label, 'received') as $entry) {
-                if (isset($seen[$delivery($entry)])) {
+                $instance = $entry['instance'] ?? null;
+                if (is_string($instance)) {
+                    $one = (string) json_encode([$entry['w'] ?? null, $instance, $entry['seq'] ?? null]);
+                    if (isset($named[$one])) {
+                        continue;
+                    }
+                    $named[$one] = true;
+                }
+                if (($onDisk[$shown($entry)] ?? 0) > 0) {
+                    $onDisk[$shown($entry)]--;
                     continue;
                 }
-                $seen[$delivery($entry)] = true;
                 if ($wanted($entry)) {
                     $entry['from_archive'] = true;
                     $out[] = $entry;
@@ -3040,10 +3061,17 @@ final class Runtime
             if ($entry['verified'] === true && $from) {
                 $this->traceSafely('received', fn (): ?string => $this->traceReceived($channel, $entry));
             }
-            $channel->received[] = $entry;
             // Received, readable, archived and handled are four different things.
             try {
-                $wrote = $this->archive($channel->label, $entry + ['kind' => 'received']);
+                // With the thread's instance: a thread opened again at the same
+                // address in the same second gives a message the same seq and the
+                // same time as one of the old thread, and board replies had
+                // nothing else to tell the two by (a review of 11 November 2026).
+                $row = $entry + ['kind' => 'received'];
+                if (is_string($channel->instance)) {
+                    $row['instance'] = $channel->instance;
+                }
+                $wrote = $this->archive($channel->label, $row);
                 $entry['archived'] = $wrote;
 
                 if (!$wrote) {
@@ -3060,6 +3088,10 @@ final class Runtime
                 $entry['archived'] = false;
                 $this->note($channel, 'archive_failed', 'message ' . $entry['seq'] . ' was handed over and could not be written to the archive: ' . $error->getMessage() . '. The archive does not have it.', [(int) $entry['seq']]);
             }
+            // The copy this process keeps, with the archive's mark: board
+            // replies count a message held here and written down as its row in
+            // the archive, and one not written down as none.
+            $channel->received[] = $entry;
             $entries[] = $entry;
         }
         // Messages whose bytes this channel handed over before, which an earlier

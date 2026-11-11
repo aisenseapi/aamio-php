@@ -672,5 +672,66 @@ $check(
     json_encode($brSeen)
 );
 
+// A thread opened again at the same address in the same second: seq 1 and the same time and text on both, and one of
+// them was gone once the list came from the archive (a review of 11 November 2026, 13.00). The archive keeps the
+// thread's instance with each row it writes, a row with one is one delivery by its address, instance and seq, any
+// other is told by all it shows, its signer too, and two rows that show the same are both kept.
+$brCase = 0;
+$brRows = static function (array $rows, array $held = []) use ($root, &$brCase, $r10Quiet): array {
+    $home = $root . DIRECTORY_SEPARATOR . 'release-check-10-board-instance-' . (++$brCase);
+    @mkdir($home . DIRECTORY_SEPARATOR . 'archive', 0700, true);
+    $lines = '';
+    foreach ($rows as $row) {
+        $lines .= json_encode($row + ['kind' => 'received', 'channel' => 'board', 'w' => str_repeat('b', 20), 'seq' => 1, 'at' => 1789470700, 'verified' => true, 'sender' => 'unknown key', 'sha256' => str_repeat('c', 64), 'body' => ['post' => 'p1', 'text' => 'OK']]) . "\n";
+    }
+    file_put_contents($home . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'board.jsonl', $lines);
+    $listed = [];
+    for ($i = 0; $i < 2; $i++) {
+        $br = new Runtime($home, 'https://fake.test', ['r10'], true, $r10Quiet);
+        if ($held !== []) {
+            $br->channels['board'] = new Channel('board', 'read', str_repeat('b', 20), time() + 600);
+            $br->channels['board']->received = array_map(static fn (array $entry): array => $entry + ['channel' => 'board', 'w' => str_repeat('b', 20), 'seq' => 1, 'at' => 1789470700, 'sha256' => str_repeat('c', 64), 'body' => ['post' => 'p1', 'text' => 'OK']], $held);
+        }
+        $listed[] = array_map(static fn (array $reply): array => [$reply['from_key'], isset($reply['from_archive'])], $br->boardReplies('p1'));
+        $br->close();
+    }
+
+    return $listed;
+};
+$x = str_repeat('x', 16);
+$y = str_repeat('y', 16);
+$brCases = [
+    'another signer on the thread opened again at the address in the same second is another delivery, in every process'
+        => [$brRows([['instance' => $x, 'from_key' => 'a-key'], ['instance' => $y, 'from_key' => 'b-key']]), [[['a-key', true], ['b-key', true]], [['a-key', true], ['b-key', true]]]],
+    'and so is the same signer'
+        => [$brRows([['instance' => $x, 'from_key' => 'a-key'], ['instance' => $y, 'from_key' => 'a-key']]), [[['a-key', true], ['a-key', true]], [['a-key', true], ['a-key', true]]]],
+    'the second one held in memory leaves the first shown from the archive'
+        => [$brRows([['instance' => $x, 'from_key' => 'a-key'], ['instance' => $y, 'from_key' => 'b-key']], [['from_key' => 'b-key', 'archived' => true]]), [[['b-key', false], ['a-key', true]], [['b-key', false], ['a-key', true]]]],
+    'two rows from before the instance that show the same are both kept'
+        => [$brRows([['from_key' => 'a-key'], ['from_key' => 'a-key']]), [[['a-key', true], ['a-key', true]], [['a-key', true], ['a-key', true]]]],
+    'one delivery written down twice is one row'
+        => [$brRows([['instance' => $x, 'from_key' => 'a-key'], ['instance' => $x, 'from_key' => 'a-key']]), [[['a-key', true]], [['a-key', true]]]],
+    'one not written down does not hide another that shows the same'
+        => [$brRows([['instance' => $x, 'from_key' => 'a-key']], [['from_key' => 'a-key', 'archived' => false]]), [[['a-key', false], ['a-key', true]], [['a-key', false], ['a-key', true]]]],
+];
+foreach ($brCases as $what => [$got, $want]) {
+    $check($got === $want, $what, json_encode($got));
+}
+
+// And a read writes the thread's instance with each row it archives; the message as handed over is the one weighed.
+$arW = str_repeat('u', 20);
+$fake->threads[$arW] = ['id' => 'ar-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($arW, 1, 'archived with its instance', $carol)], 'gate' => [], 'instance' => str_repeat('w', 16)];
+$arHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-archive-instance';
+$ar = new Runtime($arHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+$ar->channels['ar'] = new Channel('ar', 'ar-read-key', $arW, $fake->now + 600);
+[, $arGot] = $ar->poll($ar->channels['ar']);
+$arRows = array_map(static fn (string $line): array => json_decode($line, true), array_values(array_filter(explode("\n", (string) @file_get_contents($arHome . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'ar.jsonl')))));
+$check(
+    count($arGot) === 1 && !isset($arGot[0]['instance']) && array_column($arRows, 'instance') === [str_repeat('w', 16)] && ($ar->channels['ar']->received[0]['archived'] ?? null) === true,
+    'a read archives each message with its thread\'s instance, and the copy this process keeps carries the archive\'s mark',
+    json_encode([$arRows, $ar->channels['ar']->received])
+);
+$ar->close();
+
 $pc->close();
 $pcSender->close();
