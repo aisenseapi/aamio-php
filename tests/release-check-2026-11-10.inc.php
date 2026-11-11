@@ -733,5 +733,30 @@ $check(
 );
 $ar->close();
 
+// A read whose place cannot be written down hands over what arrived, keeps the cursor where state.json has it and says
+// so, and the next read hands it over again, a replay in this process. The save threw out of poll after the messages
+// were taken, and the channel was called unread (found while the review of 11 November 2026 was answered).
+$usW = str_repeat('s', 20);
+$fake->threads[$usW] = ['id' => 'us-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($usW, 1, 'kept across a failed save', $carol)], 'gate' => [], 'instance' => str_repeat('z', 16)];
+$usHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-unsaved';
+$us = new Runtime($usHome, 'https://fake.test', ['r10'], false, $r10Quiet);
+$us->channels['us'] = new Channel('us', 'us-read-key', $usW, $fake->now + 600);
+$us->saveState();
+$us->attentionTaken();
+mkdir($usHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+[, $usFirst] = $us->poll($us->channels['us']);
+$usSaid = $state($us, 'unsaved');
+$usAfter = $us->channels['us']->after;
+rmdir($usHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+[, $usAgain] = $us->poll($us->channels['us']);
+$usKept = json_decode((string) file_get_contents($usHome . DIRECTORY_SEPARATOR . 'state.json'), true);
+$check(
+    count($usFirst) === 1 && count($usSaid) === 1 && str_contains($usSaid[0]['what'], 'The cursor stays at 0') && $usAfter === 0
+        && count($usAgain) === 1 && $usAgain[0]['replay'] === true && ($usKept['channels'][array_search('us', array_column($usKept['channels'], 'label'), true)]['after'] ?? null) === 1,
+    'a read whose place cannot be written down hands over what arrived, keeps the cursor where state.json has it and says so, and the next read hands it over again as a replay',
+    json_encode([count($usFirst), $usSaid, $usAfter, $usAgain[0]['replay'] ?? null])
+);
+$us->close();
+
 $pc->close();
 $pcSender->close();

@@ -27,6 +27,11 @@ not what moved in the source.
   thread's `instance` with each message it writes, and a row that has one is one
   delivery by its address, instance and seq. A row written before is told by all
   it shows, its signer too, and two such rows that show the same are both kept.
+- A read whose place could not be written down hands over what arrived, keeps
+  the cursor where `state.json` has it and says so as `unsaved`, as aamio-python
+  does. The save threw out of the read: the channel was called unread and
+  nothing from it was handed over, while the cursor in memory had moved past
+  the messages, so a process that went on reading never handed them over.
 
 ## 0.3.16 - 2026-11-11
 

@@ -3129,16 +3129,14 @@ final class Runtime
         }
         if ($entries !== []) {
             // The cursor moves and the hashes are stored in the same save, before the caller sees a message.
-            $channel->after = max($channel->after, (int) end($entries)['seq']);
-            $this->saveState();
+            $this->saveCursor($channel, max($channel->after, (int) end($entries)['seq']));
         }
         if ($keptOut !== []) {
             // Past them as well, or the same messages are read and kept out on
             // every call. And said, since a message that does not arrive has to
             // be told from one that was never sent.
             $seqs = array_map('intval', array_column($keptOut, 'seq'));
-            $channel->after = max($channel->after, max($seqs));
-            $this->saveState();
+            $this->saveCursor($channel, max($channel->after, max($seqs)));
             $openedFor = in_array('*', $channel->allow, true) ? 'any key, signed only' : count($channel->allow) . ' named key(s)';
             $this->note($channel, 'kept_out', 'This channel was opened for ' . $openedFor . ', and these messages did not satisfy its list as checked here. They are not handed over and not archived.', $seqs);
         }
@@ -3152,15 +3150,38 @@ final class Runtime
         // one it did look at.
         if ($stopAt !== null) {
             if ($stopAt > 0) {
-                $channel->after = $stopAt;
-                $this->saveState();
+                $this->saveCursor($channel, $stopAt);
             }
         } elseif (is_int($answer['next'] ?? null)) {
-            $channel->after = $answer['next'];
-            $this->saveState();
+            $this->saveCursor($channel, $answer['next']);
         }
 
         return ['ok', $entries];
+    }
+
+    /**
+     * Moves the cursor and writes it down with the hashes, and says so when the
+     * writing fails. The save used to throw out of poll after the messages had
+     * been taken: read() called the channel unread and handed none of them
+     * over, while the cursor in memory had moved past them, so a process that
+     * went on reading never handed them over at all, and what had been said of
+     * them, replay_unknown among it, was said of messages nobody got (found
+     * while the review of 11 November 2026 was answered). Now what arrived is
+     * handed over, the cursor stays where state.json has it, and the next read
+     * hands the same messages over again, marked replay while this process
+     * runs: a message twice is a nuisance, a message never is a loss. As in
+     * aamio-python.
+     */
+    private function saveCursor(Channel $channel, int $to): void
+    {
+        $was = $channel->after;
+        $channel->after = $to;
+        try {
+            $this->saveState();
+        } catch (\Throwable $error) {
+            $channel->after = $was;
+            $this->note($channel, 'unsaved', 'this machine could not write down what it had read: ' . $error->getMessage() . '. The cursor stays at ' . $was . '. Nothing was lost: what arrived was handed over, and anything whose place was not written down arrives again, marked as a replay while this process runs. Free some room or fix the permissions on the home folder, and check aamio doctor.');
+        }
     }
 
     /**
