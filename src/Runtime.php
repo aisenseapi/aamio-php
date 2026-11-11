@@ -2806,7 +2806,7 @@ final class Runtime
             $known = $this->nameForKey($from);
             [$body, $meta] = $this->open($message);
             $digest = $message['sha256'] ?? null;
-            return ['channel' => $channel->label, 'w' => $channel->w, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => $message['verified'], 'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'), 'sha256' => $digest, 'replay' => is_string($digest) && isset($channel->seen[$digest]), 'body' => $body, 'unverified_because' => $message['unverified_because'] ?? null] + $meta;
+            return ['channel' => $channel->label, 'w' => $channel->w, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => $message['verified'], 'from_key' => $from, 'known_contact' => $known !== null, 'sender' => $known ?? ($from ? 'unknown key' : 'unsigned'), 'sha256' => $digest, 'replay' => $channel->isReplay(is_string($digest) ? $digest : null, ($message['verified'] ?? false) === true && is_string($from) ? $from : null), 'body' => $body, 'unverified_because' => $message['unverified_because'] ?? null] + $meta;
         } catch (\Throwable $error) {
             $why = 'the message could not be checked here: ' . (new \ReflectionClass($error))->getShortName();
             return ['channel' => $channel->label, 'w' => $channel->w, 'seq' => $message['seq'], 'at' => $message['at'], 'verified' => false, 'from_key' => null, 'known_contact' => false, 'sender' => 'unsigned', 'sha256' => null, 'replay' => false, 'body' => ['text' => $message['body'] ?? null], 'signed' => false, 'encrypted' => false, 'format' => 'unreadable', 'error' => $why, 'unverified_because' => $why];
@@ -3008,7 +3008,7 @@ final class Runtime
             $entry = $this->readEntry($channel, $message);
             $from = $entry['from_key'];
             $body = $entry['body'];
-            if (is_string($entry['sha256'])) { $channel->seen[$entry['sha256']] = true; }
+            if (is_string($entry['sha256'])) { $channel->remember($entry['sha256'], $entry['verified'] === true && is_string($entry['from_key']) ? $entry['from_key'] : null); }
             // Before the message is kept, archived or shown: a scope key in it
             // goes to scopes.json or nowhere, never to the reader.
             $this->takeScopeShare($entry);

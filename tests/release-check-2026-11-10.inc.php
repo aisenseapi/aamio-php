@@ -238,6 +238,7 @@ $all = $pc->read();
 $weight = strlen(Codec::json($all[0]));
 $side->forgetThread();
 $side->seen = [];
+$side->seenFrom = [];
 $pc->attentionTaken();
 $got = $pc->read(0, 50, $weight * 2 - 1);
 $said = array_values(array_filter($pc->attentionTaken(), static fn (array $note): bool => $note['state'] === 'more'));
@@ -292,6 +293,7 @@ $sizes = array_map(static fn (array $entry): int => strlen(Codec::json($entry)),
 $archiveFailed = array_values(array_filter($archiving->attentionTaken(), static fn (array $note): bool => $note['state'] === 'archive_failed'));
 $archiving->channels['side']->forgetThread();
 $archiving->channels['side']->seen = [];
+$archiving->channels['side']->seenFrom = [];
 $got = array_values(array_filter($archiving->read(0, 50, array_sum($sizes) - 1), static fn (array $entry): bool => ($entry['channel'] ?? null) === 'side'));
 $check(
     count($sizes) === 2 && count($archiveFailed) === 1 && ($archiveFailed[0]['count'] ?? 0) === 2 && count($got) === 1 && !array_key_exists('archive_error', $got[0]) && $got[0]['archived'] === false,
@@ -468,6 +470,7 @@ $untraced = $state($tr, 'untraced');
 $sizes = array_map(static fn (array $entry): int => strlen(Codec::json($entry)), $whole);
 $tr->channels['side']->forgetThread();
 $tr->channels['side']->seen = [];
+$tr->channels['side']->seenFrom = [];
 $got = $on($tr->read(0, 50, array_sum($sizes) - 1), 'side');
 $check(
     count($whole) === 2 && array_filter($whole, static fn (array $entry): bool => array_key_exists('trace_error', $entry)) === [] && count($untraced) === 1
@@ -516,6 +519,7 @@ try {
     $views = array_map(static fn (array $entry) => $entry['body']['data']['aamio_scope'] ?? null, $whole);
     $shareTo->channels['inbox']->forgetThread();
     $shareTo->channels['inbox']->seen = [];
+    $shareTo->channels['inbox']->seenFrom = [];
     $shareTo->scopeRemove('sender.team');
     $shareTo->attentionTaken();
     $got = $shareTo->read(0, 50, array_sum($sizes) - 1);
@@ -564,6 +568,7 @@ try {
     $flaky->attentionTaken();
     $flaky->channels['inbox']->forgetThread();
     $flaky->channels['inbox']->seen = [];
+    $flaky->channels['inbox']->seenFrom = [];
     foreach ($flaky->scopeList() as $kept) {
         $flaky->scopeRemove($kept['name']);
     }
@@ -589,6 +594,49 @@ $check(
 );
 $flaky->close();
 $flakySender->close();
+
+// A replay is the same bytes from the same signer, or the same unsigned bytes. The hash alone is of the text, and two
+// signers who both sent "OK" made the second a replay of the first (a review of 10 November 2026).
+echo "a replay is the same bytes from the same signer\n";
+$okDigest = '565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3';
+$check(
+    Channel::seenRecord($okDigest, 'A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg') === $okDigest . ':b43cdfe1bf180ef4' && Channel::seenRecord($okDigest, null) === $okDigest . ':-'
+        && hash('sha256', 'OK') === $okDigest,
+    'the record of a message handed over is the one aamio-python and aamio-js write, so a home reads the same in all three'
+);
+$rp = $r10Open();
+$carol = Keys::generate();
+$rpW = str_repeat('s', 20);
+$fake->threads[$rpW] = ['id' => 'rp-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($rpW, 1, 'OK', $pcSender->keys), $signedOn($rpW, 2, 'OK', $carol), $signedOn($rpW, 3, 'OK', $pcSender->keys), $plain(4, 'OK'), $plain(5, 'OK')], 'gate' => [], 'instance' => str_repeat('u', 16)];
+$rp->channels['ok'] = new Channel('ok', 'rp-read-key', $rpW, $fake->now + 600);
+$marks = array_map(static fn (array $entry): array => [$entry['seq'], $entry['replay']], $on($rp->read(), 'ok'));
+$rp->attentionTaken();
+$check(
+    $marks === [[1, false], [2, false], [3, true], [4, false], [5, true]],
+    'two signers who send the same text send two messages, the same signer again is a replay, and unsigned bytes are a replay of the same unsigned bytes only',
+    json_encode($marks)
+);
+$kept = $rp->channels['ok']->toState();
+$loaded = Channel::fromState(array_replace($kept, ['seen_from' => array_merge($kept['seen_from'], ['not a record', str_repeat('a', 64) . ':xyz'])]));
+$check(
+    count($kept['seen_from']) === 3 && array_keys($loaded->seenFrom) === $kept['seen_from'] && $loaded->isReplay($okDigest, $carol->public) && !$loaded->isReplay($okDigest, Keys::generate()->public),
+    'who sent each hash travels with the channel through state.json, and what is not a record is left out',
+    json_encode($kept['seen_from'])
+);
+// As an earlier version left a channel: the hash, and nobody named for it. Taken as it always was.
+$rpW2 = str_repeat('t', 20);
+$fake->threads[$rpW2] = ['id' => 'rp2-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($rpW2, 1, 'OK', $carol)], 'gate' => [], 'instance' => str_repeat('v', 16)];
+$legacy = new Channel('legacy', 'rp2-read-key', $rpW2, $fake->now + 600);
+$legacy->seen = [$okDigest => true];
+$rp->channels['legacy'] = $legacy;
+$marks = array_map(static fn (array $entry): array => [$entry['seq'], $entry['replay']], $on($rp->read(), 'legacy'));
+$rp->attentionTaken();
+$check(
+    $marks === [[1, true]] && isset($legacy->seenFrom[Channel::seenRecord($okDigest, $carol->public)]),
+    'a hash kept without its signer is a replay as before, and from then on its signer is kept with it',
+    json_encode($marks)
+);
+$rp->close();
 
 $pc->close();
 $pcSender->close();

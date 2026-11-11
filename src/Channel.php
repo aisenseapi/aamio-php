@@ -13,8 +13,21 @@ namespace Aamio;
  */
 final class Channel
 {
+    /** A record in seen_from: the hash of the bytes, and the signer's tag or -. */
+    private const SEEN_FROM = '/^[0-9a-f]{64}:(?:[0-9a-f]{16}|-)$/D';
+
     /** @var array<string, true> */
     public array $seen = [];
+    /**
+     * Who sent each hash in seen: one record per message handed over, the
+     * hash of its bytes and the first 16 hex of sha256 of the key it was
+     * verified from, or - when nobody signed it. The hash alone is of the
+     * text, and two signers who both sent "OK" made the second a replay of
+     * the first (a review of 10 November 2026).
+     *
+     * @var array<string, true>
+     */
+    public array $seenFrom = [];
     /** @var array<int, array> entries this process has received, in order */
     public array $received = [];
     /** Metadata of all messages observed in this process, including kept-out ones. */
@@ -115,12 +128,50 @@ final class Channel
         return max(0, $this->expireAt - $now);
     }
 
+    /** The record of a message handed over: its hash, and the signer it was verified from, or -. */
+    public static function seenRecord(string $digest, ?string $fromKey): string
+    {
+        return $digest . ':' . (is_string($fromKey) && $fromKey !== '' ? substr(hash('sha256', $fromKey), 0, 16) : '-');
+    }
+
+    /**
+     * Whether this channel handed these bytes over before from this signer, or
+     * unsigned when they are unsigned. Bytes it handed over from another signer
+     * make this another message. A hash kept without its signer, by a version
+     * from before the records, is taken as it always was: a replay.
+     */
+    public function isReplay(?string $digest, ?string $fromKey): bool
+    {
+        if ($digest === null) {
+            return false;
+        }
+        if (isset($this->seenFrom[self::seenRecord($digest, $fromKey)])) {
+            return true;
+        }
+        foreach (array_keys($this->seenFrom) as $record) {
+            if (str_starts_with((string) $record, $digest . ':')) {
+                return false;
+            }
+        }
+
+        return isset($this->seen[$digest]);
+    }
+
+    /** A message handed over: its hash, and who it came from. */
+    public function remember(string $digest, ?string $fromKey): void
+    {
+        $this->seen[$digest] = true;
+        $this->seenFrom[self::seenRecord($digest, $fromKey)] = true;
+    }
+
     public function toState(): array
     {
         $seen = array_values(array_filter(array_keys($this->seen), static fn ($hash): bool => is_string($hash) && preg_match('/^[0-9a-f]{64}$/D', $hash) === 1));
         sort($seen);
+        $seenFrom = array_values(array_filter(array_keys($this->seenFrom), static fn ($record): bool => is_string($record) && preg_match(self::SEEN_FROM, $record) === 1));
+        sort($seenFrom);
 
-        return ['label' => $this->label, 'read_key' => $this->readKey, 'w' => $this->w, 'expire_at' => $this->expireAt, 'allow' => array_values($this->allow), 'after' => $this->after, 'created_at' => $this->createdAt, 'instance' => $this->instance, 'gone' => $this->gone, 'muted' => $this->muted, 'seen' => $seen];
+        return ['label' => $this->label, 'read_key' => $this->readKey, 'w' => $this->w, 'expire_at' => $this->expireAt, 'allow' => array_values($this->allow), 'after' => $this->after, 'created_at' => $this->createdAt, 'instance' => $this->instance, 'gone' => $this->gone, 'muted' => $this->muted, 'seen' => $seen, 'seen_from' => $seenFrom];
     }
 
     public static function fromState(array $item): self
@@ -128,6 +179,9 @@ final class Channel
         $channel = new self((string) $item['label'], (string) $item['read_key'], (string) $item['w'], (int) $item['expire_at'], array_values((array) ($item['allow'] ?? [])), (int) ($item['after'] ?? 0), isset($item['created_at']) ? (int) $item['created_at'] : null);
         foreach ((array) ($item['seen'] ?? []) as $hash) {
             if (is_string($hash) && preg_match('/^[0-9a-f]{64}$/D', $hash) === 1) { $channel->seen[$hash] = true; }
+        }
+        foreach ((array) ($item['seen_from'] ?? []) as $record) {
+            if (is_string($record) && preg_match(self::SEEN_FROM, $record) === 1) { $channel->seenFrom[$record] = true; }
         }
         $channel->gone = ($item['gone'] ?? null) === true;
         $channel->muted = ($item['muted'] ?? null) === true;

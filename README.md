@@ -417,7 +417,9 @@ gone inbox is opened again. `restarted`: a new thread opened at the same
 address and was read from the start. `reread`: the channel's cursor was kept
 without the thread's instance, by an earlier version or another client, so the
 thread was read again from the start once, and what came before comes marked
-`replay`. `archive_failed`, `scope_not_saved` and `untraced`: a message read
+`replay`. A message is marked `replay` when this channel handed the same bytes
+over before from the same signer, or the same unsigned bytes; another signer's
+message with the same text is not one. `archive_failed`, `scope_not_saved` and `untraced`: a message read
 could not be written to the archive, a scope it shared could not be saved, or
 the trace could not be written; the message came, and the note says what went
 wrong. `filtered`: board replies left messages out, and read shows them. `more`: the read stopped at its `limit`; nothing was

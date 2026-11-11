@@ -83,6 +83,7 @@ $check(count($polled) <= 3 && $polled !== [], 'and hands over what it asked for'
 
 $wireChannel->after = 0;
 $wireChannel->seen = [];
+$wireChannel->seenFrom = [];
 $readBack = $a->read(0, 3, 2000);
 $check(($lastHeaders()['X-Max-Bytes'] ?? null) === '2000', 'and so does read, which is where a person and a model both stand');
 $check(is_array($readBack), 'read still answers a list');
@@ -97,6 +98,7 @@ foreach (json_decode((string) file_get_contents(__DIR__ . '/../src/mcp-tools.jso
 $check(isset($wireTool['inputSchema']['properties']['max_bytes']), 'the local read tool offers a byte budget');
 $wireChannel->after = 0;
 $wireChannel->seen = [];
+$wireChannel->seenFrom = [];
 $wireMcp = (new McpServer($a))->dispatch('aamio_read', ['max_bytes' => 2000]);
 $check(($wireMcp['isError'] ?? true) === false && ($lastHeaders()['X-Max-Bytes'] ?? null) === '2000', 'and a model that sets one reaches the service with it, rather than being quietly ignored', json_encode($lastHeaders()));
 
@@ -105,6 +107,7 @@ $check(($wireMcp['isError'] ?? true) === false && ($lastHeaders()['X-Max-Bytes']
 // one who found out, and this follows the default to the header it becomes.
 $wireChannel->after = 0;
 $wireChannel->seen = [];
+$wireChannel->seenFrom = [];
 $wirePlain = (new McpServer($a))->dispatch('aamio_read', []);
 $check(($wirePlain['isError'] ?? true) === false && ($lastHeaders()['X-Max-Bytes'] ?? null) === (string) McpServer::DEFAULT_MAX_BYTES, 'a read that names no budget still sends one, the same number the other two surfaces use', json_encode($lastHeaders()));
 
@@ -149,6 +152,7 @@ foreach (range(1, 6) as $n) {
 }
 $silent->after = 0;
 $silent->seen = [];
+$silent->seenFrom = [];
 $a->poll($silent, 0, 50, 2000);
 $check($silent->moreAtService === true, 'the service holding some back is recorded, and it is its own fact: nothing was fetched and left here');
 $check($silent->leftWaiting === 0, 'so the count of what this poll fetched and left stays zero');
@@ -156,6 +160,7 @@ $check($silent->leftWaiting === 0, 'so the count of what this poll fetched and l
 // The reset path re-reads, and dropped the budget on the way.
 $silent->after = 0;
 $silent->seen = [];
+$silent->seenFrom = [];
 $silent->createdAt = $fake->now - 500;
 $fake->seen = [];
 $a->poll($silent, 0, 50, 2000);
@@ -194,6 +199,7 @@ $check(str_contains($heldSaid, 'budget') || str_contains($heldSaid, 'more'), 'a 
 $cliRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-cli-limits-' . getmypid();
 $heldChannel->after = 0;
 $heldChannel->seen = [];
+$heldChannel->seenFrom = [];
 $fake->seen = [];
 $cliOut = [];
 @exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(dirname(__DIR__) . '/bin/aamio') . ' --help 2>&1', $cliOut, $cliStatus);
