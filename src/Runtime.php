@@ -3442,16 +3442,41 @@ final class Runtime
         return $shape;
     }
 
+    /**
+     * How many field names a row keeps, and how long a name may be, in
+     * characters. The names of a message that arrived are its sender's to
+     * choose: one message of the largest size can carry thousands of them,
+     * fifty such from one key were megabytes in a file that is written again
+     * at every read, and a board inbox takes any signed key (found while the
+     * Node runtime's trace was built, 12 November 2026). The fields the three
+     * runtimes write are a handful of short names, so what is cut is only what
+     * was made to be long.
+     */
+    private const TRACE_FIELDS = 32;
+    private const TRACE_FIELD_CHARS = 64;
+
     private static function traceValue(string $kind, mixed $value): mixed
     {
         if ($kind === 'list') {
             if (!is_array($value) || !array_is_list($value)) {
                 return null;
             }
-            $strings = array_values(array_filter($value, 'is_string'));
+            $short = static function (mixed $item): bool {
+                if (!is_string($item)) {
+                    return false;
+                }
+                if (strlen($item) <= self::TRACE_FIELD_CHARS) {
+                    return true;
+                }
+                // Longer in bytes: counted in characters, as the other two runtimes count.
+                $chars = preg_match_all('/./us', $item);
+
+                return $chars !== false && $chars <= self::TRACE_FIELD_CHARS;
+            };
+            $strings = array_values(array_filter($value, $short));
             sort($strings, SORT_STRING);
 
-            return $strings;
+            return array_slice($strings, 0, self::TRACE_FIELDS);
         }
 
         return match ($kind) {

@@ -364,3 +364,27 @@ $u->traces[$t->keys->public] = ['sent' => new \stdClass(), 'received' => new \st
 $check($texts($entries) === ['one', 'two'] && count(array_filter($logged, static fn (string $line): bool => str_contains($line, 'trace received: not recorded: '))) > 0 && $untraced($u) !== null, 'and a read hands over the whole batch, with attention saying the trace was missed');
 $t->close();
 $u->close();
+
+// A message made of thousands of field names does not make the trace large. The names of a message's fields are its
+// sender's to choose, and a board inbox takes any signed key: one message of thousands of names gave a row of 56 KB,
+// fifty of them megabytes, in a file written again at every read (found while the Node runtime's trace was built, 12
+// November 2026). The row keeps a bounded few, and a name is measured in characters, as the other two runtimes do.
+[$t, $u, $tInbox, $uInbox, $homes] = $tracePair('fields');
+$manyBody = ['text' => 'ordinary text', str_repeat('x', 200) => 1];
+for ($n = 0; $n < 2500; $n++) {
+    $manyBody[sprintf('field%05d', $n)] = 1;
+}
+$traceDirect($u, $tInbox->w, $t->keys->public, $manyBody);
+[, $manyGot] = $t->poll($tInbox);
+$manyRow = $t->trace('U')['received'][0] ?? [];
+$traceValue = new ReflectionMethod(Runtime::class, 'traceValue');
+$wide = str_repeat('ж', 64);
+$check(
+    count($manyGot) === 1 && count($manyGot[0]['body']) === 2502 && count($manyRow['fields'] ?? []) === 32 && max(array_map('strlen', $manyRow['fields'])) <= 64
+        && ($manyRow['text_chars'] ?? null) === 13 && filesize($homes['t'] . DIRECTORY_SEPARATOR . 'trace.json') < 4000
+        && $traceValue->invoke(null, 'list', [$wide, $wide . 'ж', 'text']) === ['text', $wide],
+    'a message made of thousands of field names is handed over whole, and its row in the trace keeps thirty-two short names',
+    json_encode([count($manyGot), count($manyRow['fields'] ?? []), filesize($homes['t'] . DIRECTORY_SEPARATOR . 'trace.json')])
+);
+$t->close();
+$u->close();
