@@ -508,6 +508,37 @@ $check(
     json_encode($plain)
 );
 
+// ---------------------------------------------------------------- the record of a post is the post
+//
+// As aamio-python and the Node runtime write it, so the archive of a home
+// reads the same whichever runtime wrote it. This runtime wrote the id alone
+// with the title, the inbox and the status beside it, and wrote a row called
+// posted for a post the board had refused as well.
+[$a, $b] = $checkPair('posted');
+$made = $a->boardPost('offer', 'written down as the post', 'the whole of it');
+$rows = $a->archived('board', 'posted');
+$check(
+    count($rows) === 1 && array_keys($rows[0]) === ['kind', 'at', 'post'] && $rows[0]['post'] === $made['post'] && is_int($rows[0]['at']),
+    'the record of a post is the post as the board stored it, in the fields the other two runtimes write',
+    json_encode($rows)
+);
+$refusedPost = $checkThrown(static function () use ($a, $fake): void {
+    $held = Http::$override;
+    Http::$override = static function (string $method, string $url, ?string $body, array $headers) use ($fake): array {
+        return $method === 'POST' && str_contains($url, 'board') ? [422, ['error' => 'the fixture refused the post', 'fix' => 'none'], []] : $fake($method, $url, $body, $headers);
+    };
+    try {
+        $a->boardPost('offer', 'refused by the board', 'never made');
+    } finally {
+        Http::$override = $held;
+    }
+});
+$check(
+    $refusedPost instanceof \RuntimeException && str_contains($refusedPost->getMessage(), 'post failed: 422') && count($a->archived('board', 'posted')) === 1,
+    'and a post the board refused is not written down as posted',
+    $refusedPost === null ? 'it did not fail' : $refusedPost->getMessage() . ' ' . json_encode($a->archived('board', 'posted'))
+);
+
 // ---------------------------------------------------------------- a file of the home with a mark in front
 //
 // An editor on Windows may save a file with a byte order mark in front. The
@@ -550,7 +581,7 @@ if ($again instanceof Runtime) {
     $posted = $again->archived('board', 'posted');
     $dated = (static fn (): array => Storage::records($homes['a'] . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'inbox.jsonl'))->bindTo(null, Storage::class)();
     $check(
-        array_map(static fn (array $row): mixed => is_array($row['post'] ?? null) ? ($row['post']['id'] ?? null) : ($row['post'] ?? null), $posted) === [$markedPost['post']['id']] && $dated !== [] && !in_array(null, array_column($dated, 0), true)
+        array_map(static fn (array $row): mixed => $row['post']['id'] ?? null, $posted) === [$markedPost['post']['id']] && $dated !== [] && !in_array(null, array_column($dated, 0), true)
             && count($markedRead) === 1,
         "the archive's first line is a record like the rest, with its time, so a lifetime reaches it",
         json_encode([$posted, $dated])

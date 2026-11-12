@@ -697,6 +697,14 @@ if (!class_exists(InstalledVersions::class, false)) {
     $check($code === 2 && ($said['reason'] ?? null) === 'host_not_allowed' && str_contains($said['fix'] ?? '', 'aamio addon demo2 allow example.org') && str_contains($said['fix'] ?? '', 'aamio_addon_demo2_check asks them') && !str_contains($ran('demo2'), 'check'), 'a website not on the list is refused before the process starts');
     $key = str_repeat('A', 43);
     $check($cli(['partner', 'add', 'bob', $key])[0] === 0, 'a partner for the checks');
+    // The lists the command line gives are objects, as aamio-python and the Node runtime answer and as the local server does.
+    $book = json_decode($cli(['partner', 'list'])[1], true);
+    $open = json_decode($cli(['channel', 'list'])[1], true);
+    $check(
+        is_array($book) && array_keys($book) === ['partners'] && array_column($book['partners'], 'name') === ['bob'] && is_array($open) && array_keys($open) === ['channels'] && is_array($open['channels']),
+        'partner list and channel list answer with an object on the command line',
+        json_encode([$book, $open])
+    );
     [$code, $out] = $cli(['addon', 'demo2', 'allow', 'Example.ORG']);
     $said = json_decode($out, true) ?? [];
     $check($code === 0 && ($said['host'] ?? null) === 'example.org' && ($said['added'] ?? null) === true && ($said['hosts'] ?? null) === ['example.org'] && str_contains($said['note'] ?? '', 'Nothing was read now'), 'allow puts a website on the list, in its exact form');

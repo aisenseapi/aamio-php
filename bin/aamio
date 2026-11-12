@@ -264,7 +264,9 @@ try {
                 $changed = $runtime->partnerAdd((string) ($args[2] ?? fail('partner add NAME KEY')), (string) ($args[3] ?? fail('partner add NAME KEY')));
                 out($changed + ['partners' => $runtime->partnerList()]);
             } elseif ($action === 'list') {
-                out($runtime->partnerList());
+                // An object, as aamio-python and the Node runtime answer and
+                // as the local server does. It was a bare list here.
+                out(['partners' => $runtime->partnerList()]);
             } elseif ($action === 'remove') {
                 $changed = $runtime->partnerRemove((string) ($args[2] ?? fail('partner remove NAME')));
                 out($changed + ['partners' => $runtime->partnerList()]);
@@ -329,7 +331,8 @@ try {
 
                 out($runtime->openChannel((string) ($args[2] ?? fail('channel open LABEL')), (int) ($opts['ttl'] ?? 600), csv($opts['allow'] ?? null), $gate));
             } elseif ($action === 'list') {
-                out($runtime->channelList());
+                // An object, as the other two runtimes answer and as the local server does.
+                out(['channels' => $runtime->channelList()]);
             } elseif ($action === 'close') {
                 out($runtime->closeChannel((string) ($args[2] ?? fail('channel close LABEL'))));
             } else {

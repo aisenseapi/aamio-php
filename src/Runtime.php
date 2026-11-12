@@ -1959,12 +1959,17 @@ final class Runtime
             $headers['X-Work'] = Gate::solveBoard($this->keys->public, $bytes, $bits);
         }
         [$status, $answer] = Http::call('POST', rtrim($this->board->host, '/') . '/', $bytes, $headers);
-        // Made, or refused: a record of it that cannot be written is said
-        // beside it, and never takes the place of what the board answered.
-        $archiveError = $this->archiveDone('board', ['kind' => 'posted', 'at' => time(), 'status' => $status, 'post' => is_array($answer) ? ($answer['id'] ?? null) : null, 'title' => $title, 'w' => $inbox->w], 'the post ' . (is_array($answer) && is_string($answer['id'] ?? null) ? $answer['id'] : ''));
         if ($status !== 201) {
             throw new \RuntimeException('post failed: ' . $status . ' ' . json_encode($answer));
         }
+        // The post is made. A record of it that cannot be written is said
+        // beside it, and is no reason to tell the caller the post failed: it
+        // would be made again. The record is the post as the board stored it,
+        // as aamio-python and the Node runtime write it, so the archive of a
+        // home reads the same whichever runtime wrote it. This runtime wrote
+        // the id alone, with the title, the inbox and the status beside it,
+        // and wrote a row called posted for a post the board had refused.
+        $archiveError = $this->archiveDone('board', ['kind' => 'posted', 'at' => time(), 'post' => $answer], 'the post ' . (is_array($answer) && is_string($answer['id'] ?? null) ? $answer['id'] : ''));
 
         // Where the answers go, and how to read them, in the answer itself. An
         // agent took board replies for the whole inbox, got nothing back, and

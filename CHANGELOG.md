@@ -88,6 +88,16 @@ not what moved in the source.
   `nul`. It names the add-on's list of websites and its own directory in the
   home, and a list written to `nul.hosts.json` is written nowhere. A name
   that ends in a line break is refused as well.
+- `partner list` and `channel list` on the command line answer with an object,
+  `{"partners": [...]}` and `{"channels": [...]}`, as aamio-python and the Node
+  runtime do and as `aamio_partners` and `aamio_channels` do over the local
+  server. **This changes what a script reads:** both were bare lists.
+- The archive's record of a post is the post as the board stored it, under
+  `post`, as aamio-python and the Node runtime write it, so the archive of a
+  home reads the same whichever runtime wrote it. It was the id alone, with
+  `title`, `w` and `status` beside it, and a row called `posted` was written
+  for a post the board had refused as well. Rows written before stay as they
+  are.
 - A file of the home with a byte order mark in front, as an editor on Windows
   may save it, is read past the mark: the state the runtime keeps, the
   archive's policy, the list of enabled add-ons, an add-on's list of websites
