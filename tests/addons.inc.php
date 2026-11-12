@@ -717,6 +717,22 @@ if (!class_exists(InstalledVersions::class, false)) {
     $check(json_decode($cli(['addon', 'demo2', 'list'], $legacyHome)[1], true) === ['hosts' => ['legacy.example']] && is_file($legacyHome . '/addons/demo2.hosts.json'), 'the list an earlier version kept is read once');
     file_put_contents($legacyHome . '/old-hosts.json', json_encode(['other.example']));
     $check(json_decode($cli(['addon', 'demo2', 'list'], $legacyHome)[1], true) === ['hosts' => ['legacy.example']], "and from then on the list is the core's");
+    // The two lists are files of the home: a byte order mark an editor left in front of them is passed, as in aamio-python and the Node runtime.
+    foreach (['/addons.json', '/addons/demo2.hosts.json'] as $name) {
+        file_put_contents($legacyHome . $name, "\xEF\xBB\xBF" . (string) file_get_contents($legacyHome . $name));
+    }
+    [$code, $out] = $cli(['addon', 'list'], $legacyHome);
+    $listed = json_decode($out, true)['addons'] ?? [];
+    $check(
+        $code === 0 && array_map(static fn (array $row): array => [$row['name'] ?? null, $row['enabled'] ?? null], $listed) === [['demo2', true]]
+            && json_decode($cli(['addon', 'demo2', 'list'], $legacyHome)[1], true) === ['hosts' => ['legacy.example']],
+        'the list of enabled add-ons and an add-on\'s list of websites are read past a byte order mark in front',
+        $out
+    );
+    $check(
+        $cli(['addon', 'demo2', 'allow', 'kunde.example'], $legacyHome)[0] === 0 && !str_starts_with((string) file_get_contents($legacyHome . '/addons/demo2.hosts.json'), "\xEF\xBB\xBF"),
+        'and the next write leaves the list without the mark'
+    );
 
     // Over MCP the user is asked for the website, in words this runtime holds.
     $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);

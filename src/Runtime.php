@@ -323,6 +323,11 @@ final class Runtime
             return $default;
         }
         $text = @file_get_contents($path);
+        // Past the mark first: a file that holds a mark and nothing else is
+        // an empty file, as the other two runtimes read it.
+        if ($text !== false) {
+            $text = Storage::pastMark($text);
+        }
         if ($text === false || trim($text) === '') {
             if ($text === false && $shape !== null) {
                 throw new \RuntimeException($this->unreadable($name, 'it would not open'));
@@ -657,6 +662,8 @@ final class Runtime
             if ($text === false) {
                 throw new \RuntimeException($this->unreadable('key', 'it would not open'));
             }
+            // Not past a mark, as the home's other files are: the key holds
+            // the seed and nothing else, in all three runtimes.
             if (trim($text) !== '') {
                 // A new key over it would be a new identity, and the old one
                 // gone for good. Partners know this runtime by that key.
@@ -770,8 +777,8 @@ final class Runtime
             return [];
         }
         $found = [];
-        foreach ($lines as $line) {
-            $record = json_decode($line, true);
+        foreach ($lines as $number => $line) {
+            $record = json_decode($number === 0 ? Storage::pastMark($line) : $line, true);
             if (is_array($record) && ($record['kind'] ?? null) === $kind) {
                 $found[] = $record;
             }

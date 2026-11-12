@@ -204,7 +204,7 @@ final class AddonProcess
             return null;
         }
         $text = @file_get_contents($path);
-        $rows = is_string($text) ? json_decode($text, true) : null;
+        $rows = is_string($text) ? json_decode(Storage::pastMark($text), true) : null;
         if (!is_array($rows) || array_keys($rows) !== range(0, count($rows) - 1) && $rows !== []) {
             throw self::unreadable($path, $manifest);
         }

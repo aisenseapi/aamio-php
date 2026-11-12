@@ -508,6 +508,108 @@ $check(
     json_encode($plain)
 );
 
+// ---------------------------------------------------------------- a file of the home with a mark in front
+//
+// An editor on Windows may save a file with a byte order mark in front. The
+// Node runtime read the home's state past it and this runtime stopped, and a
+// policy file with one was read as no choice at all. The home's own files
+// are read past the mark by all three now.
+$checkMarked = static function (string $path): void {
+    $raw = (string) file_get_contents($path);
+    if ($raw === '' || str_starts_with($raw, "\xEF\xBB\xBF")) {
+        throw new \RuntimeException('nothing to mark in ' . $path);
+    }
+    file_put_contents($path, "\xEF\xBB\xBF" . $raw);
+};
+[$a, $b, $homes] = $checkPair('marked');
+$a->scopeNew('team');
+$markedInbox = $a->channels['inbox']->w;
+$checkDirect($b, $markedInbox, $a->keys->public, 'written down before the mark');
+$markedRead = $a->read();
+$markedPost = $a->boardPost('need', 'kept by php', 'who answers?');
+$a->peers[$b->channels['inbox']->w] = $b->keys->public;
+$a->send($b->channels['inbox']->w, 'one in the outbox');
+$markedBefore = [$a->keys->public, $a->partnerList(), $a->scopeList(), $a->outbox, array_keys($a->channels)];
+$a->close();
+foreach (['partners.json', 'scopes.json', 'state.json', 'outbox.json', 'archive/inbox.jsonl', 'archive/board.jsonl'] as $name) {
+    $checkMarked($homes['a'] . DIRECTORY_SEPARATOR . $name);
+}
+$again = null;
+try {
+    $again = new Runtime($homes['a'], 'https://fake.test', ['a'], true, $checkQuiet);
+    $checkOpen[] = $again;
+} catch (\Throwable $error) {
+    $again = $error;
+}
+$check(
+    $again instanceof Runtime && [$again->keys->public, $again->partnerList(), $again->scopeList(), $again->outbox, array_keys($again->channels)] === $markedBefore && $again->channels['inbox']->w === $markedInbox,
+    'a home whose state and lists have a byte order mark in front opens with the key, the partners, the scopes, the outbox and the channels it had',
+    $again instanceof \Throwable ? $again->getMessage() : json_encode(array_keys($again->channels))
+);
+if ($again instanceof Runtime) {
+    $posted = $again->archived('board', 'posted');
+    $dated = (static fn (): array => Storage::records($homes['a'] . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'inbox.jsonl'))->bindTo(null, Storage::class)();
+    $check(
+        array_map(static fn (array $row): mixed => is_array($row['post'] ?? null) ? ($row['post']['id'] ?? null) : ($row['post'] ?? null), $posted) === [$markedPost['post']['id']] && $dated !== [] && !in_array(null, array_column($dated, 0), true)
+            && count($markedRead) === 1,
+        "the archive's first line is a record like the rest, with its time, so a lifetime reaches it",
+        json_encode([$posted, $dated])
+    );
+    $again->partnerAdd('c', $again->keys->public);
+    $check(!str_starts_with((string) file_get_contents($homes['a'] . DIRECTORY_SEPARATOR . 'partners.json'), "\xEF\xBB\xBF"), 'and what is saved next is written without the mark');
+}
+
+// Read as no choice at all, an archive told to keep nothing was kept again, and nothing said so.
+[$a, $b, $homes] = $checkPair('policy');
+$a->setArchive(Storage::parsePolicy('off'));
+$a->close();
+$checkMarked($homes['a'] . DIRECTORY_SEPARATOR . 'config.json');
+$again = new Runtime($homes['a'], 'https://fake.test', ['a'], null, $checkQuiet);
+$checkOpen[] = $again;
+$checkDirect($b, $again->channels['inbox']->w, $again->keys->public, 'not to be written down');
+$got = $again->read();
+$check(
+    Storage::readPolicy($homes['a'])['mode'] === 'off' && array_map(static fn (array $m): mixed => $m['body']['text'] ?? null, $got) === ['not to be written down']
+        && !is_file($homes['a'] . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'inbox.jsonl'),
+    'a policy file with a mark in front is still the choice that was made: the home keeps nothing, and nothing is written down',
+    json_encode([Storage::readPolicy($homes['a']), $got])
+);
+file_put_contents($homes['a'] . DIRECTORY_SEPARATOR . 'config.json', "\xEF\xBB\xBF{ nope");
+$check(Storage::readPolicy($homes['a'])['mode'] === 'keep', 'a file that is not JSON at all is no choice, as before: only the mark is passed');
+
+// Only the mark is read past. What follows it has to be what the file holds.
+[$a, $b, $homes] = $checkPair('stops');
+$a->close();
+$stops = [];
+foreach (["\xEF\xBB\xBF\xEF\xBB\xBF[]", "\xFF\xFE[\x00]\x00"] as $bytes) {
+    file_put_contents($homes['a'] . DIRECTORY_SEPARATOR . 'partners.json', $bytes);
+    $stopped = $checkThrown(static fn () => new Runtime($homes['a'], 'https://fake.test', ['a'], true, $checkQuiet));
+    $stops[] = $stopped instanceof \RuntimeException && str_contains($stopped->getMessage(), 'partners.json could not be read (not UTF-8 JSON)');
+}
+$check($stops === [true, true], 'a state file that is not JSON after the mark, or not UTF-8, still stops the runtime', json_encode($stops));
+// A file that holds the mark and nothing else is an empty file, as the other two runtimes read it.
+file_put_contents($homes['a'] . DIRECTORY_SEPARATOR . 'partners.json', "\xEF\xBB\xBF");
+$emptied = $checkThrown(static function () use ($homes, $checkQuiet, &$checkOpen): void {
+    $one = new Runtime($homes['a'], 'https://fake.test', ['a'], true, $checkQuiet);
+    $checkOpen[] = $one;
+    if ($one->partnerList() !== []) {
+        throw new \RuntimeException('it read partners out of a mark');
+    }
+    $one->close();
+});
+$check($emptied === null, 'a state file that holds the mark and nothing else is an empty file', $emptied?->getMessage() ?? '');
+// The key holds the seed and nothing else. The three runtimes refuse one with a mark in front, and the Node runtime's tests hold it to that.
+[$a, $b, $homes] = $checkPair('key');
+$a->close();
+$checkMarked($homes['a'] . DIRECTORY_SEPARATOR . 'key');
+$stopped = $checkThrown(static fn () => new Runtime($homes['a'], 'https://fake.test', ['a'], true, $checkQuiet));
+$check(
+    $stopped instanceof \RuntimeException && str_contains($stopped->getMessage(), 'key could not be read (not a 64 character hex seed)'),
+    'the key is not read past a mark',
+    $stopped === null ? 'it opened' : $stopped->getMessage()
+);
+$check(Storage::pastMark("\xEF\xBB\xBFx") === 'x' && Storage::pastMark("x\xEF\xBB\xBF") === "x\xEF\xBB\xBF" && Storage::pastMark('') === '' && Storage::pastMark("\xEF\xBB") === "\xEF\xBB", 'the mark is passed at the start only, and only when it is whole');
+
 foreach ($checkOpen as $one) {
     $one->close();
 }

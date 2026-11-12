@@ -433,6 +433,23 @@ final class Storage
         return $result;
     }
 
+    /**
+     * The text of a file of the home, past a byte order mark at its start.
+     *
+     * An editor on Windows may leave one in front of a file that is whole
+     * otherwise. This runtime stopped on such a file where it had to have it,
+     * and where it did not, read it as not there: an archive told to keep
+     * nothing was kept again, and nothing said so (a check of 12 November
+     * 2026). The three runtimes read the home's own files past the mark. The
+     * key is not one of them: it holds the seed and nothing else. And what
+     * comes from outside the home, a message, a card, an add-on's answer, is
+     * read as it is.
+     */
+    public static function pastMark(string $text): string
+    {
+        return str_starts_with($text, "\xEF\xBB\xBF") ? substr($text, 3) : $text;
+    }
+
     // ------------------------------------------------------- the archive --
 
     /** The archive policy of this home. No file means keep, which is what every version did. */
@@ -441,7 +458,7 @@ final class Storage
         $stored = null;
         $text = @file_get_contents($home . DIRECTORY_SEPARATOR . 'config.json');
         if (is_string($text)) {
-            $parsed = json_decode($text, true);
+            $parsed = json_decode(self::pastMark($text), true);
             $stored = is_array($parsed) ? ($parsed['archive'] ?? null) : null;
         }
         $policy = self::DEFAULT_POLICY;
@@ -502,7 +519,7 @@ final class Storage
     private static function records(string $path): array
     {
         $found = [];
-        foreach (explode("\n", (string) @file_get_contents($path)) as $line) {
+        foreach (explode("\n", self::pastMark((string) @file_get_contents($path))) as $line) {
             if (trim($line) === '') {
                 continue;
             }

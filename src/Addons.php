@@ -75,7 +75,7 @@ final class Addons
             return [];
         }
         $text = @file_get_contents($path);
-        $data = is_string($text) ? json_decode($text, true) : null;
+        $data = is_string($text) ? json_decode(Storage::pastMark($text), true) : null;
         if (!is_array($data)) {
             throw new \RuntimeException($path . ' could not be read as JSON. Fix or remove the file; it lists the add-ons enabled here, one package name each under "enabled".');
         }
