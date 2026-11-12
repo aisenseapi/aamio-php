@@ -841,16 +841,20 @@ final class Runtime
     public function partnerRemove(string $name): array
     {
         $known = $this->partnerByName($name);
-        $partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $name));
-        $this->saveJson('partners.json', $partners);
-        $this->partners = $partners;
         if ($known === null) {
             $inbox = $this->channels['inbox'] ?? null;
 
             return ['partner' => $name, 'known' => false, 'inbox' => $inbox?->w];
         }
+        // The partner the name finds, as a send finds it: apart from upper and
+        // lower case when only one is so named. Filtered by the name as given,
+        // a name in another case was said to be known and removed nothing (a
+        // check of 12 November 2026).
+        $partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $known['name']));
+        $this->saveJson('partners.json', $partners);
+        $this->partners = $partners;
 
-        return $this->inboxAfterChange('partner ' . $name . ' was removed', ['partner' => $name, 'known' => true]);
+        return $this->inboxAfterChange('partner ' . $known['name'] . ' was removed', ['partner' => $known['name'], 'known' => true]);
     }
 
     /** Whether the inbox still matches the address book, and a new one if not. */
@@ -2055,12 +2059,25 @@ final class Runtime
         return $tags['body'];
     }
 
+    /**
+     * A post of this home's taken down before it expires. As aamio-python and
+     * the Node runtime do it: a board that does not take it down is a failure,
+     * and the answer is the board's own. This answered every status the same
+     * way, as an array with withdrawn false where it failed, and wrote the
+     * record of a withdrawal that had not happened (a check of 12 November
+     * 2026).
+     */
     public function boardWithdraw(string $postId): array
     {
         $done = $this->board->withdraw($postId);
-        $archiveError = $this->archiveDone('board', ['kind' => 'withdrawn', 'at' => time(), 'post' => $postId, 'status' => $done['status']], 'the withdrawal of post ' . $postId);
+        if ($done['status'] !== 200) {
+            throw new \RuntimeException('withdraw failed: ' . $done['status'] . ' ' . json_encode($done['body']));
+        }
+        $answer = is_array($done['body']) ? $done['body'] : [];
+        // The record the other two write: the post's id, under id.
+        $archiveError = $this->archiveDone('board', ['kind' => 'withdrawn', 'at' => time(), 'id' => $postId], 'the withdrawal of post ' . $postId);
 
-        return ['post' => $postId, 'status' => $done['status'], 'withdrawn' => $done['status'] === 200] + ($archiveError === null ? [] : ['archive_error' => $archiveError]);
+        return $answer + ($archiveError === null ? [] : ['archive_error' => $archiveError]);
     }
 
     /**

@@ -88,6 +88,18 @@ not what moved in the source.
   `nul`. It names the add-on's list of websites and its own directory in the
   home, and a list written to `nul.hosts.json` is written nowhere. A name
   that ends in a line break is refused as well.
+- `board withdraw` and `aamio_board_withdraw` answer as aamio-python and the
+  Node runtime do. **This changes what a caller reads:** a post the board
+  does not take down is a failure, `withdraw failed` with the board's status,
+  and a withdrawal answers with the board's own answer, `id` and `deleted`.
+  It answered every status alike, with `post`, `status` and `withdrawn`, and
+  wrote the record of a withdrawal that had not happened. The record has the
+  post's id under `id`, as the other two write it.
+- `partner remove` with a name in another case than the address book has it
+  removes that partner, as a send finds it: apart from upper and lower case
+  when only one is so named, and refused as ambiguous when two are. It said
+  the partner was known and removed nothing. The answer names the partner as
+  the book spells it.
 - `partner list` and `channel list` on the command line answer with an object,
   `{"partners": [...]}` and `{"channels": [...]}`, as aamio-python and the Node
   runtime do and as `aamio_partners` and `aamio_channels` do over the local

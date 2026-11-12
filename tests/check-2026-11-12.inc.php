@@ -251,7 +251,7 @@ $check(
     'a post that is made says so with what could not be recorded, on the command line and over MCP, and each post is on the board once'
 );
 $withdrawn = $a->boardWithdraw($posted['post']['id']);
-$check($withdrawn['withdrawn'] === true && str_contains((string) ($withdrawn['archive_error'] ?? ''), 'could not append') && !isset($fake->posts[$posted['post']['id']]), 'so does a withdrawal');
+$check(($withdrawn['deleted'] ?? null) === true && ($withdrawn['id'] ?? null) === $posted['post']['id'] && str_contains((string) ($withdrawn['archive_error'] ?? ''), 'could not append') && !isset($fake->posts[$posted['post']['id']]), 'so does a withdrawal');
 $unblock();
 $checkDirect($b, $a->channels['inbox']->w, $a->keys->public, 'one line');
 $a->poll($a->channels['inbox'], 0);
@@ -538,6 +538,50 @@ $check(
     'and a post the board refused is not written down as posted',
     $refusedPost === null ? 'it did not fail' : $refusedPost->getMessage() . ' ' . json_encode($a->archived('board', 'posted'))
 );
+
+// ---------------------------------------------------------------- a withdrawal as the other two make it
+//
+// The board's own answer, a failure when the board does not take the post
+// down, and the record of a withdrawal only when there was one, with the id
+// under id. This answered every status alike and wrote the record anyway.
+[$a, $b] = $checkPair('withdraw');
+$kept = $a->boardPost('offer', 'to be taken down', 'and then gone');
+$gone = $a->boardWithdraw($kept['post']['id']);
+$rows = $a->archived('board', 'withdrawn');
+$check(
+    $gone === ['id' => $kept['post']['id'], 'deleted' => true] && count($rows) === 1 && array_keys($rows[0]) === ['kind', 'at', 'id'] && $rows[0]['id'] === $kept['post']['id'],
+    'a withdrawal answers with what the board answered, and its record is the one the other two write',
+    json_encode([$gone, $rows])
+);
+$again = $checkThrown(static fn () => $a->boardWithdraw($kept['post']['id']));
+$check(
+    $again instanceof \RuntimeException && str_starts_with($again->getMessage(), 'withdraw failed: 404') && count($a->archived('board', 'withdrawn')) === 1,
+    'and a post the board did not take down is a failure, with no record of a withdrawal',
+    $again === null ? 'nothing was thrown' : $again->getMessage()
+);
+$overMcp = (new McpServer($a))->dispatch('aamio_board_withdraw', ['post' => $kept['post']['id']]);
+$check(($overMcp['isError'] ?? null) === true && str_contains((string) ($overMcp['structuredContent']['error'] ?? ''), 'withdraw failed: 404'), 'over the local server as well', json_encode($overMcp['structuredContent'] ?? null));
+
+// ---------------------------------------------------------------- partner remove takes the partner the name finds
+//
+// A name in another case was said to be known and removed nothing.
+[$a, $b] = $checkPair('remove');
+$removed = $a->partnerRemove('B');
+$check(
+    [$removed['partner'], $removed['known']] === ['b', true] && $a->partnerList() === [] && json_decode((string) file_get_contents($a->home . DIRECTORY_SEPARATOR . 'partners.json'), true) === [],
+    'partner remove takes the partner a name in another case finds, as a send finds it',
+    json_encode($removed)
+);
+$check($a->partnerRemove('nobody') === ['partner' => 'nobody', 'known' => false, 'inbox' => $a->channels['inbox']->w], 'and a name nobody has changes nothing');
+$a->partners = [['name' => 'Ann', 'key' => $b->keys->public], ['name' => 'ANN', 'key' => $a->keys->public]];
+$a->saveJson('partners.json', $a->partners);
+$ambiguous = $checkThrown(static fn () => $a->partnerRemove('ann'));
+$check(
+    $ambiguous instanceof \Aamio\AmbiguousPartner && array_column($a->partnerList(), 'name') === ['Ann', 'ANN'],
+    'two names that differ only in case are refused as ambiguous, and nothing is removed',
+    $ambiguous === null ? 'nothing was thrown' : get_class($ambiguous)
+);
+$check($a->partnerRemove('ANN')['partner'] === 'ANN' && array_map(static fn (array $p): array => [$p['name'], $p['key']], $a->partnerList()) === [['Ann', $b->keys->public]], 'and the exact name removes that one alone');
 
 // ---------------------------------------------------------------- a file of the home with a mark in front
 //

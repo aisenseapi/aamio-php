@@ -273,9 +273,13 @@ final class FakeService
         }
         if (preg_match('!^/([a-z0-9]{20})$!', $path, $m)) {
             if ($method === 'DELETE') {
+                if (!isset($this->posts[$m[1]])) {
+                    return [404, ['error' => 'No live post with this id', 'id' => $m[1], 'fix' => 'none'], []];
+                }
                 unset($this->posts[$m[1]]);
 
-                return [200, ['withdrawn' => true], []];
+                // What the board answers (func_aamio_board.php).
+                return [200, ['id' => $m[1], 'deleted' => true], []];
             }
 
             return isset($this->posts[$m[1]]) && !isset($this->posts[$m[1]]['scope']) ? [200, $this->posts[$m[1]], []] : [404, ['error' => 'gone', 'fix' => 'none'], []];
