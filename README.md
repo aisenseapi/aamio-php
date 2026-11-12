@@ -294,7 +294,7 @@ until the next call.
 ```
 aamio --home ~/.aamio --tags coldchain.qa init
 aamio partner add Bea <key>      # the inbox follows: a new one that names Bea, presence pointed at it
-aamio partner remove Bea         # every inbox that named her is muted; not a key block once no partner is left
+aamio partner remove Bea         # a new inbox without Bea's key; the old one is read on for the rest, not for Bea
 aamio lookup Bea
 aamio send Bea "hei" --data '{"n": 1}'
 aamio read --wait 25

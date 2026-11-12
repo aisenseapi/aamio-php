@@ -40,10 +40,10 @@ final class Channel
     /** Told already that the thread at this address is gone, so it is said once. */
     public bool $gone = false;
     /**
-     * Read no more, kept for its records and its receipt until it expires. An
-     * inbox is muted when a partner is removed: the removed key can still
-     * write to the address it was given until the thread expires, and
-     * nothing from there is delivered.
+     * An inbox is marked muted when it names a key that has left the address
+     * book: the removed key can still write to the address it was given until
+     * the thread expires. It is read until then for the partners still in the
+     * book, and what the removed key writes there is not handed over.
      */
     public bool $muted = false;
 

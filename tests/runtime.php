@@ -682,7 +682,7 @@ $b->channels['inbox']->after = 0;
 $again = array_values(array_filter($b->read(), static fn (array $m): bool => isset($m['body']['data']['aamio_scope'])));
 $check(count($again) === 1 && $again[0]['replay'] === true && $again[0]['body']['data']['aamio_scope']['kept'] === false && !str_contains((string) json_encode($again), $teamKey), 'a share read again is a replay and not kept again');
 $removedAl = $b->partnerRemove('Al');
-$check($removedAl['rotated'] === true && $removedAl['old_inbox']['muted'] === true && $fake->threads[$b->channels['inbox']->w]['allow'] === ['*'], 'removing the only partner mutes the inbox he was given and opens a signed-only one', json_encode($removedAl));
+$check($removedAl['rotated'] === true && $removedAl['old_inbox']['muted'] === true && $fake->threads[$b->channels['inbox']->w]['allow'] === ['*'], 'removing the only partner marks the inbox Al was given muted and opens a signed-only one', json_encode($removedAl));
 $a->scopeShare('second', 'Bea', 'read');
 $fromStranger = $b->read();
 $b->partnerAdd('Al', $a->keys->public);
@@ -695,8 +695,8 @@ foreach ($b->channels as $channel) {
 }
 $replayed = array_values(array_filter($b->read(), static fn (array $m): bool => isset($m['body']['data']['aamio_scope'])));
 // One share comes again: the stranger's, from the signed-only inbox. The
-// first share sits in the inbox Al was given, which is muted and read no more.
-$check(count($replayed) === 1 && $replayed[0]['replay'] === true && $replayed[0]['body']['data']['aamio_scope']['kept'] === false && !in_array('Al.chapter-review', array_column($b->scopeList(), 'name'), true) && !str_contains((string) json_encode($replayed), $teamKey) && !str_contains((string) json_encode($replayed), $secondKey), 'a share read again is a replay and not kept again, so a removed scope stays removed, and a muted inbox is read no more');
+// first share sits in the inbox Al was given, whose cursor stands past it.
+$check(count($replayed) === 1 && $replayed[0]['replay'] === true && $replayed[0]['body']['data']['aamio_scope']['kept'] === false && !in_array('Al.chapter-review', array_column($b->scopeList(), 'name'), true) && !str_contains((string) json_encode($replayed), $teamKey) && !str_contains((string) json_encode($replayed), $secondKey), 'a share read again is a replay and not kept again, so a removed scope stays removed');
 $take = static function (Runtime $runtime, array $entry): array {
     (function () use (&$entry): void {
         $this->takeScopeShare($entry);

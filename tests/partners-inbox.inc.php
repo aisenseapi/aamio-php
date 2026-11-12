@@ -20,6 +20,7 @@ declare(strict_types=1);
  */
 
 use Aamio\Address;
+use Aamio\Codec;
 use Aamio\Http;
 use Aamio\Keys;
 use Aamio\Runtime;
@@ -46,6 +47,13 @@ $write = static function (string $w, ?string $key) use ($fake): int {
     return $fake('POST', 'https://fake.test/' . $w, 'hei', $headers)[0];
 };
 $states = static fn (Runtime $runtime): array => array_values(array_unique(array_column($runtime->attentionTaken(), 'state')));
+// A message sealed and signed by a key, written into the fake's thread the way
+// any client could write it: what the runtime then reads and judges.
+$signed = static function (Runtime $from, string $w, string $to, string $text) use ($fake): void {
+    $wire = $from->keys->seal($to, Codec::json(['text' => $text]));
+    $seq = count($fake->threads[$w]['messages']) + 1;
+    $fake->threads[$w]['messages'][] = ['seq' => $seq, 'at' => $fake->now + $seq, 'type' => 'text', 'body' => $wire, 'sha256' => hash('sha256', $wire), 'from' => $from->keys->public, 'sig' => $from->keys->sign(Keys::threadSigningInput($w, $wire)), 'verified' => true, 'sealed' => true];
+};
 
 // Registration before the first read opens nothing; the inbox opens with the
 // list as it is then.
@@ -72,19 +80,27 @@ $threads = count($fake->threads);
 $out = $p->partnerAdd('R again', $R);
 $check($out['rotated'] === false && $out['inbox'] === $second->w && count($fake->threads) === $threads && $p->partnerByKey($R)['name'] === 'R again', 'a key the inbox already names changes nothing but the name');
 
-// A removed partner is read no more.
+// A removed partner: a new inbox without the key, and the old one read on for
+// the partners still in the book, while what the removed key writes there is
+// not handed over. Read no more, as it was, what Q wrote there before Q had
+// the new address was read by nobody (a check of 12 November 2026).
 $out = $p->partnerRemove('R again');
 $third = $p->channels['inbox'];
 $check($out['known'] === true && $out['rotated'] === true && $third !== $second && $fake->threads[$third->w]['allow'] === [$Q], 'removing a partner opens an inbox without the key', json_encode($out));
 $check($write($third->w, $R) === 403 && $write($second->w, $R) === 201, 'the service still takes the removed key at the old address');
-$check($second->muted === true && $out['old_inbox'] === ['w' => $second->w, 'muted' => true, 'until' => $second->expireAt], 'and the old inbox is muted: kept, read no more');
+$check($second->muted === true && $out['old_inbox'] === ['w' => $second->w, 'muted' => true, 'until' => $second->expireAt], 'and the old inbox is marked muted');
 $listed = [];
 foreach ($p->channelList() as $entry) {
     $listed[$entry['w']] = $entry['muted'];
 }
 $check($listed[$second->w] === true && $listed[$third->w] === false && $listed[$first->w] === false, 'the channel list says which inbox is muted');
-$check($states($p) === ['muted'], 'attention says the old inbox is read no more');
-$check(array_filter($p->read(), static fn (array $m): bool => $m['channel'] === $second->label) === [], 'a read hands over nothing from a muted inbox');
+$check($states($p) === ['muted'], 'attention says what the old inbox is now');
+$signed($q, $second->w, $p->keys->public, 'from Q, who stays');
+$signed($r, $second->w, $p->keys->public, 'from R, who was removed');
+$fromOld = array_values(array_filter($p->read(), static fn (array $m): bool => $m['channel'] === $second->label));
+$check(array_map(static fn (array $m): ?string => $m['body']['text'] ?? null, $fromOld) === ['from Q, who stays'], 'a read hands over what Q, still in the book, wrote to the muted inbox, and nothing R wrote there', json_encode($fromOld));
+$said = array_values(array_filter($p->attentionTaken(), static fn (array $n): bool => $n['state'] === 'removed_key'));
+$check(count($said) === 1 && $said[0]['w'] === $second->w && count($said[0]['seqs'] ?? []) === 1, 'and what R wrote is said, never dropped in silence', json_encode($said));
 
 // Muted travels with the state.
 $p->close();
@@ -159,18 +175,21 @@ $gen2 = $g->channels['inbox'];
 $check($gen1->muted === false && $gen2 !== $gen1, 'a key added: the first generation is read on');
 $out = $g->partnerRemove('Q');
 $gen3 = $g->channels['inbox'];
-$check($fake->threads[$gen3->w]['allow'] === [$R] && $gen1->muted === true && $gen2->muted === true, 'removing Q mutes both generations that named her, not only the one just retired', json_encode($out));
+$check($fake->threads[$gen3->w]['allow'] === [$R] && $gen1->muted === true && $gen2->muted === true, 'removing Q marks both generations that named the key, not only the one just retired', json_encode($out));
 $muted = $out['muted'] ?? [];
 sort($muted);
 $expected = [$gen1->w, $gen2->w];
 sort($expected);
 $check($muted === $expected, 'and the answer lists both');
-$check($write($gen1->w, $Q) === 201 && $g->poll($gen1) === ['muted', []], 'the service still takes Q at the oldest address, and a direct poll of it reads nothing');
+$signed($q, $gen1->w, $g->keys->public, 'from Q, who was removed');
+$check($write($gen1->w, $Q) === 201 && $g->poll($gen1) === ['ok', []], 'the service still takes Q at the oldest address, and a direct poll of it hands over nothing Q wrote');
+$signed($r, $gen2->w, $g->keys->public, 'from R, who stays');
 $before = count($fake->calls);
-$g->read();
-$asked = array_filter(array_slice($fake->calls, $before), static fn (array $c): bool => $c[0] === 'GET' && (str_contains($c[1], $gen1->w) || str_contains($c[1], $gen2->w)));
-$check($asked === [], 'a read asks the service for neither muted generation');
-$check(array_column($g->attentionTaken(), 'state') === ['muted', 'muted'], 'attention says so once per generation');
+$fromOld = $g->read();
+$asked = array_filter(array_slice($fake->calls, $before), static fn (array $c): bool => $c[0] === 'GET' && str_contains($c[1], $gen2->w));
+$check($asked !== [] && array_map(static fn (array $m): ?string => $m['body']['text'] ?? null, $fromOld) === ['from R, who stays'], 'a read asks the muted generations too, and hands over what R, still in the book, wrote there', json_encode($fromOld));
+$noted = array_column($g->attentionTaken(), 'state');
+$check(count(array_keys($noted, 'muted', true)) === 2 && in_array('removed_key', $noted, true), 'attention says each generation once, and what Q wrote is said', json_encode($noted));
 
 // A partner removed while the runtime was down: judged at the first read.
 $g->close();
@@ -186,7 +205,7 @@ $judged = [];
 foreach ($g->channels as $c) {
     $judged[$c->w] = $c->muted;
 }
-$check(($judged[$gen3->w] ?? null) === true && $fake->threads[$g->channels['inbox']->w]['allow'] === ['*'], 'R removed while the runtime was down: her generation is muted at the first read, and the new inbox takes any signed key');
+$check(($judged[$gen3->w] ?? null) === true && $fake->threads[$g->channels['inbox']->w]['allow'] === ['*'], 'R removed while the runtime was down: the generation that named R is marked at the first read, and the new inbox takes any signed key');
 
 // A presence publish that fails is said, and tried again soon.
 echo "presence that fails is said\n";

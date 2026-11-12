@@ -844,9 +844,11 @@ final class Runtime
      * A partner out of the address book, and out of the inbox at once.
      *
      * Forgetting the name is not a revocation: the service takes the removed
-     * key's writes to the old address until that thread expires. So the old
-     * inbox is muted, read no more, and a new one is opened without the key.
-     * Once the last partner is gone the new inbox takes signed writes from any
+     * key's writes to the old address until that thread expires. So a new
+     * inbox is opened without the key, and the old one is read until it
+     * expires for the partners still in the book, who may not have the new
+     * address yet, while what the removed key writes there is not handed
+     * over. Once the last partner is gone the new inbox takes signed writes from any
      * key, each shown as an unknown one, rather than unsigned writes from
      * anyone at an address the partners were given.
      */
@@ -1280,7 +1282,7 @@ final class Runtime
         $partner = is_string($entry['from_key'] ?? null) && $entry['from_key'] !== '' ? $this->partnerByKey($entry['from_key']) : null;
         if (!$apply) {
             // Weighed, not taken: shown as it is when nothing is kept.
-            $view['note'] = 'not kept: this channel was muted while the message was being read, so nothing from it is taken';
+            $view['note'] = 'not kept: the key that signed it left the address book while the message was being read, so nothing from it is taken';
         } elseif (!(($entry['verified'] ?? false) && ($entry['encrypted'] ?? false) && ($entry['known_contact'] ?? false) && $partner !== null)) {
             $view['note'] = 'not kept: a scope is only taken when it comes sealed from a partner in your address book';
         } elseif ($entry['replay'] ?? false) {
@@ -1402,10 +1404,11 @@ final class Runtime
      * Keys only added, or an old inbox open to anyone: the old one is still
      * read until it expires, since whoever was told the address may still
      * write there, and an open one is said to be open until then. A key
-     * removed: the old one is muted, kept for its records and its receipt but
-     * read no more, so nothing from the removed key arrives through the
-     * address it was given. That is this runtime's delivery stopping, not a
-     * revocation: the service takes the write until the thread expires.
+     * removed: the old one is marked muted and read until it expires for the
+     * partners still in the book, and nothing from the removed key arrives
+     * through the address it was given. That is this runtime's delivery
+     * stopping, not a revocation: the service takes the write until the
+     * thread expires.
      *
      * A rotation that fails leaves the old inbox in use, and says so.
      */
@@ -1490,11 +1493,14 @@ final class Runtime
 
     /**
      * Every inbox generation that names a key no longer in the address book is
-     * muted. Muted means read no more: nothing handed over, the record and the
-     * receipt kept until the address expires. It is this runtime's delivery
-     * stopping, not a revocation; the service takes the removed key's writes
-     * until the thread expires. An open generation, or one that takes any
-     * signed key, names nobody and is left as it is.
+     * marked muted. It is still read until it expires: what the partners still
+     * in the book write there is handed over, and what a removed key writes
+     * there is not. Read no more, as it was, a partner that had not yet learned
+     * the new address wrote where nobody read (a check of 12 November 2026).
+     * It is this runtime's delivery stopping for that key, not a revocation;
+     * the service takes the removed key's writes until the thread expires. An
+     * open generation, or one that takes any signed key, names nobody and is
+     * left as it is.
      */
     private function muteGenerations(string $reason): array
     {
@@ -1511,17 +1517,36 @@ final class Runtime
             }
             $channel->muted = true;
             $muted[] = $channel->w;
-            $this->note($channel, 'muted', sprintf('inbox %s is read no more after %s: %d removed key(s) can still write there until %d, and nothing from there is delivered', $channel->w, $reason, count($gone), $channel->expireAt));
+            $this->note($channel, 'muted', sprintf('inbox %s names %d key(s) no longer in the address book after %s. They can still write there until %d, and what they write is not handed over; what the partners still in the book write there is read until then.', $channel->w, count($gone), $reason, $channel->expireAt));
         }
 
         return $muted;
     }
 
+    /**
+     * Whether a message on this channel is signed by a key that has left the
+     * address book: on an inbox that named the key, which is read on for the
+     * partners still in the book. Judged message by message against the book
+     * as it is, so a key taken back in is read again.
+     */
+    private function leftTheBook(Channel $channel, ?string $key): bool
+    {
+        if ($key === null || $key === '' || !str_starts_with($channel->label, 'inbox')) {
+            return false;
+        }
+        if (in_array('*', $channel->allow, true) || !in_array($key, $channel->allow, true)) {
+            return false;
+        }
+
+        return $this->partnerByKey($key) === null;
+    }
+
     public function ensureInbox(): Channel
     {
         // Partners may have changed while this process was not running. The
-        // older generations are judged once, here, so a key removed while the
-        // runtime was down is read no more from any address it was given.
+        // older generations are marked once, here. What a key removed while
+        // the runtime was down writes to an address it was given is not handed
+        // over, since every message is judged against the book as it is.
         if (!$this->generationsJudged) {
             $this->generationsJudged = true;
             $this->muteGenerations('a restart');
@@ -3248,12 +3273,9 @@ final class Runtime
         $channel->moreAtService = false;
         $channel->moreAtLimit = false;
         $channel->stoppedAtBudget = false;
-        // A muted channel is read no more, whoever calls: read() skips it, and
-        // a library caller that asks straight out gets the same answer instead
-        // of the removed partner's messages.
-        if ($channel->muted) {
-            return ['muted', []];
-        }
+        // A muted inbox is read like any other, until it expires: each message
+        // is judged against the address book below, and what a removed key
+        // writes there is not handed over, whoever calls.
         // The channel's own allowlist goes with the read: the client checks
         // every message itself and keeps out what the list does not allow.
         // The limit goes with it too, so the service sends what was asked for
@@ -3411,11 +3433,22 @@ final class Runtime
         $used = 0;
         $budgetAt = null;
         $entries = [];
+        // Messages signed by a key that has left the address book, on an inbox
+        // that named it: passed by like the ones the list keeps out, and said.
+        $withheld = [];
+        // The last message this read dealt with, handed over or passed by.
+        $dealtWith = null;
         foreach ($handed as $message) {
+            $entry = $this->readEntry($channel, $message);
+            if (($entry['verified'] ?? false) === true && $this->leftTheBook($channel, is_string($entry['from_key'] ?? null) ? $entry['from_key'] : null)) {
+                $withheld[] = (int) $entry['seq'];
+                $dealtWith = (int) $entry['seq'];
+                continue;
+            }
             if ($maxBytes !== null) {
                 $weight = $this->weightAsHandedOver($channel, $message);
                 if ($entries !== [] && $used + $weight > $maxBytes) {
-                    $budgetAt = (int) $entries[count($entries) - 1]['seq'];
+                    $budgetAt = $dealtWith ?? (int) $entries[count($entries) - 1]['seq'];
                     break;
                 }
                 // Alone and still over the budget: it has come, so it is handed
@@ -3425,7 +3458,7 @@ final class Runtime
                 }
                 $used += $weight;
             }
-            $entry = $this->readEntry($channel, $message);
+            $dealtWith = (int) $entry['seq'];
             $from = $entry['from_key'];
             $body = $entry['body'];
             if (is_string($entry['sha256'])) { $channel->remember($entry['sha256'], $entry['verified'] === true && is_string($entry['from_key']) ? $entry['from_key'] : null); }
@@ -3533,13 +3566,18 @@ final class Runtime
         // service's next covers messages this call never looked at, so the
         // cursor is the last one it did look at.
         $to = $channel->after;
-        $moved = $entries !== [] || $keptOut !== [];
+        $moved = $entries !== [] || $keptOut !== [] || $withheld !== [];
         if ($entries !== []) {
             $to = max($to, (int) end($entries)['seq']);
         }
         $seqs = array_map('intval', array_column($keptOut, 'seq'));
         if ($seqs !== []) {
             $to = max($to, max($seqs));
+        }
+        // Past the messages of a key that has left the book as well, or they
+        // are passed by again on every read.
+        if ($withheld !== []) {
+            $to = max($to, max($withheld));
         }
         if ($stopAt !== null) {
             if ($stopAt > 0) {
@@ -3558,6 +3596,10 @@ final class Runtime
             // one that was never sent.
             $openedFor = in_array('*', $channel->allow, true) ? 'any key, signed only' : count($channel->allow) . ' named key(s)';
             $this->note($channel, 'kept_out', 'This channel was opened for ' . $openedFor . ', and these messages did not satisfy its list as checked here. They are not handed over and not archived.', $seqs);
+        }
+        if ($withheld !== []) {
+            // Said as well: what the removed key writes is passed by, never dropped in silence.
+            $this->note($channel, 'removed_key', 'These messages are signed by a key that is no longer in the address book, on an inbox that was given to it. They are not handed over and not archived. Add the key as a partner again to take what it writes from then on.', $withheld);
         }
 
         return ['ok', $entries];
@@ -4173,7 +4215,7 @@ final class Runtime
     {
         $key = $where . '|' . $state;
         $note = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
-        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict', 'archive_failed', 'scope_not_saved', 'scope_share_not_recorded', 'replay_unknown'], true) && $seqs !== null) {
+        if (in_array($state, ['kept_out', 'removed_key', 'unverified', 'binding_conflict', 'archive_failed', 'scope_not_saved', 'scope_share_not_recorded', 'replay_unknown'], true) && $seqs !== null) {
             $previous = $this->attention[$key] ?? [];
             $note['seqs'] = array_merge($previous['seqs'] ?? [], $seqs);
             $note['count'] = count($note['seqs']);
@@ -4262,10 +4304,8 @@ final class Runtime
         };
 
         $answered = [];
+        // A muted inbox too: it is read until it expires, for the partners still in the book.
         foreach (array_values($this->channels) as $channel) {
-            if ($channel->muted) {
-                continue;
-            }
             // A channel that answered 410 or nothing at all never gets the
             // wait: it used to eat it, so a read with wait 25 came back at once
             // and the inbox was only ever asked with wait 0. A gone one does:

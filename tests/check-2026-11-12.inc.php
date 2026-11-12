@@ -682,6 +682,37 @@ $check(
     $both === null ? 'nothing was thrown' : get_class($both)
 );
 
+// ---------------------------------------------------------------- the inbox that named a removed key is read on
+//
+// Read no more, the old inbox lost what a partner wrote there before it had
+// the new address. It is read until it expires: what the partners still in the
+// book write there is handed over, what the removed key writes is not and is
+// said, and a key taken back into the book is read again.
+[$a, $b] = $checkPair('readon');
+$homeC = $root . DIRECTORY_SEPARATOR . 'check1112-readon-c';
+mkdir($homeC, 0700, true);
+$c = new Runtime($homeC, 'https://fake.test', ['c'], true, $checkQuiet);
+$checkOpen[] = $c;
+$a->partnerAdd('c', $c->keys->public);
+$old = $a->channels['inbox'];
+$gone = $a->partnerRemove('c');
+$a->attentionTaken();
+$checkDirect($b, $old->w, $a->keys->public, 'from a partner who stays');
+$checkDirect($c, $old->w, $a->keys->public, 'from the key that was removed');
+$got = array_values(array_filter($a->read(), static fn (array $m): bool => $m['w'] === $old->w));
+$said = array_values(array_filter($a->attentionTaken(), static fn (array $n): bool => $n['state'] === 'removed_key'));
+$check(
+    ($gone['old_inbox']['w'] ?? null) === $old->w && ($gone['old_inbox']['muted'] ?? null) === true
+        && array_map(static fn (array $m): array => [$m['sender'], $m['body']['text'] ?? null], $got) === [['b', 'from a partner who stays']]
+        && count($said) === 1 && ($said[0]['seqs'] ?? null) === [2] && $old->after === 2,
+    'the inbox that named a removed key is read on: a partner still in the book arrives there, the removed key does not, and that is said',
+    json_encode([$got, $said])
+);
+$a->partnerAdd('c', $c->keys->public);
+$checkDirect($c, $old->w, $a->keys->public, 'back in the book');
+$back = array_values(array_filter($a->read(), static fn (array $m): bool => $m['w'] === $old->w));
+$check(array_map(static fn (array $m): array => [$m['sender'], $m['body']['text'] ?? null], $back) === [['c', 'back in the book']], 'and a key taken back into the book is read there again', json_encode($back));
+
 // ---------------------------------------------------------------- a 401 or a 409 is the service saying no
 //
 // Both are answered before anything is stored. A handover answered so said

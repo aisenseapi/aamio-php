@@ -95,6 +95,12 @@ not what moved in the source.
   It answered every status alike, with `post`, `status` and `withdrawn`, and
   wrote the record of a withdrawal that had not happened. The record has the
   post's id under `id`, as the other two write it.
+- After `partner remove`, the inbox that named the removed key is read until it
+  expires, as in aamio-python and the Node runtime from the same release. What
+  the partners still in the book write there is handed over; what the removed
+  key writes there is not, and a read says how many in `removed_key`. The
+  whole inbox was read no more, so a partner that had not yet learned the new
+  address wrote where nobody read, and nothing said so.
 - A partner's name is compared apart from upper and lower case in all of
   Unicode, as aamio-python and the Node runtime compare it. It was lowered in
   ASCII alone, so `partner add` took `Åse` and `åse` with two keys as two

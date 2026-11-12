@@ -65,6 +65,11 @@ $limited = static function (string $name, array $channels) use ($root, $quiet): 
     foreach ($channels as $label => [$w, $allow]) {
         $runtime->channels[$label] = new Channel($label, 'read-key', $w, time() + 3000, $allow);
     }
+    // The keys an inbox names are partners in the book, as in an inbox the
+    // runtime opens: a key named there and not in the book has left it, and
+    // what it writes is passed by.
+    $named = array_values(array_filter($channels['inbox'][1] ?? [], static fn (string $key): bool => $key !== '*'));
+    $runtime->partners = array_map(static fn (int $n, string $key): array => ['name' => 'partner' . $n, 'key' => $key], array_keys($named), $named);
 
     return $runtime;
 };
