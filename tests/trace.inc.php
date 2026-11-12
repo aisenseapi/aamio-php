@@ -388,3 +388,74 @@ $check(
 );
 $t->close();
 $u->close();
+
+// A send that failed says the trace that could not be written too. The answer was 429 and trace.json could not be
+// written: a delivery said so on its answer, and the failure said the 429 and not the trace, which was in attention
+// alone, and a command that sends once and exits never fetches it (a check of 12 November 2026).
+[$t, $u, $tInbox, $uInbox, $homes] = $tracePair('failed-untraced');
+$tracePath = $homes['t'] . DIRECTORY_SEPARATOR . 'trace.json';
+@unlink($tracePath);
+mkdir($tracePath);
+$turnedAway = static function (Runtime $runtime, callable $act) use ($fake, $answerWith): ?SendFailed {
+    Http::$override = $answerWith(429, false);
+    try {
+        $act();
+    } catch (SendFailed $error) {
+        return $error;
+    } finally {
+        Http::$override = $fake;
+    }
+
+    return null;
+};
+$failedSend = $turnedAway($t, static fn () => $t->send($uInbox->w, 'turned away, and untraced'));
+$check(
+    $failedSend !== null && $failedSend->outcome === 'refused' && $failedSend->status === 429 && str_contains((string) $failedSend->traceError, 'trace.json')
+        && array_keys($failedSend->traceSaid()) === ['trace_error'],
+    'a send turned away while the trace could not be written says both: the refusal and the trace',
+    json_encode([$failedSend?->outcome, $failedSend?->status, $failedSend?->traceError])
+);
+Http::$override = $answerWith(429, false);
+$overMcpFailed = (new McpServer($t))->dispatch('aamio_send', ['to' => $uInbox->w, 'text' => 'the same over the server']);
+Http::$override = $fake;
+$check(
+    ($overMcpFailed['isError'] ?? false) === true && ($overMcpFailed['structuredContent']['status'] ?? null) === 429 && ($overMcpFailed['structuredContent']['retryable'] ?? null) === true
+        && str_contains((string) ($overMcpFailed['structuredContent']['trace_error'] ?? ''), 'trace.json'),
+    'and so does the MCP server',
+    json_encode($overMcpFailed['structuredContent'] ?? null)
+);
+$check(
+    str_contains((string) file_get_contents(dirname(__DIR__) . '/bin/aamio'), "'fix' => \$fix] + \$error->traceSaid()"),
+    'and the command line writes what a failed send says of the trace beside the rest'
+);
+$failedPost = ['id' => str_repeat('p', 20), 'w' => $uInbox->w, 'key' => $u->keys->public, 'expire_at' => time() + 600];
+Http::$override = $answerWith(500, false);
+$failedAnswer = null;
+try {
+    $t->boardAnswer($failedPost, 'I can');
+} catch (SendFailed $error) {
+    $failedAnswer = $error;
+} finally {
+    Http::$override = $fake;
+}
+$check(
+    $failedAnswer !== null && $failedAnswer->outcome === 'attempted' && $failedAnswer->status === 500 && str_contains((string) $failedAnswer->traceError, 'trace.json'),
+    'an answer on the board that failed says the same',
+    json_encode([$failedAnswer?->outcome, $failedAnswer?->status, $failedAnswer?->traceError])
+);
+// A retry that is delivered while the trace still cannot be written says so in its row, and one whose trace is
+// written says nothing of the attempt before it.
+$retriedRow = $t->outboxRetry($failedSend->messageId)[0] ?? [];
+$secondFailed = $turnedAway($t, static fn () => $t->send($uInbox->w, 'turned away once more'));
+rmdir($tracePath);
+$tracedRow = $t->outboxRetry($secondFailed->messageId)[0] ?? [];
+$tracedFailure = $turnedAway($t, static fn () => $t->send($uInbox->w, 'turned away, and traced'));
+$check(
+    ($retriedRow['status'] ?? null) === 'delivered' && ($retriedRow['http'] ?? null) === 201 && str_contains((string) ($retriedRow['trace_error'] ?? ''), 'trace.json')
+        && $secondFailed !== null && $secondFailed->traceError !== null && ($tracedRow['status'] ?? null) === 'delivered' && !array_key_exists('trace_error', $tracedRow)
+        && !array_key_exists('trace_error', $t->outbox[$secondFailed->messageId]) && $tracedFailure !== null && $tracedFailure->traceError === null && $tracedFailure->traceSaid() === [],
+    'a retry says it of its own attempt alone, and a failure that is traced says nothing of it',
+    json_encode([$retriedRow, $tracedRow, $tracedFailure?->traceError])
+);
+$t->close();
+$u->close();

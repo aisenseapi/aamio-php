@@ -23,8 +23,21 @@ final class SendFailed extends \RuntimeException
          * to be told which, or it is a thread nobody knows about.
          */
         public readonly ?array $opened = null,
+        /**
+         * The trace of this attempt, when it could not be written. A delivery
+         * said so on its answer and a failure did not: a command that sends
+         * once and exits never fetches attention, and was told of the refusal
+         * and not of the trace (a check of 12 November 2026).
+         */
+        public readonly ?string $traceError = null,
     ) {
         $reason = is_array($detail) ? (string) ($detail['error'] ?? json_encode($detail)) : (string) $detail;
         parent::__construct(sprintf('send %s (%s): %s', $outcome, $status === 0 ? 'no answer' : (string) $status, $reason));
+    }
+
+    /** What the failure says of the trace, for the command line and the MCP server alike: trace_error, or nothing. */
+    public function traceSaid(): array
+    {
+        return $this->traceError === null ? [] : ['trace_error' => $this->traceError];
     }
 }

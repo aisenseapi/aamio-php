@@ -409,6 +409,11 @@ $check(!array_filter($a->outbox, static fn (array $e): bool => $e['w'] === $w2),
 echo "board\n";
 $post = $b->boardPost('need', 'Temperature log', 'The full log as JSON.', ['coldchain.qa'], 900, 'en');
 $check(isset($fake->posts[$post['id']]) && $post['work_bits'] === 4 && $post['reply_inbox'] === $b->channels['board']->w, 'a post lands with the advised work and the reply inbox');
+$check(
+    is_array($post['post'] ?? null) && $post['post']['id'] === $post['id'] && $post['post']['w'] === $b->channels['board']->w && $post['post']['title'] === 'Temperature log' && $post['post']['key'] === $b->keys->public,
+    'and the answer gives the post as the board stored it, where aamio-python and the Node runtime give it, with the id beside it for this release',
+    json_encode($post['post'] ?? null)
+);
 $found = $a->boardFind('need', ['coldchain']);
 $check(count($found['posts']) === 1 && $a->peers[$found['posts'][0]['w']] === $b->keys->public, 'find lists it and learns the poster key for the reply address');
 $answer = $a->boardAnswer($post['id'], 'I have it, 41 h, no excursion');

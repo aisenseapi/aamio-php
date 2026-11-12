@@ -23,6 +23,15 @@ not what moved in the source.
   64 characters. The names are the sender's to choose: one message of
   thousands of them gave a row of 56 KB, and fifty such from one key megabytes,
   in a file written again at every read.
+- A send or an answer on the board that failed while the trace could not be
+  written says so, as `trace_error`, on the command line and over MCP. Only a
+  delivery said it, and the rest was in `attention`, which a command that
+  sends once and exits never fetches. A row of `outbox retry` says it too, and
+  says it of that attempt alone.
+- `board post` answers with `post`, the post as the board stored it, where
+  aamio-python and the Node runtime give it: read the id as `post.id`. The
+  `id` beside it is kept in this release for callers that read it there, and
+  goes in the next.
 
 ## 0.3.18 - 2026-11-11
 

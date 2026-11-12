@@ -1735,12 +1735,12 @@ final class Runtime
 
             // A refusal the service answered settles it, and anything else that
             // left may have landed.
-            throw new SendFailed($settled === 'refused' ? 'refused' : 'unknown', $id, (int) ($this->outbox[$id]['last_status'] ?? 0), $why, $opened);
+            throw new SendFailed($settled === 'refused' ? 'refused' : 'unknown', $id, (int) ($this->outbox[$id]['last_status'] ?? 0), $why, $opened, $this->outbox[$id]['trace_error'] ?? null);
         }
         if ($status !== 201) {
             $entry = $this->outbox[$entry['id']];
 
-            throw new SendFailed($entry['status'], $entry['id'], $status, $handed, $opened);
+            throw new SendFailed($entry['status'], $entry['id'], $status, $handed, $opened, $entry['trace_error'] ?? null);
         }
 
         return [];
@@ -1882,7 +1882,11 @@ final class Runtime
         // Where the answers go, and how to read them, in the answer itself. An
         // agent took board replies for the whole inbox, got nothing back, and
         // spent an hour decrypting by hand what read would have shown at once.
-        $posted = ['id' => $answer['id'], 'kind' => $kind, 'title' => $title, 'expire_at' => $answer['expire_at'] ?? null, 'work_bits' => $answer['work_bits'] ?? $bits, 'reply_inbox' => $inbox->w, 'inbox_expires_at' => $inbox->expireAt, 'replies_arrive_on' => 'board', 'read_them_with' => 'Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.'];
+        // The post as the board stored it, as aamio-python and the Node runtime
+        // answer: a caller that reads post.id reads the same from all three.
+        // The id beside it is where this runtime gave it alone, kept for this
+        // release for callers that read it there, and gone in the next.
+        $posted = ['post' => $answer, 'id' => $answer['id'], 'kind' => $kind, 'title' => $title, 'expire_at' => $answer['expire_at'] ?? null, 'work_bits' => $answer['work_bits'] ?? $bits, 'reply_inbox' => $inbox->w, 'inbox_expires_at' => $inbox->expireAt, 'replies_arrive_on' => 'board', 'read_them_with' => 'Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.'];
         if ($held !== null) {
             $posted['scope'] = $held['name'];
         }
@@ -2022,7 +2026,7 @@ final class Runtime
         $entry = $this->outbox[$entry['id']];
         $this->archive('board', ['kind' => 'answered', 'at' => time(), 'post' => $post['id'], 'w' => $post['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $body]);
         if ($status !== 201) {
-            throw new SendFailed($entry['status'], $entry['id'], $status, $result);
+            throw new SendFailed($entry['status'], $entry['id'], $status, $result, null, $entry['trace_error'] ?? null);
         }
         $answer = ['post' => $post['id'], 'w' => $post['w'], 'message_id' => $entry['id'], 'seq' => $result['seq'], 'at' => $result['at'], 'replies_arrive_on' => 'board', 'reply_to' => $channel->w];
         if (isset($result['met'])) {
@@ -2468,7 +2472,7 @@ final class Runtime
             ($this->log)('archive sent ' . $entry['id'] . ': ' . $archiveError);
         }
         if ($status !== 201) {
-            throw new SendFailed($entry['status'], $entry['id'], $status, $result);
+            throw new SendFailed($entry['status'], $entry['id'], $status, $result, null, $entry['trace_error'] ?? null);
         }
         $sent = ['to' => $record['to'], 'w' => $entry['w'], 'message_id' => $entry['id'], 'seq' => $result['seq'], 'at' => $result['at'], 'sha256' => $result['sha256'] ?? null, 'expire_at' => $result['expire_at'] ?? null, 'replies_arrive_on' => 'inbox', 'reply_to' => $body['reply_to']];
         if (isset($result['met'])) {
@@ -2652,8 +2656,11 @@ final class Runtime
         $this->saveOutbox();
         // After the outcome is saved, and unable to change it.
         // A script that sends once and exits never fetches attention, so the
-        // failure rides on the record this send is about.
+        // failure rides on the record this send is about. It is this attempt's:
+        // a retry whose trace was written does not go on saying that the first
+        // attempt's could not be.
         $traceError = $this->traceSafely('sent', fn (): ?string => $this->traceSent($this->outbox[$id], $status, $result));
+        unset($this->outbox[$id]['trace_error']);
 
         if ($traceError !== null) {
             $this->outbox[$id]['trace_error'] = $traceError;
@@ -2688,7 +2695,12 @@ final class Runtime
             } catch (GateStop) {
                 $status = 0;
             }
-            $out[] = ['id' => $id, 'w' => $entry['w'], 'status' => $this->outbox[$id]['status'], 'http' => $status];
+            $row = ['id' => $id, 'w' => $entry['w'], 'status' => $this->outbox[$id]['status'], 'http' => $status];
+            // A retry run once from a script never fetches attention either.
+            if (($this->outbox[$id]['trace_error'] ?? null) !== null) {
+                $row['trace_error'] = $this->outbox[$id]['trace_error'];
+            }
+            $out[] = $row;
         }
 
         return $out;
