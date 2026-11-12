@@ -86,6 +86,13 @@ not what moved in the source.
   `nul`. It names the add-on's list of websites and its own directory in the
   home, and a list written to `nul.hosts.json` is written nowhere. A name
   that ends in a line break is refused as well.
+- A channel whose address was sent, with no answer coming back, says that the
+  message may have arrived: `aamio_open_channel` said that only the message
+  carrying the address did not go, of a message that was with its recipient,
+  which reads as leave to open another channel and invite again. The fix now
+  says that the outcome is not known and that a new attempt is the same
+  message under the same `message_id`. A refusal, and a message that never
+  left, are said not to have gone, as before.
 
 ## 0.3.18 - 2026-11-11
 

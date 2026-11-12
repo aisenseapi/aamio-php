@@ -2889,6 +2889,20 @@ final class Runtime
     }
 
     /**
+     * Whether a message that carried a channel's address may be with them, for
+     * the words in front of the fix. A refusal says the message is not there,
+     * and one that never left is not there either. Anything else that left may
+     * have arrived. "Only the message carrying its address did not go" was
+     * said of all of them, and of a message that was with them it read as
+     * leave to open another channel and invite again (a check of 12 November
+     * 2026).
+     */
+    public static function handoverUnsettled(string $outcome): bool
+    {
+        return !in_array($outcome, ['refused', 'never_sent'], true);
+    }
+
+    /**
      * Whether sending these same bytes again is the right next move. Not the same
      * question as outboxOpen, and retry was asking that one: a rate window is
      * settled -- the service turned the request away without reading the body -- and

@@ -194,7 +194,8 @@ and with no answer from the network it threw "answer failed", with nothing in
 the outbox to send again, so the next move was a second answer. So does the
 message that hands over a channel address: `openChannelWith` throws the same
 `SendFailed`, carrying `opened`, since the channel is there even when its
-address did not arrive.
+address did not arrive. With the outcome `unknown` it may have arrived: what
+goes again is that same message, `outboxRetry` with its id.
 
 ### What stays on this machine, and for how long
 
@@ -452,9 +453,13 @@ to the new thread beside the partners in `allow`, and the address goes to it
 sealed and signed, with `note` beside it. Who and where are settled before
 anything is opened, so a partner who is not online, an address nobody bound,
 or an inbox whose gate asks for more work than a tool call has time for stops
-there with no thread left open. If the message carrying the address does not
-go, whatever stopped it, the thread is open all the same, and the answer says
-so under `opened`, with `outcome` saying whether anything left this machine.
+there with no thread left open. If the message carrying the address is
+stopped, whatever stopped it, the thread is open all the same, and the answer
+says so under `opened`, with `outcome` saying whether anything left this
+machine. Only a refusal says the message did not go. One that left with no
+answer may be with them already, and `fix` says so: a new attempt is then the
+same message, `aamio_outbox_retry` with its `message_id`, and never another
+channel.
 
 An address by itself is enough for whoever writes to it directly, with
 `Aamio\Client` or a client of their own. It is not enough for a partner's

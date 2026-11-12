@@ -216,6 +216,13 @@ echo "earshot: the process\n";
     $said = Process::handle($request('tool', 'aamio_addon_earshot_listen', ['engine' => 'local']), $w->seams());
     $result = $said['result'];
     $check($said['exit_code'] === 0 && ($result['status'] ?? null) === 'heard' && ($result['engine'] ?? null) === 'local' && ($result['mode'] ?? null) === 'high' && ($result['card']['name'] ?? null) === 'rom-42' && $w->decoded === [], 'and reads a recording here, in its own range');
+    // The same card with a byte order mark in front is no card: the editions for Python and Node say the same of this sound.
+    $w = $world();
+    $w->recording = Codec::encode("\xEF\xBB\xBF" . $timed, 'high');
+    $said = Process::handle($request('tool', 'aamio_addon_earshot_listen', ['engine' => 'local']), $w->seams());
+    $result = $said['result'];
+    $check($said['exit_code'] === 3 && $said['is_error'] === false && ($result['status'] ?? null) === 'not_understood' && ($result['reason'] ?? null) === 'not_an_aamio_card' && ($result['engine'] ?? null) === 'local'
+        && str_starts_with((string) ($result['heard']['text'] ?? ''), "\xEF\xBB\xBF") && ($result['heard']['byte_length'] ?? null) === strlen($timed) + 3, 'a card with a byte order mark in front is not understood, and what was heard is handed over as it was');
     $w = $world(null, new Unreachable('service_unreachable', 'aisenseapi.com could not be reached.'));
     $w->recording = Codec::encode($timed, 'audible');
     $said = Process::handle($request('tool', 'aamio_addon_earshot_listen'), $w->seams());

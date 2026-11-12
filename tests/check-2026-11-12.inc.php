@@ -20,6 +20,7 @@ declare(strict_types=1);
 
 use Aamio\Channel;
 use Aamio\Codec;
+use Aamio\Http;
 use Aamio\Keys;
 use Aamio\McpServer;
 use Aamio\Runtime;
@@ -351,6 +352,70 @@ $check(
         && str_contains((string) ($checkTools['aamio_close_channel']['inputSchema']['properties']['label']['description'] ?? ''), 'as aamio_channels shows it')
         && str_contains((string) ($checkTools['aamio_open_channel']['inputSchema']['properties']['label']['description'] ?? ''), 'letters, digits, dots, dashes and underscores, and not starting with inbox or board'),
     'and the tools say what a close answers and what a label may be'
+);
+
+// ---------------------------------------------------------------- what is said of a handover follows what is known
+//
+// Found in a check of the candidate for Node the same day: an invitation that
+// was stored, with its answer lost on the way back, was said not to have gone.
+// The agent's next move is then another channel and another invitation, and
+// whoever got the first has two.
+[$a, $b] = $checkPair('handover');
+$a->peers[$b->channels['inbox']->w] = $b->keys->public;
+$checkHanded = static function (string $label, int $status, bool $stored) use ($a, $fake, $answerWith): array {
+    Http::$override = $answerWith($status, $stored);
+    try {
+        $answer = (new McpServer($a))->dispatch('aamio_open_channel', ['label' => $label, 'ttl' => 600, 'to' => 'b']);
+    } finally {
+        Http::$override = $fake;
+    }
+
+    return ($answer['isError'] ?? null) === true ? ($answer['structuredContent'] ?? []) : [];
+};
+$checkMay = 'and the message carrying its address may have arrived: its outcome is not known. Do not open another channel for this: a new attempt is the same message, under the same message_id.';
+
+$lost = $checkHanded('lost', 0, true);
+$check(
+    [$lost['operation'] ?? null, $lost['outcome'] ?? null, $lost['status'] ?? null, $lost['opened']['label'] ?? null] === ['open_channel', 'unknown', 0, 'lost'] && array_key_exists('retryable', $lost) && $lost['retryable'] === null
+        && str_starts_with((string) ($lost['fix'] ?? ''), 'The channel lost is open and listed by aamio_channels, ' . $checkMay . ' No answer came back, so this message may already have been delivered.')
+        && !str_contains(json_encode($lost), 'did not go') && !str_contains(json_encode($lost), 'did not land'),
+    'a handover whose answer was lost says the channel is open and that the message may have arrived',
+    json_encode($lost)
+);
+$got = $b->read();
+$check(
+    array_map(static fn (array $m): array => [$m['body']['channel'] ?? null, $m['replay'] ?? null], $got) === [[$lost['opened']['w'] ?? '', false]],
+    'and it had arrived: the address is read before anything is sent again',
+    json_encode($got)
+);
+$retried = $a->outboxRetry((string) ($lost['message_id'] ?? ''));
+$again = $b->read();
+$check(
+    array_column($retried, 'status') === ['delivered'] && array_map(static fn (array $m): array => [$m['body']['channel'] ?? null, $m['replay'] ?? null], $again) === [[$lost['opened']['w'] ?? '', true]],
+    'the same message sent again under its id arrives marked as the copy it is',
+    json_encode([$retried, $again])
+);
+
+$failing = $checkHanded('failing', 500, false);
+$check(
+    ($failing['outcome'] ?? null) === 'attempted' && str_starts_with((string) ($failing['fix'] ?? ''), 'The channel failing is open and listed by aamio_channels, ' . $checkMay . ' '),
+    'an answer that settles nothing is not called a refusal either',
+    json_encode($failing)
+);
+foreach ([['refused', 403], ['later', 429]] as [$label, $status]) {
+    $refused = $checkHanded($label, $status, false);
+    $check(
+        [$refused['outcome'] ?? null, $refused['status'] ?? null] === ['refused', $status]
+            && str_starts_with((string) ($refused['fix'] ?? ''), 'The channel ' . $label . ' is open and listed by aamio_channels: only the message carrying its address did not go. ')
+            && !str_contains((string) ($refused['fix'] ?? ''), 'may have arrived'),
+        'a handover the service turned away with ' . $status . ' did not go, and the words say so',
+        json_encode($refused)
+    );
+}
+$check(
+    array_map([Runtime::class, 'handoverUnsettled'], ['refused', 'never_sent', 'unknown', 'attempted', 'sending', 'something new']) === [false, false, true, true, true, true]
+        && McpServer::stillOpen(null, 'unknown') === '' && str_ends_with(McpServer::stillOpen(['label' => 'x']), 'did not go. '),
+    'the words know which outcomes are settled, and a stop at the gate went nowhere'
 );
 
 foreach ($checkOpen as $one) {

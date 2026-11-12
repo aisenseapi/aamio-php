@@ -161,10 +161,23 @@ final class McpServer
         return $value;
     }
 
-    /** What comes first in the fix when a channel was opened and the message carrying its address did not go. */
-    private static function stillOpen(?array $opened): string
+    /**
+     * What comes first in the fix when a channel was opened and the message
+     * carrying its address was stopped. $outcome is the send's, or null for a
+     * stop at the gate, where nothing went. A message that left with no answer
+     * that settles it may be with them, and the words say so.
+     */
+    public static function stillOpen(?array $opened, ?string $outcome = null): string
     {
-        return $opened === null ? '' : 'The channel ' . $opened['label'] . ' is open and listed by aamio_channels: only the message carrying its address did not go. ';
+        if ($opened === null) {
+            return '';
+        }
+        if ($outcome !== null && Runtime::handoverUnsettled($outcome)) {
+            return 'The channel ' . $opened['label'] . ' is open and listed by aamio_channels, and the message carrying its address may have arrived: its outcome is not known. '
+                . 'Do not open another channel for this: a new attempt is the same message, under the same message_id. ';
+        }
+
+        return 'The channel ' . $opened['label'] . ' is open and listed by aamio_channels: only the message carrying its address did not go. ';
     }
 
     // ------------------------------------------------------- asking the user
@@ -598,7 +611,7 @@ final class McpServer
                 $fix = 'Nothing left this machine, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to.';
             }
 
-            return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'operation' => ['aamio_board_answer' => 'board_answer', 'aamio_open_channel' => 'open_channel'][$name] ?? 'send', 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::stillOpen($error->opened) . $fix] + $error->traceSaid() + $error->archiveSaid(), true);
+            return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'operation' => ['aamio_board_answer' => 'board_answer', 'aamio_open_channel' => 'open_channel'][$name] ?? 'send', 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::stillOpen($error->opened, $error->outcome) . $fix] + $error->traceSaid() + $error->archiveSaid(), true);
         } catch (GateStop $error) {
             return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'gate', 'operation' => $name === 'aamio_open_channel' ? 'open_channel' : 'send', 'retryable' => false, 'fix' => self::stillOpen($error->opened) . $error->fix], true);
         } catch (\InvalidArgumentException | \RuntimeException | \LogicException $error) {
