@@ -458,10 +458,11 @@ or an inbox whose gate asks for more work than a tool call has time for stops
 there with no thread left open. If the message carrying the address is
 stopped, whatever stopped it, the thread is open all the same, and the answer
 says so under `opened`, with `outcome` saying whether anything left this
-machine. Only a refusal says the message did not go. One that left with no
-answer may be with them already, and `fix` says so: a new attempt is then the
-same message, `aamio_outbox_retry` with its `message_id`, and never another
-channel.
+machine. A refusal, a stop at the gate and a message that never left are
+said not to have gone: nobody has the address, so `fix` says to close the
+channel and open a new one. One that left with no answer may be with them
+already, and `fix` says so: a new attempt is then the same message,
+`aamio_outbox_retry` with its `message_id`, and never another channel.
 
 An address by itself is enough for whoever writes to it directly, with
 `Aamio\Client` or a client of their own. It is not enough for a partner's

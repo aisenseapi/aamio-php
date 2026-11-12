@@ -601,11 +601,14 @@ final class McpServer
             // address, and nobody has it.
             if ($error->opened !== null && $error->outcome === 'never_sent') {
                 $fix = 'Nothing left this machine, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to.';
+            } elseif ($error->opened !== null && $error->outcome === 'refused' && !in_array($error->status, Runtime::SEND_TRY_LATER, true)) {
+                // Nobody has the address either: a corrected message would need it.
+                $fix = 'aamio refused it, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to.';
             }
 
             return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'operation' => ['aamio_board_answer' => 'board_answer', 'aamio_open_channel' => 'open_channel'][$name] ?? 'send', 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::stillOpen($error->opened, $error->outcome) . $fix] + $error->traceSaid() + $error->archiveSaid(), true);
         } catch (GateStop $error) {
-            return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'gate', 'operation' => $name === 'aamio_open_channel' ? 'open_channel' : 'send', 'retryable' => false, 'fix' => self::stillOpen($error->opened) . $error->fix], true);
+            return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'gate', 'operation' => $name === 'aamio_open_channel' ? 'open_channel' : 'send', 'retryable' => false, 'fix' => self::stillOpen($error->opened) . ($error->opened === null ? '' : 'Nothing was sent, so nobody has been given its address: close it with aamio_close_channel, and open a new one when the inbox\'s conditions can be met. ') . $error->fix], true);
         } catch (\InvalidArgumentException | \RuntimeException | \LogicException $error) {
             return self::resultOf(['error' => $error->getMessage()], true);
         } catch (\TypeError | \ValueError | \JsonException $error) {

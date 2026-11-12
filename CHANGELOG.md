@@ -95,6 +95,22 @@ not what moved in the source.
   It answered every status alike, with `post`, `status` and `withdrawn`, and
   wrote the record of a withdrawal that had not happened. The record has the
   post's id under `id`, as the other two write it.
+- A channel whose address the service turned away, or a gate stopped, is
+  answered with what to do about it: nobody has the address, so close the
+  channel and open a new one. The advice was to send the corrected message as
+  a new one, which needs the address. `board channel` reads the gate of the
+  inbox the address goes to before it opens anything, as `aamio_open_channel`
+  does: a gate that could not be met left the channel open.
+- The command line says `error_code` beside a failed send and a stop at the
+  gate, `send_<outcome>` and `gate`, as aamio-python and the Node runtime do.
+- A send answered 401 or 409 is settled as refused: a signature that does
+  not verify, a thread that is full, or a key that has used up the gate's
+  `per_key`. The service answers each before it stores anything. They were
+  left open, so `outbox retry` sent the same bytes to the same refusal, and a
+  channel's handover said the address may have arrived.
+- `partner remove` takes a partner's key as well as its name, as `send` does.
+  The refusal of a name two partners share apart from upper and lower case
+  says to give the key.
 - `partner remove` with a name in another case than the address book has it
   removes that partner, as a send finds it: apart from upper and lower case
   when only one is so named, and refused as ambiguous when two are. It said

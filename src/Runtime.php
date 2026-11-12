@@ -25,7 +25,12 @@ final class Runtime
     public const PRESENCE_TTL = 120;
     public const PRESENCE_REFRESH = 60;
     public const RENEW_BEFORE = 180;
-    public const SEND_DETERMINISTIC = [400, 403, 410, 413, 415, 422, 428, 501];
+    // 401 and 409 are among them: a signature that does not verify over these
+    // bytes, a thread that is full, a key that has used up the gate's per_key.
+    // The service answers each before it stores anything. Left out, a handover
+    // answered so said the address may have arrived, and retry sent the same
+    // bytes to the same refusal (a check of 12 November 2026).
+    public const SEND_DETERMINISTIC = [400, 401, 403, 409, 410, 413, 415, 422, 428, 501];
     public const SEND_TRY_LATER = [429, 502, 503, 504];
     /**
      * Answers that prove the message was never stored: the deterministic ones, and a
@@ -33,7 +38,7 @@ final class Runtime
      * deliberately not here -- they can be a front door that saw nothing or the
      * service failing after it had written, and this side cannot tell which.
      */
-    public const SEND_NOT_STORED = [400, 403, 410, 413, 415, 422, 428, 501, 429];
+    public const SEND_NOT_STORED = [400, 401, 403, 409, 410, 413, 415, 422, 428, 501, 429];
     public const VERIFYUM_MCP = Hosts::VERIFYUM_MCP;
 
     /** Only the spellings seen in the wild, and only for an answer to a post. */
@@ -840,7 +845,9 @@ final class Runtime
      */
     public function partnerRemove(string $name): array
     {
-        $known = $this->partnerByName($name);
+        // A key or a name, as a send takes them: the refusal of an ambiguous
+        // name says to give the key, and partner remove did not take one.
+        $known = Codec::isKey($name) ? $this->partnerByKey($name) : $this->partnerByName($name);
         if ($known === null) {
             $inbox = $this->channels['inbox'] ?? null;
 
@@ -2378,6 +2385,11 @@ final class Runtime
             $label .= '-' . time();
         }
         if ($replyTo !== null) {
+            // The gate of the inbox the address goes to, read before anything
+            // is opened, as openChannel and the Node runtime read it: a gate
+            // that cannot be met stopped the handover after the channel was
+            // open, and it stayed open with nobody given its address.
+            $this->canHandOver($replyTo);
             $this->handoverFits($key, $ttl, $note);
         }
         $opened = $this->client->open($ttl, [$key]);
@@ -2964,17 +2976,22 @@ final class Runtime
     {
         $opened = $error->opened === null ? [] : ['opened' => $error->opened];
         if ($error instanceof GateStop) {
-            return $opened + ['error' => $error->getMessage(), 'fix' => self::handoverStill($error->opened, null, '`aamio channel list`') . $error->fix];
+            // Nothing was sent, so nobody has the address of a channel opened for it.
+            $close = $error->opened === null ? '' : 'Nothing was sent, so nobody has been given its address: close it with `aamio channel close ' . $error->opened['label'] . '`, and open a new one when the inbox\'s conditions can be met. ';
+
+            return $opened + ['error' => $error->getMessage(), 'error_code' => 'gate', 'fix' => self::handoverStill($error->opened, null, '`aamio channel list`') . $close . $error->fix];
         }
         [$retryable, $fix] = self::sendAdvice($error->outcome, $error->status);
-        // A channel whose address never left: there is nothing to send again,
-        // and an address goes only with a channel.
+        // A channel whose address never left, or was turned away: there is
+        // nothing to send again, and an address goes only with a channel.
         if ($error->opened !== null && $error->outcome === 'never_sent') {
             $fix = 'Nothing left this machine, so nobody has been given its address. Close it with `aamio channel close ' . $error->opened['label'] . '`, put right what the error says, and open a new one.';
+        } elseif ($error->opened !== null && $error->outcome === 'refused' && !in_array($error->status, self::SEND_TRY_LATER, true)) {
+            $fix = 'aamio refused it, so nobody has been given its address. Close it with `aamio channel close ' . $error->opened['label'] . '`, put right what the error says, and open a new one.';
         }
 
         return $opened
-            + ['error' => $error->getMessage(), 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::handoverStill($error->opened, $error->outcome, '`aamio channel list`') . $fix]
+            + ['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::handoverStill($error->opened, $error->outcome, '`aamio channel list`') . $fix]
             + $error->traceSaid() + $error->archiveSaid();
     }
 

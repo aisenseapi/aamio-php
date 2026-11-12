@@ -438,7 +438,7 @@ $lineStop = static function (string $label, int $status, bool $stored) use ($a, 
 $lost = $lineStop('lost', 0, true);
 $said = $lost instanceof SendFailed ? Runtime::commandLineStop($lost) : [];
 $check(
-    array_keys($said) === ['opened', 'error', 'outcome', 'message_id', 'status', 'retryable', 'fix'] && [$said['opened']['label'], $said['outcome'], $said['status'], $said['retryable']] === ['lost', 'unknown', 0, null]
+    array_keys($said) === ['opened', 'error', 'error_code', 'outcome', 'message_id', 'status', 'retryable', 'fix'] && [$said['opened']['label'], $said['error_code'], $said['outcome'], $said['status'], $said['retryable']] === ['lost', 'send_unknown', 'unknown', 0, null]
         && isset($a->channels['lost'], $fake->threads[$said['opened']['w']])
         && str_starts_with($said['fix'], 'The channel lost is open and listed by `aamio channel list`, and the message carrying its address may have arrived: its outcome is not known. Do not open another channel for this: a new attempt is the same message, under the same message_id. No answer came back, so this message may already have been delivered.'),
     'the command line says the channel that is open when its address was sent and no answer came back, and that it may have arrived',
@@ -448,8 +448,8 @@ $refused = $lineStop('refused', 403, false);
 $said = $refused instanceof SendFailed ? Runtime::commandLineStop($refused) : [];
 $check(
     ($said['opened']['label'] ?? null) === 'refused' && ($said['outcome'] ?? null) === 'refused'
-        && str_starts_with((string) ($said['fix'] ?? ''), 'The channel refused is open and listed by `aamio channel list`: only the message carrying its address did not go. aamio refused this'),
-    'and when the service turned the address away',
+        && ($said['fix'] ?? null) === 'The channel refused is open and listed by `aamio channel list`: only the message carrying its address did not go. aamio refused it, so nobody has been given its address. Close it with `aamio channel close refused`, put right what the error says, and open a new one.',
+    'and when the service turned the address away, with what to do about a channel nobody has the address of',
     json_encode($said)
 );
 $unsent = Runtime::commandLineStop(new SendFailed('never_sent', null, 0, 'RuntimeException: no room', ['label' => 'unsent', 'w' => str_repeat('u', 20), 'expire_at' => 1]));
@@ -462,21 +462,39 @@ $gated = new \Aamio\GateStop('The inbox asks for more work than this call may ta
 $plainGate = Runtime::commandLineStop($gated);
 $gated->opened = ['label' => 'gated', 'w' => str_repeat('g', 20), 'expire_at' => 1];
 $check(
-    $plainGate === ['error' => 'The inbox asks for more work than this call may take', 'fix' => 'Ask its owner for an inbox that asks for less.']
-        && Runtime::commandLineStop($gated) === ['opened' => $gated->opened, 'error' => 'The inbox asks for more work than this call may take', 'fix' => 'The channel gated is open and listed by `aamio channel list`: only the message carrying its address did not go. Ask its owner for an inbox that asks for less.'],
+    $plainGate === ['error' => 'The inbox asks for more work than this call may take', 'error_code' => 'gate', 'fix' => 'Ask its owner for an inbox that asks for less.']
+        && Runtime::commandLineStop($gated) === ['opened' => $gated->opened, 'error' => 'The inbox asks for more work than this call may take', 'error_code' => 'gate', 'fix' => 'The channel gated is open and listed by `aamio channel list`: only the message carrying its address did not go. Nothing was sent, so nobody has been given its address: close it with `aamio channel close gated`, and open a new one when the inbox\'s conditions can be met. Ask its owner for an inbox that asks for less.'],
     'a stop at the gate says the channel too, and is said as before when there is none'
 );
 $fake->refuse = true;
 $plainSend = $checkThrown(static fn () => $a->send($lineInbox, 'turned away'));
 $fake->refuse = false;
 $check(
-    $plainSend instanceof SendFailed && array_keys(Runtime::commandLineStop($plainSend)) === ['error', 'outcome', 'message_id', 'status', 'retryable', 'fix'],
-    'and a send with no channel behind it is printed in the fields it always was'
+    $plainSend instanceof SendFailed && array_keys(Runtime::commandLineStop($plainSend)) === ['error', 'error_code', 'outcome', 'message_id', 'status', 'retryable', 'fix'] && Runtime::commandLineStop($plainSend)['error_code'] === 'send_refused',
+    'and a send with no channel behind it is printed in the fields the other two runtimes print, error_code among them'
 );
 $lineSource = (string) file_get_contents(dirname(__DIR__) . '/bin/aamio');
 $check(
     substr_count($lineSource, 'out(Runtime::commandLineStop($error));') === 1 && str_contains($lineSource, 'catch (SendFailed | GateStop $error)') && !str_contains($lineSource, "'outcome' => \$error->outcome"),
     'the command line prints both through that one function'
+);
+
+// ---------------------------------------------------------------- board channel reads the gate before it opens
+//
+// A gate that cannot be met stopped the handover after the channel was open,
+// and it stayed open with nobody given its address.
+[$a, $b] = $checkPair('gated');
+$gatedInbox = $b->channels['inbox']->w;
+$a->peers[$gatedInbox] = $b->keys->public;
+$fake->threads[$gatedInbox]['gate'] = ['require' => ['captcha' => true]];
+$threadsBefore = count($fake->threads);
+$channelsBefore = array_keys($a->channels);
+$stopped = $checkThrown(static fn () => $a->openChannelWith($b->keys->public, 600, null, $gatedInbox));
+unset($fake->threads[$gatedInbox]['gate']);
+$check(
+    $stopped instanceof \Aamio\GateStop && count($fake->threads) === $threadsBefore && array_keys($a->channels) === $channelsBefore,
+    'board channel reads the gate of the inbox before it opens anything, and a gate that cannot be met leaves no channel behind',
+    $stopped === null ? 'nothing was thrown' : get_class($stopped) . ': ' . $stopped->getMessage()
 );
 
 // ---------------------------------------------------------------- the same bytes, read the same way
@@ -582,6 +600,31 @@ $check(
     $ambiguous === null ? 'nothing was thrown' : get_class($ambiguous)
 );
 $check($a->partnerRemove('ANN')['partner'] === 'ANN' && array_map(static fn (array $p): array => [$p['name'], $p['key']], $a->partnerList()) === [['Ann', $b->keys->public]], 'and the exact name removes that one alone');
+$byKey = $a->partnerRemove($b->keys->public);
+$check([$byKey['partner'], $byKey['known']] === ['Ann', true] && $a->partnerList() === [] && $a->partnerRemove($b->keys->public)['known'] === false, 'partner remove takes a key as well as a name, as a send does', json_encode($byKey));
+
+// ---------------------------------------------------------------- a 401 or a 409 is the service saying no
+//
+// Both are answered before anything is stored. A handover answered so said
+// the address may have arrived, and retry sent the same bytes again.
+[$a, $b] = $checkPair('refusals');
+$a->peers[$b->channels['inbox']->w] = $b->keys->public;
+foreach ([['full', 409], ['unsigned', 401]] as [$label, $status]) {
+    Http::$override = $answerWith($status, false);
+    try {
+        $answer = (new McpServer($a))->dispatch('aamio_open_channel', ['label' => $label, 'ttl' => 600, 'to' => 'b']);
+    } finally {
+        Http::$override = $fake;
+    }
+    $said = $answer['structuredContent'] ?? [];
+    $check(
+        [$said['outcome'] ?? null, $said['status'] ?? null, $said['retryable'] ?? null, $said['opened']['label'] ?? null] === ['refused', $status, false, $label]
+            && ($said['fix'] ?? null) === 'The channel ' . $label . ' is open and listed by aamio_channels: only the message carrying its address did not go. aamio refused it, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to.',
+        'a handover answered ' . $status . ' did not go, and the words say so',
+        json_encode($said)
+    );
+}
+$check($a->outboxPending() === [] && $a->outboxRetry() === [], 'and neither waits to be sent again, or is sent again by a retry of everything');
 
 // ---------------------------------------------------------------- a file of the home with a mark in front
 //
