@@ -716,6 +716,13 @@ $brCases = [
         => [$brRows([['instance' => $x, 'from_key' => 'a-key'], ['instance' => $x, 'from_key' => 'a-key']]), [[['a-key', true]], [['a-key', true]]]],
     'one not written down does not hide another that shows the same'
         => [$brRows([['instance' => $x, 'from_key' => 'a-key']], [['from_key' => 'a-key', 'archived' => false]]), [[['a-key', false], ['a-key', true]], [['a-key', false], ['a-key', true]]]],
+    // A row 0.3.16 wrote down carries no thread instance. Read again by a later version, the same answer has one, and
+    // nothing says the two are one delivery, so both are listed. An earlier release wrote the first row in the run
+    // that showed this (12 November 2026), and the README says so.
+    'a row from before the instance and a later reading of the same answer are both listed, in every process'
+        => [$brRows([['from_key' => 'a-key'], ['instance' => $x, 'from_key' => 'a-key']]), [[['a-key', true], ['a-key', true]], [['a-key', true], ['a-key', true]]]],
+    'and so they are when this process holds the later reading'
+        => [$brRows([['from_key' => 'a-key'], ['instance' => $x, 'from_key' => 'a-key']], [['from_key' => 'a-key', 'archived' => true, 'instance' => $x]]), [[['a-key', false], ['a-key', true]], [['a-key', false], ['a-key', true]]]],
 ];
 foreach ($brCases as $what => [$got, $want]) {
     $check($got === $want, $what, json_encode($got));
@@ -913,6 +920,136 @@ if ($owBlocker !== null) {
     @rmdir($owBlocker);
 }
 $ow->close();
+
+// An invitation that cannot be recorded with a scope held already is said in attention. The scope was held, the
+// reader was told kept, and that the invitation was not recorded with it stood in the log alone (a check of 0.7.42,
+// 11 November 2026).
+$nrHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-not-recorded';
+mkdir($nrHome, 0700, true);
+$nr = new Runtime($nrHome, 'https://fake.test', ['r10'], false, $r10Quiet);
+$nrSender = $r10Open();
+$nr->partnerAdd('sender', $nrSender->keys->public);
+$nrSender->partnerAdd('receiver', $nr->keys->public);
+$nr->read();
+$nrSender->read();
+$nrKey = Address::newScopeKey();
+$nrSender->send('receiver', 'Scope t', ['aamio_scope' => ['name' => 't', 'key' => $nrKey]]);
+$nrTaken = $nr->read();
+$nr->attentionTaken();
+$nrBefore = (string) file_get_contents($nrHome . DIRECTORY_SEPARATOR . 'scopes.json');
+$nrSender->send('receiver', 'Scope t again', ['aamio_scope' => ['name' => 't', 'key' => $nrKey]]);
+mkdir($nrHome . DIRECTORY_SEPARATOR . 'scopes.json.tmp');
+$nrGot = $nr->read();
+rmdir($nrHome . DIRECTORY_SEPARATOR . 'scopes.json.tmp');
+$nrSaid = $state($nr, 'scope_share_not_recorded');
+$check(
+    count($nrTaken) === 1 && count($nrGot) === 1 && ($nrGot[0]['body']['data']['aamio_scope']['kept'] ?? null) === true && ($nrGot[0]['body']['data']['aamio_scope']['name'] ?? null) === 'sender.t'
+        && count($nrSaid) === 1 && ($nrSaid[0]['seqs'] ?? null) === [$nrGot[0]['seq']] && str_contains($nrSaid[0]['what'], 'sender.t') && str_contains($nrSaid[0]['what'], 'would bring the scope back')
+        && (string) file_get_contents($nrHome . DIRECTORY_SEPARATOR . 'scopes.json') === $nrBefore && !str_contains(Codec::json([$nrGot, $nrSaid]), $nrKey),
+    'an invitation that cannot be recorded with a scope held already is said in attention, the scope stays as it is and nothing is held that was not written',
+    json_encode([count($nrGot), $nrGot[0]['body']['data']['aamio_scope'] ?? null, $nrSaid])
+);
+$nr->close();
+$nrSender->close();
+
+// An invitation taken by an earlier version is not known by its scope. As 0.3.17 left a home whose state.json could
+// not be written: the scope in scopes.json with no record of the invitation it came from, and the cursor before the
+// invitation. Removed here and read again, the invitation is a message never seen, and nothing ties it to the scope
+// that was removed, so it is taken (a check of 0.7.42). That is where the promise ends, and the README says so. This
+// check keeps the limit in sight: it is to be turned around the day the limit is closed.
+$ohHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-earlier-version';
+mkdir($ohHome, 0700, true);
+$oh = new Runtime($ohHome, 'https://fake.test', ['r10'], false, $r10Quiet);
+$ohSender = $r10Open();
+$oh->partnerAdd('sender', $ohSender->keys->public);
+$ohSender->partnerAdd('receiver', $oh->keys->public);
+$oh->read();
+$ohSender->read();
+$ohKey = Address::newScopeKey();
+$ohSender->send('receiver', 'Scope t', ['aamio_scope' => ['name' => 't', 'key' => $ohKey]]);
+mkdir($ohHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+$oh->poll($oh->channels['inbox']);
+$oh->close();
+rmdir($ohHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+$ohScopes = json_decode((string) file_get_contents($ohHome . DIRECTORY_SEPARATOR . 'scopes.json'), true);
+$ohHad = isset($ohScopes[0]['taken_from']);
+unset($ohScopes[0]['taken_from']);
+file_put_contents($ohHome . DIRECTORY_SEPARATOR . 'scopes.json', json_encode($ohScopes));
+$oh = new Runtime($ohHome, 'https://fake.test', ['r10'], false, $r10Quiet);
+$oh->scopeRemove('sender.t');
+$ohAfterRemove = json_decode((string) file_get_contents($ohHome . DIRECTORY_SEPARATOR . 'scopes.json'), true);
+[, $ohAgain] = $oh->poll($oh->channels['inbox']);
+$ohReadme = (string) preg_replace('/\s+/', ' ', (string) file_get_contents(dirname(__DIR__) . DIRECTORY_SEPARATOR . 'README.md'));
+$check(
+    $ohHad && $ohAfterRemove === [] && count($ohAgain) === 1 && ($ohAgain[0]['body']['data']['aamio_scope']['kept'] ?? null) === true
+        && str_contains($ohReadme, 'taken by 0.3.17 or earlier is not recorded with its scope') && str_contains($ohReadme, 'the 256 newest removed invitations'),
+    'an invitation taken by an earlier version is not known by its scope, so it is taken again after the scope was removed, and the README says so',
+    json_encode([$ohHad, $ohAfterRemove, $ohAgain[0]['body']['data']['aamio_scope'] ?? null])
+);
+$check(str_contains($ohReadme, '0.3.16 or earlier carries no thread instance'), 'the README says that a row from before the instance is listed beside a later reading of the same answer');
+$oh->close();
+$ohSender->close();
+
+// An answer read again after a restart is listed as it was first written down. Its cursor could not be written, its
+// hashes were, by the save of another channel in the same read, and after a restart it came again, replay true: right
+// for the read. The process that read it again listed it with that mark, and the next process with the first one (a
+// check of 0.7.42). One row, as first written down, in the process that first read it, in the one that read it again,
+// with its archive on or off, and in the next.
+$fwListed = static fn (Runtime $reader): array => array_map(static fn (array $reply): array => [$reply['seq'], $reply['replay'], $reply['from_archive'] ?? false], $reader->boardReplies());
+foreach ([[true, 'qo', 'with the archive on in every process'], [false, 'qp', 'also by a process with the archive off']] as [$fwLater, $fwLetters, $fwWhat]) {
+    $fwW = str_repeat($fwLetters, 10);
+    $fwHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-first-written-' . $fwLetters;
+    $fake->threads[$fwW] = ['id' => 'fw-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($fwW, 1, 'OK', $carol)], 'gate' => [], 'instance' => str_repeat('x', 16)];
+    $fw = new Runtime($fwHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+    $fw->channels['board'] = new Channel('board', 'fw-read-key', $fwW, $fake->now + 600);
+    $fw->saveState();
+    mkdir($fwHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+    [, $fwFirst] = $fw->poll($fw->channels['board']);
+    rmdir($fwHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+    $fwGot = [array_column($fwFirst, 'replay'), $fwListed($fw)];
+    // As the save of another channel in the same read leaves state.json: the hashes of this one, and its cursor at 0.
+    $fw->saveState();
+    $fw->close();
+    $fw = new Runtime($fwHome, 'https://fake.test', ['r10'], $fwLater, $r10Quiet);
+    [, $fwAgain] = $fw->poll($fw->channels['board']);
+    $fwGot[] = array_column($fwAgain, 'replay');
+    $fwGot[] = $fwListed($fw);
+    $fw->close();
+    $fw = new Runtime($fwHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+    $fwGot[] = $fwListed($fw);
+    $fw->close();
+    $check(
+        $fwGot === [[false], [[1, false, false]], [true], [[1, false, true]], [[1, false, true]]],
+        'an answer read again after a restart is listed as it was first written down, ' . $fwWhat,
+        json_encode($fwGot)
+    );
+}
+
+// Two faults at once: the archive refused the answer as it first came, and its cursor could not be written, so it was
+// read again and written down then, as a replay. The process that first handed it over still holds that, and lists it
+// as it first came. The next process has what was written down, and nothing else to go by.
+$dfW = str_repeat('qr', 10);
+$dfHome = $root . DIRECTORY_SEPARATOR . 'release-check-10-archive-refused';
+$fake->threads[$dfW] = ['id' => 'df-read-key', 'created_at' => $fake->now, 'expire_at' => $fake->now + 600, 'allow' => [], 'messages' => [$signedOn($dfW, 1, 'OK', $carol)], 'gate' => [], 'instance' => str_repeat('x', 16)];
+$df = new Runtime($dfHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+$df->channels['board'] = new Channel('board', 'df-read-key', $dfW, $fake->now + 600);
+$df->saveState();
+mkdir($dfHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+mkdir($dfHome . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'board.jsonl');
+[, $dfFirst] = $df->poll($df->channels['board']);
+rmdir($dfHome . DIRECTORY_SEPARATOR . 'state.json.tmp');
+rmdir($dfHome . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'board.jsonl');
+[, $dfSecond] = $df->poll($df->channels['board']);
+$dfGot = [array_column($dfFirst, 'replay'), array_column($dfFirst, 'archived'), array_column($dfSecond, 'replay'), $fwListed($df)];
+$df->close();
+$df = new Runtime($dfHome, 'https://fake.test', ['r10'], true, $r10Quiet);
+$dfGot[] = $fwListed($df);
+$df->close();
+$check(
+    $dfGot === [[false], [false], [true], [[1, false, false]], [[1, true, true]]],
+    'a first handover the archive refused stands while the process that made it runs, and the next process has what was written down',
+    json_encode($dfGot)
+);
 
 $pc->close();
 $pcSender->close();

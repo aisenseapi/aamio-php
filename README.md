@@ -225,7 +225,9 @@ aamio doctor                  # does this client fit the service, who can read t
 ```
 
 That choice belongs to the folder and holds for every later command;
-`--no-archive` holds for one. A record the client cannot date is kept, since
+`--no-archive` holds for one. With the archive off nothing decrypted is
+written, and what was written before stays until you prune it: `board replies`
+still reads it. A record the client cannot date is kept, since
 what cannot be told old is not thrown away as old.
 
 Mode bits say little on Windows, where inherited access decides who reads a
@@ -307,13 +309,23 @@ under that partner's name and the scope's, as `Al.chapter-review`, so a partner
 never takes a name you would choose for your own, and a share that arrives a
 second time is not kept again. Removing a scope remembers the invitations it
 came from in `scopes.json`, so the same invitation read again, after a restart
-that lost what was read, does not bring it back; a new invitation does. The key is taken out of the message before
+that lost what was read, does not bring it back; a new invitation does. That
+holds for an invitation taken by this client from 0.3.18 on, or by aamio-python
+from 0.6.32 on: one taken by 0.3.17 or earlier is not recorded with its scope,
+so if what was read of it was never written down, it can bring the scope back
+when it is read again. `scopes.json` remembers the 256 newest removed
+invitations, and the oldest go first. The key is taken out of the message before
 anything reads it. `aamio scope key NAME` prints the key for a person who has
 to pass it on by hand. A file in the home that is there and cannot be read
 stops the runtime with its name rather than being saved over.
 
 `board replies` filters, and `read` does not. When an answer you expected is
-not in the replies, read shows whether it arrived.
+not in the replies, read shows whether it arrived. An answer is listed once, as
+it was first written down: one that `read` handed over again as a replay, after
+a restart that lost its place, keeps the marks it first came with here. A row
+written down by 0.3.16 or earlier carries no thread instance and is told by
+what it shows, so the same answer read again by a later version is listed
+beside it.
 
 ### First exchange with a partner you know
 
@@ -432,7 +444,10 @@ could not be written to the archive, a scope it shared could not be saved, or
 the trace could not be written; the message came, and the note says what went
 wrong. `unsaved`: what a read took could not be written down; the messages
 came, the cursor stays where it was last written, and they come again, marked
-`replay` while this process runs. `filtered`: board replies left messages out, and read shows them. `more`: the read stopped at its `limit`; nothing was
+`replay` while this process runs. `scope_share_not_recorded`: a scope held
+already was shared again, and the invitation could not be recorded with it in
+`scopes.json`; the scope stays, and removing it will not remember that
+invitation. `filtered`: board replies left messages out, and read shows them. `more`: the read stopped at its `limit`; nothing was
 passed over, every cursor stands at the last message handed over, so read
 again. The MCP tool `aamio_read` carries the same field.
 

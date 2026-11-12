@@ -722,12 +722,9 @@ final class Runtime
         return true;
     }
 
-    /** @return string[] labels this runtime has an archive for, the ones a board inbox uses */
+    /** @return string[] labels this runtime has an archive for, the ones a board inbox uses, whether the archive is on or off */
     private function archiveLabels(string $prefix = ''): array
     {
-        if (!$this->archiveEnabled) {
-            return [];
-        }
         $labels = [];
         foreach ((array) @glob($this->path('archive' . DIRECTORY_SEPARATOR . $prefix . '*.jsonl')) as $file) {
             $labels[] = basename((string) $file, '.jsonl');
@@ -736,12 +733,16 @@ final class Runtime
         return $labels;
     }
 
-    /** Entries this client wrote down for a channel, oldest first; empty when archiving is off or the file is not there. */
+    /**
+     * Entries this client wrote down for a channel, oldest first; empty when
+     * the file is not there. With the archive off nothing is written, and what
+     * an earlier run wrote is still read: it stays the record of what arrived
+     * until it is pruned. A process with the archive off did not look, and
+     * listed an answer written down before it with the mark of its own later
+     * reading (a check of 11 November 2026).
+     */
     public function archived(string $label, string $kind): array
     {
-        if (!$this->archiveEnabled) {
-            return [];
-        }
         $path = $this->path('archive' . DIRECTORY_SEPARATOR . $label . '.jsonl');
         if (!is_file($path)) {
             return [];
@@ -1293,8 +1294,12 @@ final class Runtime
                 } catch (\Throwable $error) {
                     if ($plain) {
                         // Held from before, and shown as it is held: only the
-                        // record of this invitation was not written.
-                        ($this->log)(sprintf('scopes.json: the invitation in message %s was not recorded with scope %s: %s', (string) ($entry['seq'] ?? '?'), $held['name'], $error->getMessage()));
+                        // record of this invitation was not written. Said in
+                        // attention, where the reader looks: it stood in the
+                        // log alone, and the reader was told kept with nothing
+                        // more (a check of 11 November 2026).
+                        $seq = $entry['seq'] ?? null;
+                        $this->noteTrouble(is_string($entry['channel'] ?? null) ? $entry['channel'] : 'scopes', 'scope_share_not_recorded', 'message ' . (is_int($seq) ? $seq : 'without a seq') . ' shared scope ' . (is_string($share['name'] ?? null) ? $share['name'] : '(unnamed)') . ', which is held here already as ' . $held['name'] . ', and the invitation could not be recorded with it in scopes.json: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage() . '. The scope stays as it is. Removing it will not remember this invitation, so the same message read again after that would bring the scope back.', is_string($entry['w'] ?? null) ? $entry['w'] : null, is_int($seq) ? [$seq] : null);
                         $entry['body']['data']['aamio_scope'] = $shown;
 
                         return;
@@ -2105,11 +2110,46 @@ final class Runtime
         // by its address, instance and seq, and the first of its copies stands,
         // as it was first handed over: a copy in memory that knew only what it
         // showed hid an answer on the other thread, and a delivery read twice
-        // was listed twice (a check of the same day). Any other row is told by
-        // all it shows, its verified signer too, and two such rows that show the
-        // same are both kept: nothing says they are one.
+        // was listed twice (a check of the same day). The first copy is the one
+        // the archive has from before, when it has one this process did not
+        // write: an answer read again after a restart was listed with the mark
+        // of the reading, replay, by the process that read it, and with the
+        // mark it first came with by the next (a check of 0.7.42, the same
+        // day). Any other row is told by all it shows, its verified signer too,
+        // and two such rows that show the same are both kept: nothing says they
+        // are one.
         $one = static fn (array $entry): ?string => is_string($entry['instance'] ?? null) ? (string) json_encode([$entry['w'] ?? null, $entry['instance'], $entry['seq'] ?? null]) : null;
         $shown = static fn (array $entry): string => (string) json_encode([$entry['w'] ?? null, $entry['seq'] ?? null, $entry['at'] ?? null, $entry['sha256'] ?? null, $entry['from_key'] ?? null]);
+        // A board inbox is renewed while the old one still holds answers, and
+        // the old one keeps its own label and its own archive. Once that
+        // channel expires it leaves $this->channels, and reading only the
+        // channels this process holds made those answers vanish from here
+        // although they had arrived, been decrypted and been written down.
+        $labels = array_unique(array_merge(array_keys($this->channels), ['board'], $this->archiveLabels()));
+        sort($labels);
+        $archivedBy = [];
+        // A delivery the archive has more rows of than this process wrote was
+        // written down before this process read it: that row is its first copy,
+        // and the copies held here are later readings of it.
+        $stored = [];
+        foreach ($labels as $label) {
+            $archivedBy[$label] = $this->archived($label, 'received');
+            foreach ($archivedBy[$label] as $entry) {
+                $delivery = $one($entry);
+                if ($delivery !== null) {
+                    $stored[$delivery] = ($stored[$delivery] ?? 0) + 1;
+                }
+            }
+        }
+        $written = [];
+        foreach ($this->channels as $channel) {
+            foreach ($channel->received as $entry) {
+                $delivery = $one($entry);
+                if ($delivery !== null && ($entry['archived'] ?? null) !== false) {
+                    $written[$delivery] = ($written[$delivery] ?? 0) + 1;
+                }
+            }
+        }
         // A copy in memory without the instance, from a service that names
         // none, has its row in the archive as well when it was written down,
         // and stands for one row there that shows the same. One that was not
@@ -2121,7 +2161,7 @@ final class Runtime
             foreach ($channel->received as $entry) {
                 $delivery = $one($entry);
                 if ($delivery !== null) {
-                    if (isset($named[$delivery])) {
+                    if (isset($named[$delivery]) || ($stored[$delivery] ?? 0) > ($written[$delivery] ?? 0)) {
                         continue;
                     }
                     $named[$delivery] = true;
@@ -2135,15 +2175,8 @@ final class Runtime
                 }
             }
         }
-        // A board inbox is renewed while the old one still holds answers, and
-        // the old one keeps its own label and its own archive. Once that
-        // channel expires it leaves $this->channels, and reading only the
-        // channels this process holds made those answers vanish from here
-        // although they had arrived, been decrypted and been written down.
-        $labels = array_unique(array_merge(array_keys($this->channels), ['board'], $this->archiveLabels()));
-        sort($labels);
         foreach ($labels as $label) {
-            foreach ($this->archived($label, 'received') as $entry) {
+            foreach ($archivedBy[$label] as $entry) {
                 $delivery = $one($entry);
                 if ($delivery !== null) {
                     if (isset($named[$delivery])) {
@@ -3853,7 +3886,7 @@ final class Runtime
     {
         $key = $where . '|' . $state;
         $note = ['channel' => $where, 'w' => $w, 'state' => $state, 'what' => $what, 'at' => time()];
-        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict', 'archive_failed', 'scope_not_saved', 'replay_unknown'], true) && $seqs !== null) {
+        if (in_array($state, ['kept_out', 'unverified', 'binding_conflict', 'archive_failed', 'scope_not_saved', 'scope_share_not_recorded', 'replay_unknown'], true) && $seqs !== null) {
             $previous = $this->attention[$key] ?? [];
             $note['seqs'] = array_merge($previous['seqs'] ?? [], $seqs);
             $note['count'] = count($note['seqs']);
