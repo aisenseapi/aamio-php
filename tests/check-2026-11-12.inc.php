@@ -479,6 +479,22 @@ $check(
     'the command line prints both through that one function'
 );
 
+// ---------------------------------------------------------------- a post as long as an inbox lives
+//
+// The lifetime is in the body the board's work covers, so it is set before
+// the work: this runtime did not shorten it, and the board refused it.
+[$a, $b] = $checkPair('hour');
+$hour = $a->boardPost('need', 'a whole hour', 'as long as it may', null, 3600);
+$usual = $a->boardPost('need', 'twenty minutes', 'well inside', null, 1200);
+// The inbox's time as the runtime counts it: the stand-in's clock is the one this suite started with.
+$hourLeft = $a->channels['board']->expireAt - time();
+$check(
+    Runtime::BOARD_POST_MARGIN === 30 && $hour['post']['ttl'] <= $hourLeft - 28 && $hour['post']['ttl'] >= $hourLeft - 32 && $hour['post']['ttl'] < 3600
+        && $usual['post']['ttl'] === 1200,
+    'a post asked for as long as an inbox lives leaves the inbox room for the work and the round trip, and one well inside keeps its lifetime',
+    json_encode([$hour['post']['ttl'] ?? null, $usual['post']['ttl'] ?? null])
+);
+
 // ---------------------------------------------------------------- board channel reads the gate before it opens
 //
 // A gate that cannot be met stopped the handover after the channel was open,

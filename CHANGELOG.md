@@ -95,6 +95,11 @@ not what moved in the source.
   It answered every status alike, with `post`, `status` and `withdrawn`, and
   wrote the record of a withdrawal that had not happened. The record has the
   post's id under `id`, as the other two write it.
+- A post asked for as long as an inbox lives, `--ttl 3600`, is taken by the
+  board. Its lifetime was not shortened at all, and the board refused it as
+  outliving the inbox. It leaves the inbox 30 seconds now for the work the
+  board advises and the round trip, as aamio-python and the Node runtime do
+  from the same release.
 - A channel whose address the service turned away, or a gate stopped, is
   answered with what to do about it: nobody has the address, so close the
   channel and open a new one. The advice was to send the corrected message as

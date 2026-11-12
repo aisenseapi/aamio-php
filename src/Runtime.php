@@ -21,6 +21,13 @@ final class Runtime
 {
     public const INBOX_TTL = 3600;
     public const BOARD_TTL = 1800;
+    // What a post leaves its inbox: time for the work the board advises and
+    // the round trip. The board refuses a post that would outlive the inbox
+    // when it arrives, and the lifetime is in the body the work covers, so it
+    // is set before the work is done. This runtime did not shorten a post at
+    // all, and one asked for as long as an inbox lives was always refused (a
+    // check of 12 November 2026). The same in aamio-python and the Node runtime.
+    public const BOARD_POST_MARGIN = 30;
     public const ANSWER_MARGIN = 600;
     public const PRESENCE_TTL = 120;
     public const PRESENCE_REFRESH = 60;
@@ -1951,8 +1958,11 @@ final class Runtime
     {
         // Before the inbox is opened, so a name that is not here costs nothing.
         $held = $scope !== null ? $this->scopeNamed($scope) : null;
-        $inbox = $this->ensureBoardInbox($ttl + 60);
-        $post = ['kind' => $kind, 'title' => $title, 'text' => $text, 'tags' => array_values($tags ?? []), 'w' => $inbox->w, 'ttl' => $ttl];
+        $inbox = $this->ensureBoardInbox($ttl + self::BOARD_POST_MARGIN);
+        // At the top of the range the inbox cannot be opened for longer than
+        // the post asked for, so the post gives way, not the promise.
+        $life = min($ttl, $inbox->expireAt - time() - self::BOARD_POST_MARGIN);
+        $post = ['kind' => $kind, 'title' => $title, 'text' => $text, 'tags' => array_values($tags ?? []), 'w' => $inbox->w, 'ttl' => $life];
         if ($lang !== null) {
             $post['lang'] = $lang;
         }
