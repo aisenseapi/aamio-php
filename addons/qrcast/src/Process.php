@@ -33,7 +33,7 @@ final class Process
 {
     public const CONTRACT = 2;
     public const NAME = 'qrcast';
-    public const VERSION = '0.1.1';
+    public const VERSION = '0.1.2';
     public const TOOL = 'aamio_addon_qrcast_';
     public const EXIT_CODES = ['card' => 0, 'shown' => 0, 'written' => 0, 'seen' => 0, 'nothing_seen' => 3, 'not_understood' => 3, 'expired' => 3, 'invalid' => 2, 'unreachable' => 5];
     public const SECONDS_DEFAULT = 20;

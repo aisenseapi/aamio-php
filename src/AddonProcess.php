@@ -611,6 +611,26 @@ final class AddonProcess
         return $path;
     }
 
+    /**
+     * The add-on's own directory for this call, or the answer that says it
+     * could not be made. A home whose disk is full, or with a file in the way
+     * of addons/, stops the call before the process starts, as an answer like
+     * any other. The call used to go on, and the add-on was told of a
+     * directory that was not there (a check of 12 November 2026, found while
+     * the Node runtime's add-ons were built).
+     *
+     * @return array{0: ?string, 1: ?array<string, mixed>}
+     */
+    private static function ownDirectory(Runtime $runtime, AddonManifest $manifest): array
+    {
+        $path = self::stateDir($runtime, $manifest);
+        if (is_dir($path)) {
+            return [$path, null];
+        }
+
+        return [null, self::failure($manifest, 'addon_failed', 'the add-on ' . $manifest->name . ' has no directory of its own: addons/' . $manifest->name . ' in the home could not be made. Nothing of the add-on ran. Check the disk and the home\'s permissions.')];
+    }
+
     // ------------------------------------------------------------- the command line
 
     private static function out(mixed $value): void
@@ -784,6 +804,12 @@ final class AddonProcess
 
             return 2;
         }
+        [$directory, $noDirectory] = $runtime !== null ? self::ownDirectory($runtime, $manifest) : [null, null];
+        if ($noDirectory !== null) {
+            self::out($noDirectory['result']);
+
+            return $noDirectory['exit_code'];
+        }
         $busy = self::take($manifest->name);
         if ($busy !== null) {
             self::out(self::refusal(new AddonRefused($busy, 'At most ' . self::MAX_AT_ONCE . ' calls of the add-on ' . $manifest->name . ' run at once and ' . self::MAX_PER_WINDOW . ' start per minute here. Nothing was done. Try again shortly.', 'unreachable'), $host));
@@ -791,7 +817,7 @@ final class AddonProcess
             return 5;
         }
         try {
-            $answer = self::run($manifest, 'command', $name, $arguments, $subject, $ownKey, $runtime !== null ? self::stateDir($runtime, $manifest) : null, static function (string $text): void {
+            $answer = self::run($manifest, 'command', $name, $arguments, $subject, $ownKey, $directory, static function (string $text): void {
                 fwrite(STDERR, $text);
             });
         } finally {
@@ -892,12 +918,16 @@ final class AddonProcess
         } catch (AddonRefused $refused) {
             return McpServer::resultOf(self::refusal($refused, $host, $subject), true);
         }
+        [$directory, $noDirectory] = self::ownDirectory($runtime, $manifest);
+        if ($noDirectory !== null) {
+            return McpServer::resultOf($noDirectory['result'], true);
+        }
         $busy = self::take($manifest->name);
         if ($busy !== null) {
             return McpServer::resultOf(self::refusal(new AddonRefused($busy, 'At most ' . self::MAX_AT_ONCE . ' calls of the add-on ' . $manifest->name . ' run at once and ' . self::MAX_PER_WINDOW . ' start per minute here. Nothing was done. Try again shortly.', 'unreachable'), $host), true);
         }
         try {
-            $answer = self::run($manifest, 'tool', $name, $arguments, $subject, $ownKey, self::stateDir($runtime, $manifest));
+            $answer = self::run($manifest, 'tool', $name, $arguments, $subject, $ownKey, $directory);
         } finally {
             self::giveBack($manifest->name);
         }

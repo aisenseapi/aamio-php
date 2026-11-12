@@ -4,6 +4,13 @@ aisenseapi/aamio-earshot, the add-on, called aisenseapi/aamio-sound up to 0.2.0.
 committed; it is tagged on release, and the two are the same day. Every entry
 says what changed for somebody using it.
 
+## 0.3.3 - 2026-11-12
+
+- Nothing changed in this edition. The number is the add-on's, the same for
+  aamio-python, aamio-php and Node: in the edition for aamio-python, a card
+  whose time is far ahead stopped the listener on Windows, and 0.3.3 puts that
+  right there. This edition heard such a card already.
+
 ## 0.3.2 - 2026-11-09
 
 - When aisenseapi.com answers but cannot do the work, with a 503 or a 429, or

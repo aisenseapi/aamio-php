@@ -424,6 +424,13 @@ any more. When the service does not answer, or answers anything else, the
 thread may still be there, so the channel is kept and still read, and the
 answer says `closed_here: false` with a note. Close it again, or let it expire.
 
+Closing deletes the thread, not the address. A partner who still holds the
+address can write to it afterwards: the first write opens a new thread there,
+with no list and no gate, the writer is answered that it was stored, and
+nobody reads it, since this home no longer holds the channel. The same holds
+once a thread has expired and been swept. So tell whoever writes there that
+the channel is closed.
+
 ### Moving a conversation to a private thread
 
 ```

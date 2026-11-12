@@ -41,11 +41,18 @@ final class AddonManifest implements Addon
             throw new \RuntimeException($this->label() . ' cannot be used as an add-on: ' . $what . '. Reinstall it, or ' . $fix . ' to go on without it.');
         };
         $name = $data['name'] ?? null;
-        if (!is_string($name) || preg_match('/^[a-z0-9][a-z0-9_-]{0,31}$/', $name) !== 1) {
+        // To the very end: with $ a name that ends in a line break was taken, and it names files in the home.
+        if (!is_string($name) || preg_match('/\A[a-z0-9][a-z0-9_-]{0,31}\z/', $name) !== 1) {
             $wrong('its manifest has no name of 1 to 32 characters of a-z, 0-9, dash and underscore');
         }
         if (in_array($name, AddonProcess::RESERVED, true)) {
             throw new \RuntimeException($this->label() . ' cannot be called ' . $name . ': that is a command of aamio addon itself. To go on without it: ' . $fix . '.');
+        }
+        // The short name is the name of the add-on's list of websites and of
+        // its own directory in the home. On Windows a file of a device's name
+        // is the device: a list written to nul.hosts.json is written nowhere.
+        if (preg_match('/\A(?:con|prn|aux|nul|com[0-9]|lpt[0-9])\z/', $name) === 1) {
+            $wrong('its manifest\'s name, ' . $name . ', is one Windows keeps for a device, and it names the add-on\'s files in the home');
         }
         $this->name = $name;
         $version = $data['version'] ?? null;

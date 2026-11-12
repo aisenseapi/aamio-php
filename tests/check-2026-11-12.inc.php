@@ -346,6 +346,8 @@ $check(
 $checkTools = array_column(json_decode((string) file_get_contents(dirname(__DIR__) . '/src/mcp-tools.json'), true)['tools'], null, 'name');
 $check(
     str_contains($checkTools['aamio_close_channel']['description'], 'when the service does not say the thread is gone, the channel is kept and still read')
+        && str_contains($checkTools['aamio_close_channel']['description'], 'The address is not closed: whoever still holds it can write there afterwards')
+        && !str_contains($checkTools['aamio_close_channel']['description'], 'gone for everyone')
         && str_contains((string) ($checkTools['aamio_close_channel']['inputSchema']['properties']['label']['description'] ?? ''), 'as aamio_channels shows it')
         && str_contains((string) ($checkTools['aamio_open_channel']['inputSchema']['properties']['label']['description'] ?? ''), 'letters, digits, dots, dashes and underscores, and not starting with inbox or board'),
     'and the tools say what a close answers and what a label may be'

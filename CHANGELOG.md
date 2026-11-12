@@ -73,6 +73,19 @@ not what moved in the source.
   its name. The archive was listed with a pattern over the home's path, and a
   bracket in the path made the pattern match no file, so those answers were
   left out with nothing said.
+- `aamio_close_channel` and the README say what a close does not do: the
+  address is not closed. Whoever still holds it can write there afterwards,
+  which opens a new thread with no list and no gate that nobody reads, and
+  the writer is answered that it was stored. The tool said the thread was
+  gone for everyone holding its address.
+- An add-on whose own directory cannot be made, with a file in the way of
+  `addons/` in the home or a full disk, is an answer, `addon_failed`, and
+  nothing of the add-on runs. The call went on, and the add-on was told of a
+  directory that was not there.
+- An add-on's short name cannot be a name Windows keeps for a device, such as
+  `nul`. It names the add-on's list of websites and its own directory in the
+  home, and a list written to `nul.hosts.json` is written nowhere. A name
+  that ends in a line break is refused as well.
 
 ## 0.3.18 - 2026-11-11
 

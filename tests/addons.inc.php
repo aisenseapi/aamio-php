@@ -775,6 +775,50 @@ if (!class_exists(InstalledVersions::class, false)) {
     $threw = $refused(static fn () => Addons::enable('claims'));
     $check($threw !== null && str_contains($threw, 'contract 2') && str_contains($threw, 'aamio-addon.json') && $enabledFile() === ['enabled' => []], 'a package that claims contract 2 without a manifest is refused');
 
+    // A short name that is a device's on Windows is refused, and so is one that ends in a line break: the name
+    // is the name of the add-on's list of websites and of its own directory in the home.
+    $device = $pkg('demo-nul', 'acme/demo-nul', 'nul', $manifestFor('nul'));
+    $ending = $pkg('demo-end', 'acme/demo-end', "demoend\n", $manifestFor("demoend\n"));
+    Addons::useInstalled([$device, $ending]);
+    Addons::reset();
+    $threw = $refused(static fn () => Addons::enable('acme/demo-nul'));
+    $threwEnding = $refused(static fn () => Addons::enable('acme/demo-end'));
+    $rows = Addons::describe()['addons'];
+    $check(
+        $threw !== null && str_contains($threw, "its manifest's name, nul, is one Windows keeps for a device, and it names the add-on's files in the home")
+            && str_contains($rows[0]['error'] ?? '', 'one Windows keeps for a device') && $threwEnding !== null && str_contains($threwEnding, 'its manifest has no name of 1 to 32 characters')
+            && $enabledFile() === ['enabled' => []] && $ran('demo-nul') === '' && $ran('demo-end') === '',
+        "a short name that is a device's on Windows, or that ends in a line break, is refused, and nothing of the add-on runs",
+        json_encode([$threw, $threwEnding])
+    );
+
+    // An add-on whose own directory cannot be made is an answer, on the command line and over the server, and
+    // nothing of it runs: a file stands where the home keeps what belongs to add-ons.
+    Addons::useInstalled([$two]);
+    Addons::reset();
+    Addons::enable('demo2');
+    $before = $ran('demo2');
+    $inTheWay = $home . DIRECTORY_SEPARATOR . 'addons';
+    rename($inTheWay, $inTheWay . '.kept');
+    file_put_contents($inTheWay, 'in the way');
+    $runtime = new Runtime($home, 'https://fake.test', null, false, $quiet);
+    $said = Addons::dispatch($runtime, 'aamio_addon_demo2_ping', [], null);
+    $runtime->close();
+    [$code, $out] = $cli(['addon', 'demo2', 'ping']);
+    [$localCode] = $cli(['addon', 'demo2', 'local', 'somewhere']);
+    unlink($inTheWay);
+    rename($inTheWay . '.kept', $inTheWay);
+    $got = json_decode($out, true) ?? [];
+    $check(
+        ($said['isError'] ?? null) === true && ($said['structuredContent']['reason'] ?? null) === 'addon_failed'
+            && str_contains((string) ($said['structuredContent']['fix'] ?? ''), 'the add-on demo2 has no directory of its own: addons/demo2 in the home could not be made. Nothing of the add-on ran.')
+            && $code === 5 && ($got['status'] ?? null) === 'unreachable' && ($got['reason'] ?? null) === 'addon_failed' && ($got['addon'] ?? null) === 'demo2',
+        'an add-on whose own directory cannot be made is an answer, on the command line and over the server',
+        json_encode([$said['structuredContent'] ?? null, $code, $got])
+    );
+    $check($ran('demo2') === $before . "command local\n" && $localCode === 0, 'nothing of it ran for those calls, and a command that needs no home needs no directory, and runs', json_encode([$ran('demo2'), $localCode]));
+    Addons::disable('demo2');
+
     // The files of a call live in a directory of their own, private from the start, and are gone afterwards.
     Addons::useInstalled([$two]);
     Addons::reset();
