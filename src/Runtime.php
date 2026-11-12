@@ -824,7 +824,7 @@ final class Runtime
             throw new \InvalidArgumentException('not a base64url Ed25519 public key of 32 bytes');
         }
         foreach ($this->partners as $p) {
-            if ($p['name'] !== $name && strtolower($p['name']) === strtolower($name) && $p['key'] !== $key) {
+            if ($p['name'] !== $name && CaseFold::lower($p['name']) === CaseFold::lower($name) && $p['key'] !== $key) {
                 throw new AmbiguousPartner(sprintf('%s is in the address book with another key, and %s differs from it only in upper and lower case, which would make a send by name a guess. Give %s exactly to replace its key, or choose another name.', $p['name'], $name, $p['name']));
             }
         }
@@ -939,7 +939,8 @@ final class Runtime
                 return $p;
             }
         }
-        $folded = array_values(array_filter($this->partners, static fn (array $p): bool => strtolower($p['name']) === strtolower($name)));
+        // Lowered as aamio-python and the Node runtime lower it, outside ASCII too.
+        $folded = array_values(array_filter($this->partners, static fn (array $p): bool => CaseFold::lower($p['name']) === CaseFold::lower($name)));
         if (count($folded) > 1) {
             throw new AmbiguousPartner(sprintf('%d partners are called %s apart from upper and lower case (%s). Give the name exactly as it is in the address book, or the key.', count($folded), $name, implode(', ', array_column($folded, 'name'))));
         }
@@ -989,11 +990,11 @@ final class Runtime
             $key = is_array($scope) ? ($scope['key'] ?? null) : null;
             if (is_array($scope)
                 && is_string($scope['name'] ?? null) && preg_match(self::SCOPE_NAME, $scope['name']) === 1
-                && !isset($names[strtolower($scope['name'])])
+                && !isset($names[CaseFold::lower($scope['name'])])
                 && is_string($scope['address'] ?? null) && Address::isW($scope['address'])
                 && ($key === null || (is_string($key) && Address::isScopeKey($key) && Address::scope($key) === $scope['address']))) {
                 $usable[] = $scope;
-                $names[strtolower($scope['name'])] = true;
+                $names[CaseFold::lower($scope['name'])] = true;
             } else {
                 $aside[] = $entry;
             }
@@ -1055,7 +1056,7 @@ final class Runtime
     private function scopeIndex(string $name): ?int
     {
         foreach ($this->scopes as $i => $scope) {
-            if (strtolower($scope['name']) === strtolower($name)) {
+            if (CaseFold::lower($scope['name']) === CaseFold::lower($name)) {
                 return $i;
             }
         }
@@ -1689,9 +1690,9 @@ final class Runtime
     /** The channel a label names, apart from upper and lower case: two labels that differ only so are one file in the archive where the file system says so. */
     private function channelCalled(string $label): ?Channel
     {
-        $wanted = strtolower($label);
+        $wanted = CaseFold::lower($label);
         foreach ($this->channels as $channel) {
-            if (strtolower($channel->label) === $wanted) {
+            if (CaseFold::lower($channel->label) === $wanted) {
                 return $channel;
             }
         }

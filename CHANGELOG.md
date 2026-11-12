@@ -95,6 +95,14 @@ not what moved in the source.
   It answered every status alike, with `post`, `status` and `withdrawn`, and
   wrote the record of a withdrawal that had not happened. The record has the
   post's id under `id`, as the other two write it.
+- A partner's name is compared apart from upper and lower case in all of
+  Unicode, as aamio-python and the Node runtime compare it. It was lowered in
+  ASCII alone, so `partner add` took `Åse` and `åse` with two keys as two
+  partners, and `partner remove åse` did not find `Åse`, in a home the other
+  two runtimes read as one partner. The lower case comes from a table,
+  `src/CaseFold.php`, which `tools/make-case-fold.py` writes from Python 3.14
+  (Unicode 16.0), since mbstring is not in every PHP. Scope names and channel
+  labels are compared the same way.
 - A post asked for as long as an inbox lives, `--ttl 3600`, is taken by the
   board. Its lifetime was not shortened at all, and the board refused it as
   outliving the inbox. It leaves the inbox 30 seconds now for the work the

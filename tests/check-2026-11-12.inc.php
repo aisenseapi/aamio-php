@@ -619,6 +619,69 @@ $check($a->partnerRemove('ANN')['partner'] === 'ANN' && array_map(static fn (arr
 $byKey = $a->partnerRemove($b->keys->public);
 $check([$byKey['partner'], $byKey['known']] === ['Ann', true] && $a->partnerList() === [] && $a->partnerRemove($b->keys->public)['known'] === false, 'partner remove takes a key as well as a name, as a send does', json_encode($byKey));
 
+// ---------------------------------------------------------------- names apart from upper and lower case, outside ASCII too
+//
+// aamio-python and the Node runtime lower a name in all of Unicode before they
+// compare it. This runtime lowered ASCII alone, so where a letter outside it
+// made the difference, a name in another case was another partner here and the
+// same partner there, in a home all three can open.
+$folds = [
+    // A text, and its lower case as str.lower() of Python 3.14 gives it, in hex.
+    ["\u{C5}se", 'c3a57365'],
+    ["\u{D8}YSTEIN", 'c3b879737465696e'],
+    ["\u{C9}lise", 'c3a96c697365'],
+    ["\u{130}STANBUL", '69cc877374616e62756c'],
+    ["\u{39F}\u{394}\u{3A5}\u{3A3}\u{3A3}\u{395}\u{391}\u{3A3}", 'cebfceb4cf85cf83cf83ceb5ceb1cf82'],
+    ["\u{3A3}\u{391}", 'cf83ceb1'],
+    ["\u{3A3}", 'cf83'],
+    ["\u{391}\u{3A3}.\u{392}", 'ceb1cf832eceb2'],
+    ["\u{391}\u{3A3}.", 'ceb1cf822e'],
+    ["\u{5D0}\u{3A3}", 'd790cf83'],
+    ["\u{391}\u{3A3}\u{301}", 'ceb1cf82cc81'],
+    ["\u{212A}", '6b'],
+    ["\u{1E9E}", 'c39f'],
+    ["\u{1C4}\u{1C5}", 'c786c786'],
+    ["\u{10400}", 'f09090a8'],
+    ["\u{13A0}", 'eaadb0'],
+    ["ABC", '616263'],
+    // Not UTF-8: lowered as bytes, as before.
+    ["\xC5SE", 'c57365'],
+];
+$foldedWrong = [];
+foreach ($folds as [$text, $lower]) {
+    if (bin2hex(\Aamio\CaseFold::lower($text)) !== $lower) {
+        $foldedWrong[] = [bin2hex($text), bin2hex(\Aamio\CaseFold::lower($text)), $lower];
+    }
+}
+$check(
+    $foldedWrong === [] && \Aamio\CaseFold::UNICODE === '16.0.0',
+    'a name is lowered as aamio-python lowers it, outside ASCII and at the end of a Greek word too, with the Unicode of Python 3.14',
+    json_encode($foldedWrong)
+);
+[$a, $b] = $checkPair('fold');
+$a->partnerAdd("\u{C5}se", Keys::generate()->public);
+$twin = $checkThrown(static fn () => $a->partnerAdd("\u{E5}se", Keys::generate()->public));
+$check(
+    $twin instanceof \Aamio\AmbiguousPartner && array_column($a->partnerList(), 'name') === ['b', "\u{C5}se"],
+    'a name that differs from one in the book only in the case of a letter outside ASCII is refused with another key, as the other two runtimes refuse it',
+    $twin === null ? json_encode(array_column($a->partnerList(), 'name')) : get_class($twin)
+);
+$found = $a->partnerByName("\u{C5}SE");
+$gone = $a->partnerRemove("\u{E5}SE");
+$check(
+    ($found['name'] ?? null) === "\u{C5}se" && [$gone['partner'], $gone['known']] === ["\u{C5}se", true] && array_column($a->partnerList(), 'name') === ['b'],
+    'and a name in another case finds that partner, and removes it',
+    json_encode([$found, $gone])
+);
+$a->partners = [['name' => "\u{D8}ystein", 'key' => Keys::generate()->public], ['name' => "\u{D8}YSTEIN", 'key' => Keys::generate()->public]];
+$a->saveJson('partners.json', $a->partners);
+$both = $checkThrown(static fn () => $a->partnerRemove("\u{F8}ystein"));
+$check(
+    $both instanceof \Aamio\AmbiguousPartner && count($a->partnerList()) === 2,
+    'two names that differ only so are refused as ambiguous, and nothing is removed',
+    $both === null ? 'nothing was thrown' : get_class($both)
+);
+
 // ---------------------------------------------------------------- a 401 or a 409 is the service saying no
 //
 // Both are answered before anything is stored. A handover answered so said
