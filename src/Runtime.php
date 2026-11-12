@@ -1962,14 +1962,16 @@ final class Runtime
         // Where the answers go, and how to read them, in the answer itself. An
         // agent took board replies for the whole inbox, got nothing back, and
         // spent an hour decrypting by hand what read would have shown at once.
-        // The post as the board stored it, the inbox its answers go to and
-        // where they arrive, in the fields aamio-python and the Node runtime
-        // answer with: post, inbox and answers_arrive_on. This runtime named
-        // them id, reply_inbox and replies_arrive_on, and gave kind, title,
-        // expire_at and work_bits of the post a second time beside it, so a
-        // caller written for one runtime read nothing from another. They are
-        // gone, not kept beside the new ones: what the post holds is in post.
-        $posted = ['post' => $answer, 'inbox' => $inbox->w, 'answers_arrive_on' => 'board', 'read_them_with' => 'Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.'];
+        // The post as the board stored it, the inbox its answers go to, until
+        // when that inbox is open and where the answers arrive, in the fields
+        // aamio-python and the Node runtime answer with: post, inbox,
+        // inbox_expires_at and answers_arrive_on. This runtime named them id,
+        // reply_inbox and replies_arrive_on, and gave kind, title, expire_at
+        // and work_bits of the post a second time beside it, so a caller
+        // written for one runtime read nothing from another. They are gone,
+        // not kept beside the new ones: what the post holds is in post. The
+        // inbox's time is not the post's, so it is said, in all three.
+        $posted = ['post' => $answer, 'inbox' => $inbox->w, 'inbox_expires_at' => $inbox->expireAt, 'answers_arrive_on' => 'board', 'read_them_with' => 'Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.'];
         if ($held !== null) {
             $posted['scope'] = $held['name'];
         }
@@ -2900,6 +2902,51 @@ final class Runtime
     public static function handoverUnsettled(string $outcome): bool
     {
         return !in_array($outcome, ['refused', 'never_sent'], true);
+    }
+
+    /**
+     * What comes first in the fix when a channel was opened and the message
+     * carrying its address was stopped. $listed is where the caller sees its
+     * channels: aamio_channels over the local server, `aamio channel list` on
+     * the command line. $outcome is the send's, or null for a stop at the
+     * gate, where nothing went.
+     */
+    public static function handoverStill(?array $opened, ?string $outcome, string $listed): string
+    {
+        if ($opened === null) {
+            return '';
+        }
+        if ($outcome !== null && self::handoverUnsettled($outcome)) {
+            return 'The channel ' . $opened['label'] . ' is open and listed by ' . $listed . ', and the message carrying its address may have arrived: its outcome is not known. '
+                . 'Do not open another channel for this: a new attempt is the same message, under the same message_id. ';
+        }
+
+        return 'The channel ' . $opened['label'] . ' is open and listed by ' . $listed . ': only the message carrying its address did not go. ';
+    }
+
+    /**
+     * What the command line prints for a send that failed or a stop at the
+     * gate. With a channel that was opened for a message that was then
+     * stopped, the channel is in opened and the fix says first that it is
+     * open. Only the local server said that: on the command line it was a
+     * thread the caller was never told about (a check of 12 November 2026).
+     */
+    public static function commandLineStop(SendFailed|GateStop $error): array
+    {
+        $opened = $error->opened === null ? [] : ['opened' => $error->opened];
+        if ($error instanceof GateStop) {
+            return $opened + ['error' => $error->getMessage(), 'fix' => self::handoverStill($error->opened, null, '`aamio channel list`') . $error->fix];
+        }
+        [$retryable, $fix] = self::sendAdvice($error->outcome, $error->status);
+        // A channel whose address never left: there is nothing to send again,
+        // and an address goes only with a channel.
+        if ($error->opened !== null && $error->outcome === 'never_sent') {
+            $fix = 'Nothing left this machine, so nobody has been given its address. Close it with `aamio channel close ' . $error->opened['label'] . '`, put right what the error says, and open a new one.';
+        }
+
+        return $opened
+            + ['error' => $error->getMessage(), 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::handoverStill($error->opened, $error->outcome, '`aamio channel list`') . $fix]
+            + $error->traceSaid() + $error->archiveSaid();
     }
 
     /**

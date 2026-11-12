@@ -419,12 +419,10 @@ try {
         default:
             fail('unknown command: ' . $command . '. Run aamio help.');
     }
-} catch (SendFailed $error) {
-    [$retryable, $fix] = Runtime::sendAdvice($error->outcome, $error->status);
-    out(['error' => $error->getMessage(), 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => $fix] + $error->traceSaid() + $error->archiveSaid());
-    exit(2);
-} catch (GateStop $error) {
-    out(['error' => $error->getMessage(), 'fix' => $error->fix]);
+} catch (SendFailed | GateStop $error) {
+    // With the channel that is open, when the message that was stopped
+    // carried a channel's address: board channel opens one first.
+    out(Runtime::commandLineStop($error));
     exit(2);
 } catch (\Throwable $error) {
     fail($error->getMessage());

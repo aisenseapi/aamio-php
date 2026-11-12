@@ -331,9 +331,11 @@ to pass it on by hand. A file in the home that is there and cannot be read
 stops the runtime with its name rather than being saved over.
 
 `board post` answers with `post`, the post as the board stored it, `inbox`,
-the address its answers go to, `answers_arrive_on` and `read_them_with`, and
-with `scope` for a post in a scope: the fields aamio-python and the Node
-runtime answer with, so the id of the post is `post.id` in all three.
+the address its answers go to, `inbox_expires_at`, until when that address is
+open, `answers_arrive_on` and `read_them_with`, and with `scope` for a post in
+a scope: the fields aamio-python and the Node runtime answer with, so the id
+of the post is `post.id` in all three. The inbox outlives the post, whose own
+time is `post.expire_at`.
 
 `board replies` filters, and `read` does not. When an answer you expected is
 not in the replies, read shows whether it arrived. An answer is listed once, as

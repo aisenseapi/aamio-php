@@ -289,7 +289,8 @@ $check(
 );
 $check(
     ($overMcp['isError'] ?? null) === true && str_contains((string) ($overMcp['structuredContent']['archive_error'] ?? ''), 'could not append')
-        && str_contains((string) file_get_contents(dirname(__DIR__) . '/bin/aamio'), "+ \$error->traceSaid() + \$error->archiveSaid());"),
+        && $turned instanceof SendFailed && str_contains((string) (Runtime::commandLineStop($turned)['archive_error'] ?? ''), 'could not append')
+        && str_contains((string) file_get_contents(dirname(__DIR__) . '/bin/aamio'), 'out(Runtime::commandLineStop($error));'),
     'over MCP and on the command line alike'
 );
 $delivered = $a->send($target, 'delivered, and written down');
@@ -416,6 +417,95 @@ $check(
     array_map([Runtime::class, 'handoverUnsettled'], ['refused', 'never_sent', 'unknown', 'attempted', 'sending', 'something new']) === [false, false, true, true, true, true]
         && McpServer::stillOpen(null, 'unknown') === '' && str_ends_with(McpServer::stillOpen(['label' => 'x']), 'did not go. '),
     'the words know which outcomes are settled, and a stop at the gate went nowhere'
+);
+
+// ---------------------------------------------------------------- the command line says the channel that is open
+//
+// board channel opens a channel and then sends its address. What stopped
+// that send was printed without the channel, so it stayed open with nobody
+// told. Only the local server said it.
+[$a, $b] = $checkPair('line');
+$lineInbox = $b->channels['inbox']->w;
+$a->peers[$lineInbox] = $b->keys->public;
+$lineStop = static function (string $label, int $status, bool $stored) use ($a, $b, $fake, $answerWith, $checkThrown, $lineInbox): ?\Throwable {
+    Http::$override = $answerWith($status, $stored);
+    try {
+        return $checkThrown(static fn () => $a->openChannelWith($b->keys->public, 600, $label, $lineInbox));
+    } finally {
+        Http::$override = $fake;
+    }
+};
+$lost = $lineStop('lost', 0, true);
+$said = $lost instanceof SendFailed ? Runtime::commandLineStop($lost) : [];
+$check(
+    array_keys($said) === ['opened', 'error', 'outcome', 'message_id', 'status', 'retryable', 'fix'] && [$said['opened']['label'], $said['outcome'], $said['status'], $said['retryable']] === ['lost', 'unknown', 0, null]
+        && isset($a->channels['lost'], $fake->threads[$said['opened']['w']])
+        && str_starts_with($said['fix'], 'The channel lost is open and listed by `aamio channel list`, and the message carrying its address may have arrived: its outcome is not known. Do not open another channel for this: a new attempt is the same message, under the same message_id. No answer came back, so this message may already have been delivered.'),
+    'the command line says the channel that is open when its address was sent and no answer came back, and that it may have arrived',
+    json_encode($said)
+);
+$refused = $lineStop('refused', 403, false);
+$said = $refused instanceof SendFailed ? Runtime::commandLineStop($refused) : [];
+$check(
+    ($said['opened']['label'] ?? null) === 'refused' && ($said['outcome'] ?? null) === 'refused'
+        && str_starts_with((string) ($said['fix'] ?? ''), 'The channel refused is open and listed by `aamio channel list`: only the message carrying its address did not go. aamio refused this'),
+    'and when the service turned the address away',
+    json_encode($said)
+);
+$unsent = Runtime::commandLineStop(new SendFailed('never_sent', null, 0, 'RuntimeException: no room', ['label' => 'unsent', 'w' => str_repeat('u', 20), 'expire_at' => 1]));
+$check(
+    $unsent['fix'] === 'The channel unsent is open and listed by `aamio channel list`: only the message carrying its address did not go. Nothing left this machine, so nobody has been given its address. Close it with `aamio channel close unsent`, put right what the error says, and open a new one.',
+    'a channel whose address never left is answered with what to do about it',
+    json_encode($unsent)
+);
+$gated = new \Aamio\GateStop('The inbox asks for more work than this call may take', 'Ask its owner for an inbox that asks for less.');
+$plainGate = Runtime::commandLineStop($gated);
+$gated->opened = ['label' => 'gated', 'w' => str_repeat('g', 20), 'expire_at' => 1];
+$check(
+    $plainGate === ['error' => 'The inbox asks for more work than this call may take', 'fix' => 'Ask its owner for an inbox that asks for less.']
+        && Runtime::commandLineStop($gated) === ['opened' => $gated->opened, 'error' => 'The inbox asks for more work than this call may take', 'fix' => 'The channel gated is open and listed by `aamio channel list`: only the message carrying its address did not go. Ask its owner for an inbox that asks for less.'],
+    'a stop at the gate says the channel too, and is said as before when there is none'
+);
+$fake->refuse = true;
+$plainSend = $checkThrown(static fn () => $a->send($lineInbox, 'turned away'));
+$fake->refuse = false;
+$check(
+    $plainSend instanceof SendFailed && array_keys(Runtime::commandLineStop($plainSend)) === ['error', 'outcome', 'message_id', 'status', 'retryable', 'fix'],
+    'and a send with no channel behind it is printed in the fields it always was'
+);
+$lineSource = (string) file_get_contents(dirname(__DIR__) . '/bin/aamio');
+$check(
+    substr_count($lineSource, 'out(Runtime::commandLineStop($error));') === 1 && str_contains($lineSource, 'catch (SendFailed | GateStop $error)') && !str_contains($lineSource, "'outcome' => \$error->outcome"),
+    'the command line prints both through that one function'
+);
+
+// ---------------------------------------------------------------- the same bytes, read the same way
+//
+// What the Node runtime is held to as well: a byte order mark in front of a
+// sealed text is kept, so what follows is not JSON, and an address in it
+// binds nothing.
+[$a, $b] = $checkPair('mark');
+$markInbox = $a->channels['inbox']->w;
+$markOffered = str_repeat('c', 20);
+$markBody = Codec::json(['channel' => $markOffered, 'text' => 'write here']);
+$markWrite = static function (string $text) use ($a, $b, $fake, $markInbox): void {
+    $wire = $b->keys->seal($a->keys->public, $text);
+    $seq = count($fake->threads[$markInbox]['messages']) + 1;
+    $fake->threads[$markInbox]['messages'][] = ['seq' => $seq, 'at' => $fake->now + $seq, 'type' => 'text', 'body' => $wire, 'sha256' => hash('sha256', $wire), 'from' => $b->keys->public, 'sig' => $b->keys->sign(Keys::threadSigningInput($markInbox, $wire)), 'verified' => true, 'sealed' => true];
+};
+$markWrite("\xEF\xBB\xBF" . $markBody);
+$marked = $a->read();
+$check(
+    array_map(static fn (array $m): array => [$m['format'] ?? null, $m['verified'] ?? null, $m['body'] ?? null], $marked) === [['text', true, ['text' => "\xEF\xBB\xBF" . $markBody]]] && !isset($a->peers[$markOffered]),
+    'a sealed message with a byte order mark in front is text, and the address in it binds nothing',
+    json_encode($marked)
+);
+$markWrite($markBody);
+$plain = $a->read();
+$check(
+    array_map(static fn (array $m): array => [$m['format'] ?? null, $m['body']['channel'] ?? null], $plain) === [['json', $markOffered]] && ($a->peers[$markOffered] ?? null) === $b->keys->public,
+    'and without the mark the same text is the handover it says it is',
+    json_encode($plain)
 );
 
 foreach ($checkOpen as $one) {

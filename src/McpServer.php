@@ -169,15 +169,7 @@ final class McpServer
      */
     public static function stillOpen(?array $opened, ?string $outcome = null): string
     {
-        if ($opened === null) {
-            return '';
-        }
-        if ($outcome !== null && Runtime::handoverUnsettled($outcome)) {
-            return 'The channel ' . $opened['label'] . ' is open and listed by aamio_channels, and the message carrying its address may have arrived: its outcome is not known. '
-                . 'Do not open another channel for this: a new attempt is the same message, under the same message_id. ';
-        }
-
-        return 'The channel ' . $opened['label'] . ' is open and listed by aamio_channels: only the message carrying its address did not go. ';
+        return Runtime::handoverStill($opened, $outcome, 'aamio_channels');
     }
 
     // ------------------------------------------------------- asking the user

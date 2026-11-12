@@ -419,9 +419,10 @@ $check(isset($fake->posts[$post['post']['id'] ?? '']) && $post['post']['work_bit
 // runtime named them id, reply_inbox and replies_arrive_on, and gave kind,
 // title, expire_at and work_bits of the post a second time beside it.
 $check(
-    array_keys($post) === ['post', 'inbox', 'answers_arrive_on', 'read_them_with'] && $post['post']['w'] === $b->channels['board']->w && $post['post']['title'] === 'Temperature log' && $post['post']['kind'] === 'need'
-        && $post['post']['key'] === $b->keys->public && $post['post']['expire_at'] > time(),
-    'and the answer is the post as the board stored it, inbox, answers_arrive_on and read_them_with: the fields the other two runtimes answer with, and no others',
+    array_keys($post) === ['post', 'inbox', 'inbox_expires_at', 'answers_arrive_on', 'read_them_with'] && $post['post']['w'] === $b->channels['board']->w && $post['post']['title'] === 'Temperature log' && $post['post']['kind'] === 'need'
+        && $post['post']['key'] === $b->keys->public && $post['post']['expire_at'] > time()
+        && $post['inbox_expires_at'] === $b->channels['board']->expireAt && $post['inbox_expires_at'] >= $post['post']['expire_at'] && array_key_exists('inbox_expires_at', $b->whoami()),
+    'and the answer is the post as the board stored it, inbox, until when that inbox is open, answers_arrive_on and read_them_with: the fields the other two runtimes answer with, and no others',
     json_encode(array_keys($post))
 );
 // From here on the post is known by its id.
@@ -634,7 +635,7 @@ foreach ([$strangerW, $a->peers[$strangerW], 'Mallory'] as $to) {
 }
 $check($refusals === 3 && count($a->outbox) === $outboxBefore, 'a scope is shared only with a partner in the address book: an address from a post, a stranger key and an unknown name are refused, and nothing is sent');
 $scoped = $b->boardPost('need', 'Chapter 3 draft ready', 'At commit 4f2a9c1.', ['chapter-03'], 900, null, null, 'Al.chapter-review');
-$check(($fake->posts[$scoped['post']['id']]['scope'] ?? null) === $made['address'] && $scoped['scope'] === 'Al.chapter-review' && array_keys($scoped) === ['post', 'inbox', 'answers_arrive_on', 'read_them_with', 'scope'] && !str_contains((string) json_encode($fake->posts[$scoped['post']['id']]), $teamKey), 'a post in the scope carries the address inside what is signed, and never the key');
+$check(($fake->posts[$scoped['post']['id']]['scope'] ?? null) === $made['address'] && $scoped['scope'] === 'Al.chapter-review' && array_keys($scoped) === ['post', 'inbox', 'inbox_expires_at', 'answers_arrive_on', 'read_them_with', 'scope'] && !str_contains((string) json_encode($fake->posts[$scoped['post']['id']]), $teamKey), 'a post in the scope carries the address inside what is signed, and never the key');
 $check(!in_array($scoped['post']['id'], array_column($a->boardFind(null, ['chapter-03'])['posts'], 'id'), true) && $a->boardGet($scoped['post']['id']) === null, 'a find without the scope does not see it, and it is not served by id');
 $inScope = $a->boardFind(null, ['chapter-03'], null, null, 0, 0, 0, 'chapter-review');
 $check(array_column($inScope['posts'], 'id') === [$scoped['post']['id']] && $inScope['scope_name'] === 'chapter-review', 'a find with the scope reads it, and names the scope');

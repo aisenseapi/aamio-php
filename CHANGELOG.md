@@ -30,14 +30,16 @@ not what moved in the source.
   says it of that attempt alone.
 - `board post` answers in the fields aamio-python and the Node runtime answer
   with: `post`, the post as the board stored it, `inbox`, the address its
-  answers go to, `answers_arrive_on` and `read_them_with`, and `scope` for a
-  post in a scope. **This changes what a caller reads.** `id`, `reply_inbox`
-  and `replies_arrive_on` are gone, and so are `kind`, `title`, `expire_at`,
-  `work_bits` and `inbox_expires_at`, which gave fields of the post a second
-  time or said what no other runtime says: read `post.id` where `id` stood,
-  `inbox` where `reply_inbox` stood, and `post.expire_at` and
-  `post.work_bits` from the post. A caller written for one runtime read
-  nothing from another, and there is no release in which both forms stand.
+  answers go to, `inbox_expires_at`, until when that address is open,
+  `answers_arrive_on` and `read_them_with`, and `scope` for a post in a scope.
+  **This changes what a caller reads.** `id`, `reply_inbox` and
+  `replies_arrive_on` are gone, and so are `kind`, `title`, `expire_at` and
+  `work_bits`, which gave fields of the post a second time: read `post.id`
+  where `id` stood, `inbox` where `reply_inbox` stood, and `post.expire_at`
+  and `post.work_bits` from the post. `inbox_expires_at` stays, since the
+  inbox's time is not the post's, and the other two runtimes answer with it
+  from the same release. A caller written for one runtime read nothing from
+  another, and there is no release in which both forms stand.
 - A channel's label is 1 to 64 letters, digits, dots, dashes and underscores,
   starting with a letter or a digit, and not a name Windows keeps for a
   device. It is the name of the channel's file in the archive, and it was used
@@ -86,6 +88,11 @@ not what moved in the source.
   `nul`. It names the add-on's list of websites and its own directory in the
   home, and a list written to `nul.hosts.json` is written nowhere. A name
   that ends in a line break is refused as well.
+- `board channel` that is stopped once its channel is open says so on the
+  command line: the answer has the channel in `opened`, and the fix says first
+  that it is open and listed by `aamio channel list`. The command line printed
+  the failed send, or the stop at the gate, without the channel, which stayed
+  open with nobody told. Only the local server said it.
 - A channel whose address was sent, with no answer coming back, says that the
   message may have arrived: `aamio_open_channel` said that only the message
   carrying the address did not go, of a message that was with its recipient,

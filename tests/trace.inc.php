@@ -425,7 +425,8 @@ $check(
     json_encode($overMcpFailed['structuredContent'] ?? null)
 );
 $check(
-    str_contains((string) file_get_contents(dirname(__DIR__) . '/bin/aamio'), "'fix' => \$fix] + \$error->traceSaid()"),
+    $failedSend !== null && str_contains((string) (Runtime::commandLineStop($failedSend)['trace_error'] ?? ''), 'trace.json')
+        && str_contains((string) file_get_contents(dirname(__DIR__) . '/bin/aamio'), 'out(Runtime::commandLineStop($error));'),
     'and the command line writes what a failed send says of the trace beside the rest'
 );
 $failedPost = ['id' => str_repeat('p', 20), 'w' => $uInbox->w, 'key' => $u->keys->public, 'expire_at' => time() + 600];
