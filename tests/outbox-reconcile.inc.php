@@ -60,7 +60,7 @@ $fake->silent = true;
 $hanging = null;
 
 try {
-    $a->boardAnswer($settled['id'], 'this one hangs');
+    $a->boardAnswer($settled['post']['id'], 'this one hangs');
 } catch (\Throwable $error) {
     $hanging = $error;
 }
@@ -94,7 +94,7 @@ $fake->silent = true;
 $stuck = null;
 
 try {
-    $a->boardAnswer($hangingTwo['id'], 'no answer for this one');
+    $a->boardAnswer($hangingTwo['post']['id'], 'no answer for this one');
 } catch (\Throwable $error) {
     $stuck = $error;
 }

@@ -63,6 +63,8 @@ final class FakeService
     public bool $ignoreBudget = false;
     /** A service from before instances: no thread is named by one. */
     public bool $noInstance = false;
+    /** What the next closes answer, one status each: 0 is no answer at all. Empty, a close deletes the thread. */
+    public array $closing = [];
     public int $now;
     private int $seq = 0;
 
@@ -128,6 +130,10 @@ final class FakeService
                 return [201, ['w' => $w, 'created_at' => $this->now, 'expire_at' => $this->threads[$w]['expire_at'], 'ttl' => (int) ($headers['X-TTL'] ?? 600), 'count' => 0, 'bytes' => 0, 'allow' => $this->threads[$w]['allow']] + (isset($this->threads[$w]['instance']) ? ['instance' => $this->threads[$w]['instance']] : []), []];
             }
             $thread = $this->threads[$w] ?? null;
+            if ($method === 'DELETE' && $this->closing !== []) {
+                // A close that was not carried out: the thread is as it was.
+                return [array_shift($this->closing), ['error' => 'an answer the test chose', 'fix' => 'none'], []];
+            }
             if ($sub === 'gate') {
                 return $thread === null ? [404, ['error' => 'No thread', 'fix' => 'Open one'], []] : [200, $thread['gate'], ['x-seconds-left' => (string) max(0, $thread['expire_at'] - $this->now), 'x-expire-at' => (string) $thread['expire_at']]];
             }
@@ -408,12 +414,18 @@ $check(!array_filter($a->outbox, static fn (array $e): bool => $e['w'] === $w2),
 
 echo "board\n";
 $post = $b->boardPost('need', 'Temperature log', 'The full log as JSON.', ['coldchain.qa'], 900, 'en');
-$check(isset($fake->posts[$post['id']]) && $post['work_bits'] === 4 && $post['reply_inbox'] === $b->channels['board']->w, 'a post lands with the advised work and the reply inbox');
+$check(isset($fake->posts[$post['post']['id'] ?? '']) && $post['post']['work_bits'] === 4 && ($post['inbox'] ?? null) === $b->channels['board']->w && ($post['answers_arrive_on'] ?? null) === 'board', 'a post lands with the advised work, and says the inbox its answers go to');
+// The fields aamio-python and the Node runtime answer with, and no others. This
+// runtime named them id, reply_inbox and replies_arrive_on, and gave kind,
+// title, expire_at and work_bits of the post a second time beside it.
 $check(
-    is_array($post['post'] ?? null) && $post['post']['id'] === $post['id'] && $post['post']['w'] === $b->channels['board']->w && $post['post']['title'] === 'Temperature log' && $post['post']['key'] === $b->keys->public,
-    'and the answer gives the post as the board stored it, where aamio-python and the Node runtime give it, with the id beside it for this release',
-    json_encode($post['post'] ?? null)
+    array_keys($post) === ['post', 'inbox', 'answers_arrive_on', 'read_them_with'] && $post['post']['w'] === $b->channels['board']->w && $post['post']['title'] === 'Temperature log' && $post['post']['kind'] === 'need'
+        && $post['post']['key'] === $b->keys->public && $post['post']['expire_at'] > time(),
+    'and the answer is the post as the board stored it, inbox, answers_arrive_on and read_them_with: the fields the other two runtimes answer with, and no others',
+    json_encode(array_keys($post))
 );
+// From here on the post is known by its id.
+$post = ['id' => $post['post']['id'], 'read_them_with' => $post['read_them_with']];
 $found = $a->boardFind('need', ['coldchain']);
 $check(count($found['posts']) === 1 && $a->peers[$found['posts'][0]['w']] === $b->keys->public, 'find lists it and learns the poster key for the reply address');
 $answer = $a->boardAnswer($post['id'], 'I have it, 41 h, no excursion');
@@ -622,17 +634,17 @@ foreach ([$strangerW, $a->peers[$strangerW], 'Mallory'] as $to) {
 }
 $check($refusals === 3 && count($a->outbox) === $outboxBefore, 'a scope is shared only with a partner in the address book: an address from a post, a stranger key and an unknown name are refused, and nothing is sent');
 $scoped = $b->boardPost('need', 'Chapter 3 draft ready', 'At commit 4f2a9c1.', ['chapter-03'], 900, null, null, 'Al.chapter-review');
-$check(($fake->posts[$scoped['id']]['scope'] ?? null) === $made['address'] && $scoped['scope'] === 'Al.chapter-review' && !str_contains((string) json_encode($fake->posts[$scoped['id']]), $teamKey), 'a post in the scope carries the address inside what is signed, and never the key');
-$check(!in_array($scoped['id'], array_column($a->boardFind(null, ['chapter-03'])['posts'], 'id'), true) && $a->boardGet($scoped['id']) === null, 'a find without the scope does not see it, and it is not served by id');
+$check(($fake->posts[$scoped['post']['id']]['scope'] ?? null) === $made['address'] && $scoped['scope'] === 'Al.chapter-review' && array_keys($scoped) === ['post', 'inbox', 'answers_arrive_on', 'read_them_with', 'scope'] && !str_contains((string) json_encode($fake->posts[$scoped['post']['id']]), $teamKey), 'a post in the scope carries the address inside what is signed, and never the key');
+$check(!in_array($scoped['post']['id'], array_column($a->boardFind(null, ['chapter-03'])['posts'], 'id'), true) && $a->boardGet($scoped['post']['id']) === null, 'a find without the scope does not see it, and it is not served by id');
 $inScope = $a->boardFind(null, ['chapter-03'], null, null, 0, 0, 0, 'chapter-review');
-$check(array_column($inScope['posts'], 'id') === [$scoped['id']] && $inScope['scope_name'] === 'chapter-review', 'a find with the scope reads it, and names the scope');
-$answered = $a->boardAnswer($scoped['id'], 'I can read it tonight', null, 'chapter-review');
-$check($answered['post'] === $scoped['id'], 'a post in a scope is answered through the scope');
+$check(array_column($inScope['posts'], 'id') === [$scoped['post']['id']] && $inScope['scope_name'] === 'chapter-review', 'a find with the scope reads it, and names the scope');
+$answered = $a->boardAnswer($scoped['post']['id'], 'I can read it tonight', null, 'chapter-review');
+$check($answered['post'] === $scoped['post']['id'], 'a post in a scope is answered through the scope');
 $later = $b->boardPost('offer', 'Chapter 4 outline', 'Two pages.', ['chapter-04'], 900, null, null, 'Al.chapter-review');
 $fake->pageSize = 1;
-$answered = $a->boardAnswer($later['id'], 'Found it on the second page', null, 'chapter-review');
+$answered = $a->boardAnswer($later['post']['id'], 'Found it on the second page', null, 'chapter-review');
 $fake->pageSize = 200;
-$check($answered['post'] === $later['id'], 'and found past the first page of the scope, following the cursor');
+$check($answered['post'] === $later['post']['id'], 'and found past the first page of the scope, following the cursor');
 $fake->forgetScope = true;
 $threw = '';
 try {
@@ -930,6 +942,7 @@ require __DIR__ . '/runtime-lock-status.inc.php';
 require __DIR__ . '/owner-lock.inc.php';
 require __DIR__ . '/read-budget-texts.inc.php';
 require __DIR__ . '/live-pace-check.inc.php';
+require __DIR__ . '/check-2026-11-12.inc.php';
 $a->close();
 $b->close();
 Http::$override = null;

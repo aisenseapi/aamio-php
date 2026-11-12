@@ -598,7 +598,7 @@ final class McpServer
                 $fix = 'Nothing left this machine, so nobody has been given its address. Close it with aamio_close_channel, put right what the error says, and open a new one with to.';
             }
 
-            return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'operation' => ['aamio_board_answer' => 'board_answer', 'aamio_open_channel' => 'open_channel'][$name] ?? 'send', 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::stillOpen($error->opened) . $fix] + $error->traceSaid(), true);
+            return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'send_' . $error->outcome, 'operation' => ['aamio_board_answer' => 'board_answer', 'aamio_open_channel' => 'open_channel'][$name] ?? 'send', 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => self::stillOpen($error->opened) . $fix] + $error->traceSaid() + $error->archiveSaid(), true);
         } catch (GateStop $error) {
             return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'gate', 'operation' => $name === 'aamio_open_channel' ? 'open_channel' : 'send', 'retryable' => false, 'fix' => self::stillOpen($error->opened) . $error->fix], true);
         } catch (\InvalidArgumentException | \RuntimeException | \LogicException $error) {

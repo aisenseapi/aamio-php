@@ -421,7 +421,7 @@ try {
     }
 } catch (SendFailed $error) {
     [$retryable, $fix] = Runtime::sendAdvice($error->outcome, $error->status);
-    out(['error' => $error->getMessage(), 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => $fix] + $error->traceSaid());
+    out(['error' => $error->getMessage(), 'outcome' => $error->outcome, 'message_id' => $error->messageId, 'status' => $error->status, 'retryable' => $retryable, 'fix' => $fix] + $error->traceSaid() + $error->archiveSaid());
     exit(2);
 } catch (GateStop $error) {
     out(['error' => $error->getMessage(), 'fix' => $error->fix]);

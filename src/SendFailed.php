@@ -30,6 +30,8 @@ final class SendFailed extends \RuntimeException
          * and not of the trace (a check of 12 November 2026).
          */
         public readonly ?string $traceError = null,
+        /** And the archive's record of the attempt, when that could not be written. */
+        public readonly ?string $archiveError = null,
     ) {
         $reason = is_array($detail) ? (string) ($detail['error'] ?? json_encode($detail)) : (string) $detail;
         parent::__construct(sprintf('send %s (%s): %s', $outcome, $status === 0 ? 'no answer' : (string) $status, $reason));
@@ -39,5 +41,11 @@ final class SendFailed extends \RuntimeException
     public function traceSaid(): array
     {
         return $this->traceError === null ? [] : ['trace_error' => $this->traceError];
+    }
+
+    /** What the failure says of the archive, the same way: archive_error, or nothing. */
+    public function archiveSaid(): array
+    {
+        return $this->archiveError === null ? [] : ['archive_error' => $this->archiveError];
     }
 }

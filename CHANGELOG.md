@@ -28,10 +28,51 @@ not what moved in the source.
   delivery said it, and the rest was in `attention`, which a command that
   sends once and exits never fetches. A row of `outbox retry` says it too, and
   says it of that attempt alone.
-- `board post` answers with `post`, the post as the board stored it, where
-  aamio-python and the Node runtime give it: read the id as `post.id`. The
-  `id` beside it is kept in this release for callers that read it there, and
-  goes in the next.
+- `board post` answers in the fields aamio-python and the Node runtime answer
+  with: `post`, the post as the board stored it, `inbox`, the address its
+  answers go to, `answers_arrive_on` and `read_them_with`, and `scope` for a
+  post in a scope. **This changes what a caller reads.** `id`, `reply_inbox`
+  and `replies_arrive_on` are gone, and so are `kind`, `title`, `expire_at`,
+  `work_bits` and `inbox_expires_at`, which gave fields of the post a second
+  time or said what no other runtime says: read `post.id` where `id` stood,
+  `inbox` where `reply_inbox` stood, and `post.expire_at` and
+  `post.work_bits` from the post. A caller written for one runtime read
+  nothing from another, and there is no release in which both forms stand.
+- A channel's label is 1 to 64 letters, digits, dots, dashes and underscores,
+  starting with a letter or a digit, and not a name Windows keeps for a
+  device. It is the name of the channel's file in the archive, and it was used
+  there as it was given: a channel opened as `../../notes` had what was read
+  on it written outside the home, in a file no archive policy pruned, and
+  `with:colon` made a stream on Windows that no listing shows. A label that
+  starts with `inbox` or `board` is the runtime's own, where only `inbox` was
+  refused, and a label that differs from one in use only in upper and lower
+  case is taken. A channel an earlier version opened under another kind of
+  label keeps working: its records go to `archive/channel-<16 hex>.jsonl`,
+  the name aamio-python and the Node runtime give the same label, and a file
+  already written under the old name is still read.
+- A record that cannot be written to the archive no longer turns what was done
+  into an error. `board post`, `board answer`, `board withdraw` and `receipt`
+  threw when the archive could not take their record, after the post was
+  made, the answer delivered and settled as delivered in the outbox, the post
+  withdrawn or the receipt taken, and over MCP the advice that went with the
+  error was to call again, which is a second answer. Each now answers as
+  done, with `archive_error` beside it, and `attention` says `archive_failed`
+  with every record that is missing. A send that failed says `archive_error`
+  as well, on the command line and over MCP.
+- `channel close` and `aamio_close_channel` take the channel out of this home
+  when the service says its thread is gone: deleted now, or not there any
+  more. With no answer, or any other answer, the channel is kept and still
+  read, and the answer says `closed_here: false` and why. It used to leave the
+  home whatever the service said, while the thread lived on there and whoever
+  wrote to it wrote where nobody read. The answer has `w`, `closed_here` and,
+  when there is something to say, `note`, beside `label`, `status` and
+  `deleted`.
+- `board replies` works in a home that holds a channel whose label is all
+  digits, where it stopped with a TypeError, and lists the answers written
+  down for a board inbox that has expired from a home whose folder has `[` in
+  its name. The archive was listed with a pattern over the home's path, and a
+  bracket in the path made the pattern match no file, so those answers were
+  left out with nothing said.
 
 ## 0.3.18 - 2026-11-11
 

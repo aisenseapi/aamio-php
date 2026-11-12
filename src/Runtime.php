@@ -714,7 +714,9 @@ final class Runtime
         // Private from its first byte, locked while it is written, and with a
         // newline first when the file does not end in one: a crash used to
         // leave a last line with no end, and the next record became part of it.
-        Storage::appendPrivate($this->path('archive' . DIRECTORY_SEPARATOR . $label . '.jsonl'), $line);
+        // Under a name that is a file's name and nothing else: the label when
+        // it can be one, and a name made of its hash when it cannot.
+        Storage::appendPrivate($this->path('archive' . DIRECTORY_SEPARATOR . Storage::archiveName($label) . '.jsonl'), $line);
         if (microtime(true) - $this->prunedAt > 3600) {
             $this->prune();
         }
@@ -725,9 +727,16 @@ final class Runtime
     /** @return string[] labels this runtime has an archive for, the ones a board inbox uses, whether the archive is on or off */
     private function archiveLabels(string $prefix = ''): array
     {
+        // By the names the folder lists, and not by a pattern over its path: a
+        // home in a folder with a bracket in its name is a pattern of its own
+        // to glob, which then found no file there, and the answers written
+        // down for a board inbox that had expired were left out of board
+        // replies with nothing said (a check of 12 November 2026).
         $labels = [];
-        foreach ((array) @glob($this->path('archive' . DIRECTORY_SEPARATOR . $prefix . '*.jsonl')) as $file) {
-            $labels[] = basename((string) $file, '.jsonl');
+        foreach ((array) @scandir($this->path('archive')) as $file) {
+            if (is_string($file) && str_ends_with($file, '.jsonl') && ($prefix === '' || str_starts_with($file, $prefix))) {
+                $labels[] = substr($file, 0, -6);
+            }
         }
 
         return $labels;
@@ -743,7 +752,14 @@ final class Runtime
      */
     public function archived(string $label, string $kind): array
     {
-        $path = $this->path('archive' . DIRECTORY_SEPARATOR . $label . '.jsonl');
+        // The file the folder lists under this name, when it lists one, and
+        // else the file archive() writes for this label. Board replies read
+        // by the names the folder lists, so each file is read once: the one
+        // an earlier version wrote under a label as it stood, a name with a
+        // space in it, as well as the one written now. A name is the folder's
+        // own or made here, never a path a caller gave.
+        $name = in_array($label, $this->archiveLabels(), true) ? $label : Storage::archiveName($label);
+        $path = $this->path('archive' . DIRECTORY_SEPARATOR . $name . '.jsonl');
         if (!is_file($path)) {
             return [];
         }
@@ -1567,8 +1583,10 @@ final class Runtime
      */
     public function openChannel(string $label, int $ttl, ?array $allowNames = null, mixed $gate = null, ?string $to = null, ?string $note = null): array
     {
-        if (isset($this->channels[$label]) || str_starts_with($label, 'inbox')) {
-            throw new \InvalidArgumentException('channel exists or reserved: ' . $label);
+        self::checkLabel($label);
+        $taken = $this->channelCalled($label);
+        if ($taken !== null) {
+            throw new \InvalidArgumentException('there is a channel called ' . $taken->label . ' already. Close it or choose another label');
         }
         if ($note !== null && $to === null) {
             throw new \InvalidArgumentException('note travels with the address to whoever to names, so without to there is nothing to carry it');
@@ -1621,6 +1639,39 @@ final class Runtime
         $told = $this->handOver($channel, $key, $replyTo, $note);
 
         return $result + ['handed_to' => $this->nameForKey($key) ?? $key, 'address_sent_to' => $replyTo] + $told;
+    }
+
+    /**
+     * A label for a channel of the caller's own.
+     *
+     * It names the channel in every answer and its file in the archive, so it
+     * is made of what a file's name may hold and nothing else: a label with a
+     * path in it put what was read on the channel outside the home (a check of
+     * 12 November 2026). The labels that start with inbox or board are the
+     * runtime's own channels. The rule and its words are aamio-python's and
+     * the Node runtime's.
+     */
+    public static function checkLabel(mixed $label): void
+    {
+        if (!Storage::isSafeLabel($label)) {
+            throw new \InvalidArgumentException("a channel's label is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit, and not a name the system keeps for a device: it names the channel's file in the archive");
+        }
+        if (preg_match('/\A(?:inbox|board)/i', $label) === 1) {
+            throw new \InvalidArgumentException('the label ' . $label . " is the runtime's own: a label that starts with inbox or board names an inbox or a board inbox. Choose another");
+        }
+    }
+
+    /** The channel a label names, apart from upper and lower case: two labels that differ only so are one file in the archive where the file system says so. */
+    private function channelCalled(string $label): ?Channel
+    {
+        $wanted = strtolower($label);
+        foreach ($this->channels as $channel) {
+            if (strtolower($channel->label) === $wanted) {
+                return $channel;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -1791,18 +1842,45 @@ final class Runtime
         return $gate;
     }
 
+    /**
+     * Closes a channel before it expires, and says what happened here and at the service.
+     *
+     * The thread is asked gone at the service first, and the channel leaves
+     * this home when the service says it is gone: deleted now, or not there
+     * any more. When the service does not say so, the channel stays and is
+     * still read. It used to leave the home whatever the answer was: with no
+     * answer at all the thread lived on at the service, and whoever wrote
+     * there wrote where nobody read (a check of 12 November 2026, found
+     * while the Node runtime's channels were built).
+     */
     public function closeChannel(string $label): array
     {
         $channel = $this->channels[$label] ?? null;
         if ($channel === null) {
             throw new \InvalidArgumentException('no such channel: ' . $label);
         }
-        $closed = $this->client->close($channel->w, $channel->readKey);
-        $channel->closed = true;
+        $status = (int) $this->client->close($channel->w, $channel->readKey)['status'];
+        if (!in_array($status, [200, 404, 410], true)) {
+            return [
+                'label' => $label, 'w' => $channel->w, 'status' => $status, 'deleted' => false, 'closed_here' => false,
+                'note' => ($status === 0 ? 'The service did not answer' : 'The service answered ' . $status) . ', so the thread may still be there, and the channel is kept and still read. Close it again, or let it expire at ' . $channel->expireAt . '.',
+            ];
+        }
         unset($this->channels[$label]);
-        $this->saveState();
+        try {
+            $this->saveState();
+        } catch (\Throwable $error) {
+            $this->channels[$label] = $channel;
 
-        return ['label' => $label, 'status' => $closed['status'], 'deleted' => $closed['status'] === 200];
+            throw new \RuntimeException(($status === 200 ? 'the thread is deleted at the service' : 'there is no thread at the service any more') . ', and state.json could not be written (' . $error->getMessage() . '), so this home still lists ' . $label . '. Close it again once the disk takes writes.');
+        }
+        $channel->closed = true;
+        $closed = ['label' => $label, 'w' => $channel->w, 'status' => $status, 'deleted' => $status === 200, 'closed_here' => true];
+        if ($status !== 200) {
+            $closed['note'] = 'There was no thread at this address any more: it had expired, or was closed before. The channel is taken out of this home.';
+        }
+
+        return $closed;
     }
 
     public function channelList(): array
@@ -1874,7 +1952,9 @@ final class Runtime
             $headers['X-Work'] = Gate::solveBoard($this->keys->public, $bytes, $bits);
         }
         [$status, $answer] = Http::call('POST', rtrim($this->board->host, '/') . '/', $bytes, $headers);
-        $this->archive('board', ['kind' => 'posted', 'at' => time(), 'status' => $status, 'post' => is_array($answer) ? ($answer['id'] ?? null) : null, 'title' => $title, 'w' => $inbox->w]);
+        // Made, or refused: a record of it that cannot be written is said
+        // beside it, and never takes the place of what the board answered.
+        $archiveError = $this->archiveDone('board', ['kind' => 'posted', 'at' => time(), 'status' => $status, 'post' => is_array($answer) ? ($answer['id'] ?? null) : null, 'title' => $title, 'w' => $inbox->w], 'the post ' . (is_array($answer) && is_string($answer['id'] ?? null) ? $answer['id'] : ''));
         if ($status !== 201) {
             throw new \RuntimeException('post failed: ' . $status . ' ' . json_encode($answer));
         }
@@ -1882,13 +1962,19 @@ final class Runtime
         // Where the answers go, and how to read them, in the answer itself. An
         // agent took board replies for the whole inbox, got nothing back, and
         // spent an hour decrypting by hand what read would have shown at once.
-        // The post as the board stored it, as aamio-python and the Node runtime
-        // answer: a caller that reads post.id reads the same from all three.
-        // The id beside it is where this runtime gave it alone, kept for this
-        // release for callers that read it there, and gone in the next.
-        $posted = ['post' => $answer, 'id' => $answer['id'], 'kind' => $kind, 'title' => $title, 'expire_at' => $answer['expire_at'] ?? null, 'work_bits' => $answer['work_bits'] ?? $bits, 'reply_inbox' => $inbox->w, 'inbox_expires_at' => $inbox->expireAt, 'replies_arrive_on' => 'board', 'read_them_with' => 'Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.'];
+        // The post as the board stored it, the inbox its answers go to and
+        // where they arrive, in the fields aamio-python and the Node runtime
+        // answer with: post, inbox and answers_arrive_on. This runtime named
+        // them id, reply_inbox and replies_arrive_on, and gave kind, title,
+        // expire_at and work_bits of the post a second time beside it, so a
+        // caller written for one runtime read nothing from another. They are
+        // gone, not kept beside the new ones: what the post holds is in post.
+        $posted = ['post' => $answer, 'inbox' => $inbox->w, 'answers_arrive_on' => 'board', 'read_them_with' => 'Read them with read, aamio read on the command line and aamio_read over MCP, which shows every message on your inboxes. board replies lists only the answers, the messages that name a post of yours or arrived on a board inbox, and says how many it left out.'];
         if ($held !== null) {
             $posted['scope'] = $held['name'];
+        }
+        if ($archiveError !== null) {
+            $posted['archive_error'] = $archiveError;
         }
 
         return $posted;
@@ -1958,9 +2044,9 @@ final class Runtime
     public function boardWithdraw(string $postId): array
     {
         $done = $this->board->withdraw($postId);
-        $this->archive('board', ['kind' => 'withdrawn', 'at' => time(), 'post' => $postId, 'status' => $done['status']]);
+        $archiveError = $this->archiveDone('board', ['kind' => 'withdrawn', 'at' => time(), 'post' => $postId, 'status' => $done['status']], 'the withdrawal of post ' . $postId);
 
-        return ['post' => $postId, 'status' => $done['status'], 'withdrawn' => $done['status'] === 200];
+        return ['post' => $postId, 'status' => $done['status'], 'withdrawn' => $done['status'] === 200] + ($archiveError === null ? [] : ['archive_error' => $archiveError]);
     }
 
     /**
@@ -2024,9 +2110,9 @@ final class Runtime
             $this->forgetGate((string) $post['w']);
         }
         $entry = $this->outbox[$entry['id']];
-        $this->archive('board', ['kind' => 'answered', 'at' => time(), 'post' => $post['id'], 'w' => $post['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $body]);
+        $archiveError = $this->archiveDone('board', ['kind' => 'answered', 'at' => time(), 'post' => $post['id'], 'w' => $post['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $body], 'the answer ' . $entry['id']);
         if ($status !== 201) {
-            throw new SendFailed($entry['status'], $entry['id'], $status, $result, null, $entry['trace_error'] ?? null);
+            throw new SendFailed($entry['status'], $entry['id'], $status, $result, null, $entry['trace_error'] ?? null, $archiveError);
         }
         $answer = ['post' => $post['id'], 'w' => $post['w'], 'message_id' => $entry['id'], 'seq' => $result['seq'], 'at' => $result['at'], 'replies_arrive_on' => 'board', 'reply_to' => $channel->w];
         if (isset($result['met'])) {
@@ -2040,6 +2126,9 @@ final class Runtime
         // logger and no second call to fetch attention.
         if (($entry['trace_error'] ?? null) !== null) {
             $answer['trace_error'] = $entry['trace_error'];
+        }
+        if ($archiveError !== null) {
+            $answer['archive_error'] = $archiveError;
         }
         if ($ownPost) {
             $answer['warning'] = 'You answered your own post. The answer is sealed to your own key, so it reaches nobody but you.';
@@ -2129,7 +2218,11 @@ final class Runtime
         // channel expires it leaves $this->channels, and reading only the
         // channels this process holds made those answers vanish from here
         // although they had arrived, been decrypted and been written down.
-        $labels = array_unique(array_merge(array_keys($this->channels), ['board'], $this->archiveLabels()));
+        // By the files that are there, and the files the channels held here
+        // write to: a file an earlier version wrote under a label as it stood
+        // is read under the name it has. The label is the channel's own and
+        // not its key in the list, which is a number for a label of digits.
+        $labels = array_unique(array_merge(array_map(static fn (Channel $channel): string => Storage::archiveName($channel->label), array_values($this->channels)), ['board'], $this->archiveLabels()));
         sort($labels);
         $archivedBy = [];
         // A delivery the archive has more rows of than this process wrote was
@@ -2244,8 +2337,13 @@ final class Runtime
             }
             $key = $partner['key'];
         }
-        $label = $label ?: 'with-' . Keys::hashPrefixOf($key);
-        if (isset($this->channels[$label])) {
+        if ($label !== null && $label !== '') {
+            // A label the caller chose is a file's name too, as in openChannel.
+            self::checkLabel($label);
+        } else {
+            $label = 'with-' . Keys::hashPrefixOf($key);
+        }
+        if ($this->channelCalled($label) !== null) {
             $label .= '-' . time();
         }
         if ($replyTo !== null) {
@@ -2472,7 +2570,7 @@ final class Runtime
             ($this->log)('archive sent ' . $entry['id'] . ': ' . $archiveError);
         }
         if ($status !== 201) {
-            throw new SendFailed($entry['status'], $entry['id'], $status, $result, null, $entry['trace_error'] ?? null);
+            throw new SendFailed($entry['status'], $entry['id'], $status, $result, null, $entry['trace_error'] ?? null, $archiveError);
         }
         $sent = ['to' => $record['to'], 'w' => $entry['w'], 'message_id' => $entry['id'], 'seq' => $result['seq'], 'at' => $result['at'], 'sha256' => $result['sha256'] ?? null, 'expire_at' => $result['expire_at'] ?? null, 'replies_arrive_on' => 'inbox', 'reply_to' => $body['reply_to']];
         if (isset($result['met'])) {
@@ -2490,6 +2588,40 @@ final class Runtime
         }
 
         return $sent;
+    }
+
+    /** What could not be written to the archive since attention was last taken, each in its own words. */
+    private array $archiveMissing = [];
+
+    /**
+     * Writes the record of something that is done already, and says what went
+     * wrong instead of throwing it.
+     *
+     * The post is made, the answer delivered, the receipt taken. A record of it
+     * that cannot be written is said beside it and in attention. Thrown, it
+     * told the caller that the thing itself had failed: an answer on the board
+     * was stored at the service and settled as delivered in the outbox while
+     * the call threw, and over MCP the advice that went with it was to call
+     * again, which is a second answer (a check of 12 November 2026, found
+     * while the Node runtime's archive was built). A send has said it so since
+     * September.
+     */
+    private function archiveDone(string $label, array $record, string $what): ?string
+    {
+        try {
+            $this->archive($label, $record);
+        } catch (\Throwable $error) {
+            $how = $error->getMessage();
+            // Attention keeps one note for each place and state, so a second
+            // record that could not be written would take the place of the
+            // first. Each is said, in the one note, until the note is taken.
+            $this->archiveMissing[] = $what . ' could not be written to the archive: ' . $how . '.';
+            $this->noteTrouble('archive', 'archive_failed', implode(' ', $this->archiveMissing) . ' The archive does not have ' . (count($this->archiveMissing) === 1 ? 'it' : 'them') . '.');
+
+            return $how;
+        }
+
+        return null;
     }
 
     /** The gate kept for w, here and in the client, belongs to an inbox that may not be there now. */
@@ -3940,6 +4072,7 @@ final class Runtime
         $taken = array_values($this->attention);
         usort($taken, static fn (array $a, array $b): int => [$a['at'], $a['channel']] <=> [$b['at'], $b['channel']]);
         $this->attention = [];
+        $this->archiveMissing = [];
 
         return $taken;
     }
@@ -4225,7 +4358,12 @@ final class Runtime
             $made = $status === 200 && !$toolError && is_array($proof) && is_string($proof['proof_id'] ?? null) && trim($proof['proof_id']) !== '';
             $result['anchor'] = $made ? $proof : ['error' => $status, 'detail' => $toolError && is_string($text) ? $text : $reply];
         }
-        $this->archive($label, ['kind' => 'receipt', 'at' => time(), 'result' => $result]);
+        // Taken, and anchored when that was asked: a record of it that cannot
+        // be written is said beside it.
+        $archiveError = $this->archiveDone($label, ['kind' => 'receipt', 'at' => time(), 'result' => $result], 'the receipt for ' . $label);
+        if ($archiveError !== null) {
+            $result['archive_error'] = $archiveError;
+        }
 
         return $result;
     }

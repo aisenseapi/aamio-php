@@ -25,6 +25,41 @@ final class Storage
     public const ARCHIVE_MODES = ['keep', 'off', 'days'];
     public const DEFAULT_POLICY = ['mode' => 'keep', 'days' => null, 'max_mb' => null];
 
+    /** What a channel may be called when its name is also a file's: letters, digits, dots, dashes and underscores, starting with a letter or a digit. */
+    private const SAFE_LABEL = '/\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/';
+    /** Names Windows takes for a device, with or without an extension after them. */
+    private const DEVICE_NAME = '/\A(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|\z)/i';
+
+    /** Whether a label can be a file's name as it is: nothing in it leaves the folder or names a device. */
+    public static function isSafeLabel(mixed $label): bool
+    {
+        return is_string($label) && preg_match(self::SAFE_LABEL, $label) === 1 && preg_match(self::DEVICE_NAME, $label) !== 1 && !str_ends_with($label, '.');
+    }
+
+    /**
+     * The file a channel's records go in, without its extension.
+     *
+     * The label, when it can be a file's name. A label that cannot, one an
+     * earlier version let through with a path or a device in it, is kept under
+     * a name made of its hash, inside the folder: written as it stood,
+     * ../../notes put what was read on that channel outside the home, in a
+     * file no policy ever pruned, and with:colon made a stream on Windows that
+     * no listing shows (a check of 12 November 2026). The name is the one
+     * aamio-python and the Node runtime give the same label, so a home has one
+     * file for it.
+     */
+    public static function archiveName(string $label): string
+    {
+        if (self::isSafeLabel($label)) {
+            return $label;
+        }
+        // Bytes that are not UTF-8 are written as U+FFFD, as the other two
+        // runtimes write what cannot be encoded.
+        $text = json_decode((string) json_encode($label, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_UNICODE));
+
+        return 'channel-' . substr(hash('sha256', is_string($text) ? $text : $label), 0, 16);
+    }
+
     /**
      * Who may have access to a private folder on Windows without it being a
      * finding: the system itself, the administrators of the machine, and

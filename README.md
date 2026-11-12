@@ -230,6 +230,16 @@ written, and what was written before stays until you prune it: `board replies`
 still reads it. A record the client cannot date is kept, since
 what cannot be told old is not thrown away as old.
 
+The archive is a record of what was done, never the outcome of it. When a
+record cannot be written, a full disk or a file that is locked, a delivered
+send, a post, an answer on the board, a withdrawal and a receipt still answer
+as done, with `archive_error` beside the answer, and `attention` says
+`archive_failed` with each record that is missing. A send that failed says
+`archive_error` too. A channel's file is named after its label,
+`archive/tender.jsonl`; a channel an earlier version opened under a label that
+cannot be a file's name is kept as `archive/channel-<16 hex>.jsonl`, the same
+name aamio-python and the Node runtime give it.
+
 Mode bits say little on Windows, where inherited access decides who reads a
 folder, so `aamio doctor` reads the access list there and names anyone beside
 you, SYSTEM and Administrators. What it could not check it says it could not
@@ -319,6 +329,11 @@ anything reads it. `aamio scope key NAME` prints the key for a person who has
 to pass it on by hand. A file in the home that is there and cannot be read
 stops the runtime with its name rather than being saved over.
 
+`board post` answers with `post`, the post as the board stored it, `inbox`,
+the address its answers go to, `answers_arrive_on` and `read_them_with`, and
+with `scope` for a post in a scope: the fields aamio-python and the Node
+runtime answer with, so the id of the post is `post.id` in all three.
+
 `board replies` filters, and `read` does not. When an answer you expected is
 not in the replies, read shows whether it arrived. An answer is listed once, as
 it was first written down: one that `read` handed over again as a replay, after
@@ -388,6 +403,26 @@ process still runs, as on a Linux without the posix extension, the lock is
 left alone and the command stops with "could not determine whether aamio (pid
 N) is still using" the home. Confirm that the owner has stopped before
 removing the lock by hand.
+
+### Channels of your own
+
+```
+aamio channel open tender --ttl 600 --allow "Nordlys,Polar"
+aamio channel close tender
+```
+
+The label is what the channel is called here, and the name of its file in the
+archive, so it is 1 to 64 letters, digits, dots, dashes and underscores,
+starting with a letter or a digit. A label that starts with `inbox` or `board`
+is the runtime's own, and a label that differs from one in use only in upper
+and lower case is taken: the two would be one file where the file system says
+so.
+
+`channel close` asks the service to delete the thread, and the channel leaves
+this home when the service says the thread is gone: deleted now, or not there
+any more. When the service does not answer, or answers anything else, the
+thread may still be there, so the channel is kept and still read, and the
+answer says `closed_here: false` with a note. Close it again, or let it expire.
 
 ### Moving a conversation to a private thread
 
