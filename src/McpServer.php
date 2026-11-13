@@ -89,45 +89,116 @@ final class McpServer
 
     /** What a call whose arguments do not fit is told to do, in the three runtimes alike. */
     private const ARGUMENTS_FIX = "Check each argument against the tool's inputSchema and call again.";
+    /** And one whose gate does not fit: there is no changing a gate once the channel is open. */
+    private const GATE_FIX = 'Send a gate with require, advise or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}, or leave gate out to take writes from anyone on the allowlist.';
 
     /**
      * Arguments as the tool's schema says, checked as aamio-python and the Node
      * runtime check them: an object of known names, each of its type, with what
-     * is required there. A sentence naming what is wrong, or null. Nothing
-     * checked them here: a name spelt wrong was passed over, and a value of
-     * another type went on to the runtime (a check of 13 November 2026).
+     * is required there. [where, sentence] naming what is wrong, or null.
+     * Nothing checked them here: a name spelt wrong was passed over, and a
+     * value of another type went on to the runtime (a check of 13 November
+     * 2026). $exact says they are as they were sent, an object a stdClass and
+     * a list an array; arrays alone cannot tell {} from [].
      */
-    private static function wrongArguments(array $tool, array $arguments): ?string
+    private static function wrongArguments(array $tool, mixed $arguments, bool $exact): ?array
     {
         $properties = $tool['inputSchema']['properties'] ?? [];
-        foreach ($arguments as $name => $value) {
+        $fields = $arguments instanceof \stdClass ? get_object_vars($arguments) : (array) $arguments;
+        foreach ($fields as $name => $value) {
+            $name = (string) $name;
             $want = $properties[$name] ?? null;
             if (!is_array($want)) {
-                return $tool['name'] . ' takes no argument called ' . $name;
+                return [$name, $tool['name'] . ' takes no argument called ' . $name];
             }
-            $fits = match ($want['type'] ?? null) {
-                // $ is the end of the text, as JavaScript reads it, never before a last line break.
-                'string' => is_string($value) && (!isset($want['pattern']) || preg_match('/' . str_replace('/', '\/', (string) $want['pattern']) . '/uD', $value) === 1)
-                    && self::characters($value) >= ($want['minLength'] ?? 0) && self::characters($value) <= ($want['maxLength'] ?? PHP_INT_MAX)
-                    && (!isset($want['enum']) || in_array($value, $want['enum'], true)),
-                'integer' => self::whole($value) && $value >= ($want['minimum'] ?? PHP_INT_MIN) && $value <= ($want['maximum'] ?? PHP_INT_MAX),
-                'boolean' => is_bool($value),
-                // JSON's {} arrives as an empty array, so an empty array is an object here.
-                'object' => is_array($value) && ($value === [] || !array_is_list($value)),
-                'array' => is_array($value) && array_is_list($value) && array_filter($value, static fn (mixed $item): bool => !is_string($item)) === [] && count($value) <= ($want['maxItems'] ?? PHP_INT_MAX),
-                default => false,
-            };
-            if (!$fits) {
-                return $name . ' is not what ' . $tool['name'] . ' takes: ' . json_encode($want, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $wrong = self::wrongValue($tool['name'], $name, $want, $value, $exact);
+            if ($wrong !== null) {
+                return $wrong;
             }
         }
         foreach ($tool['inputSchema']['required'] ?? [] as $name) {
-            if (!array_key_exists($name, $arguments)) {
-                return $tool['name'] . ' needs ' . $name;
+            if (!array_key_exists($name, $fields)) {
+                return [$name, $tool['name'] . ' needs ' . $name];
             }
         }
 
         return null;
+    }
+
+    /**
+     * What is wrong with one value against its schema, as [where, sentence], or
+     * null. An object whose fields the schema declares, as a gate's, is checked
+     * field by field: a pow of "5" bits went on to the service, and a field no
+     * gate has was passed over (a check of 13 November 2026). One that declares
+     * none, as data, takes any field.
+     */
+    private static function wrongValue(string $tool, string $path, array $want, mixed $value, bool $exact): ?array
+    {
+        // As arrays, JSON's {} arrives as an empty array, so an empty array is an object there.
+        $object = $exact ? $value instanceof \stdClass : is_array($value) && ($value === [] || !array_is_list($value));
+        $list = $exact ? is_array($value) : is_array($value) && array_is_list($value);
+        $fits = match ($want['type'] ?? null) {
+            // $ is the end of the text, as JavaScript reads it, never before a last line break.
+            'string' => is_string($value) && (!isset($want['pattern']) || preg_match('/' . str_replace('/', '\/', (string) $want['pattern']) . '/uD', $value) === 1)
+                && self::characters($value) >= ($want['minLength'] ?? 0) && self::characters($value) <= ($want['maxLength'] ?? PHP_INT_MAX)
+                && (!isset($want['enum']) || in_array($value, $want['enum'], true)),
+            'integer' => self::whole($value) && $value >= ($want['minimum'] ?? PHP_INT_MIN) && $value <= ($want['maximum'] ?? PHP_INT_MAX),
+            'boolean' => is_bool($value),
+            'object' => $object,
+            'array' => $list && array_filter((array) $value, static fn (mixed $item): bool => !is_string($item)) === [] && count((array) $value) <= ($want['maxItems'] ?? PHP_INT_MAX),
+            default => false,
+        };
+        if (!$fits) {
+            return [$path, $path . ' is not what ' . $tool . ' takes: ' . json_encode($want, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)];
+        }
+        if (($want['type'] ?? null) === 'object' && is_array($want['properties'] ?? null)) {
+            $fields = $value instanceof \stdClass ? get_object_vars($value) : (array) $value;
+            foreach ($fields as $key => $inner) {
+                $key = (string) $key;
+                if (!array_key_exists($key, $want['properties'])) {
+                    if (($want['additionalProperties'] ?? true) === false) {
+                        return [$path . '.' . $key, $path . ' has no field called ' . $key];
+                    }
+                    continue;
+                }
+                $wrong = self::wrongValue($tool, $path . '.' . $key, $want['properties'][$key], $inner, $exact);
+                if ($wrong !== null) {
+                    return $wrong;
+                }
+            }
+            foreach ($want['required'] ?? [] as $key) {
+                if (!array_key_exists($key, $fields)) {
+                    return [$path . '.' . $key, $path . ' needs ' . $key];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /** What does not fit, as the call's answer: inside a gate it is the gate's refusal, with its fix; anything else is invalid_arguments. */
+    private static function unfit(array $tool, array $wrong, mixed $gate): array
+    {
+        [$path, $said] = $wrong;
+        if ($tool['name'] === 'aamio_open_channel' && ($path === 'gate' || str_starts_with($path, 'gate.'))) {
+            return ['error' => $said, 'error_code' => 'invalid_gate', 'fix' => self::GATE_FIX, 'given' => $gate];
+        }
+
+        return ['error' => $said, 'error_code' => 'invalid_arguments', 'fix' => self::ARGUMENTS_FIX];
+    }
+
+    /** data as it was sent: an object stays one, keys and all, and goes out as one. */
+    private static function data(array $arguments): mixed
+    {
+        $value = $arguments['data'] ?? null;
+
+        return $value instanceof \stdClass ? $value : self::map($arguments, 'data');
+    }
+
+    /** Arguments as they were sent, as the arrays the tools read. data is put back as it was sent afterwards. */
+    private static function plain(\stdClass $arguments): array
+    {
+        return (array) json_decode((string) json_encode($arguments, JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), true);
     }
 
     /** A string's length in characters, as JSON Schema counts it. */
@@ -554,7 +625,7 @@ final class McpServer
                 case 'aamio_presence_lookup':
                     return self::resultOf($r->lookup(self::strings($a, 'names'), self::number($a, 'wait')));
                 case 'aamio_send':
-                    return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::map($a, 'data'), null, self::text($a, 're')));
+                    return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::data($a), null, self::text($a, 're')));
                 case 'aamio_trace':
                     return self::resultOf($r->trace(self::text($a, 'who'), isset($a['limit']) ? self::number($a, 'limit') : 20));
                 case 'aamio_read':
@@ -597,7 +668,7 @@ final class McpServer
                             return self::resultOf([
                                 'error' => $wrong->getMessage(),
                                 'error_code' => Runtime::errorCode($wrong),
-                                'fix' => 'Send a gate with require, advise or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}, or leave gate out to take writes from anyone on the allowlist.',
+                                'fix' => self::GATE_FIX,
                                 'given' => $a['gate'],
                             ], true);
                         }
@@ -613,7 +684,7 @@ final class McpServer
                 case 'aamio_board_find':
                     return self::resultOf($r->boardFind(self::text($a, 'kind'), self::strings($a, 'tags'), self::text($a, 'lang'), null, self::number($a, 'after'), self::number($a, 'wait'), self::number($a, 'min_work_bits'), self::text($a, 'scope')));
                 case 'aamio_board_answer':
-                    return self::resultOf($r->boardAnswer(self::text($a, 'post', true), self::text($a, 'text'), self::map($a, 'data'), self::text($a, 'scope')));
+                    return self::resultOf($r->boardAnswer(self::text($a, 'post', true), self::text($a, 'text'), self::data($a), self::text($a, 'scope')));
                 case 'aamio_board_withdraw':
                     return self::resultOf($r->boardWithdraw(self::text($a, 'post', true)));
                 case 'aamio_pending':
@@ -722,7 +793,7 @@ final class McpServer
         ];
     }
 
-    public function handle(mixed $message): ?array
+    public function handle(mixed $message, mixed $sent = null): ?array
     {
         if (is_array($message) && !array_is_list($message) && !array_key_exists('method', $message) && array_key_exists('id', $message) && (array_key_exists('result', $message) || array_key_exists('error', $message))) {
             // A response, to a question whose wait is over: a late answer to one
@@ -773,14 +844,27 @@ final class McpServer
                 return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(['tools' => $this->tools], $modern, true)];
             case 'tools/call':
                 $name = is_string($params['name'] ?? null) ? $params['name'] : '';
-                // An object, or nothing. Anything else is a request this server
-                // cannot read, as in the other two runtimes: it was read as no
-                // arguments. JSON's {} arrives as an empty array.
-                $given = $params['arguments'] ?? null;
-                if ($given !== null && (!is_array($given) || ($given !== [] && array_is_list($given)))) {
-                    return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32602, 'message' => 'arguments must be an object']];
+                // The arguments as they were sent, when the line is at hand. As
+                // arrays, JSON's {} and [] are one thing and {"0": "a"} is a
+                // list, so an empty list passed for an object, an object with
+                // the key "0" was refused, and names: {} asked for every
+                // partner (a check of 13 November 2026). A caller that hands
+                // this arrays, as the tests do, gets the arrays' reading.
+                $exact = $sent instanceof \stdClass && ($sent->params ?? null) instanceof \stdClass;
+                if ($exact) {
+                    // An object, or nothing: null and a list are a request this
+                    // server cannot read, as in the other two runtimes.
+                    if (property_exists($sent->params, 'arguments') && !($sent->params->arguments instanceof \stdClass)) {
+                        return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32602, 'message' => 'arguments must be an object']];
+                    }
+                    $given = property_exists($sent->params, 'arguments') ? $sent->params->arguments : new \stdClass();
+                } else {
+                    $given = $params['arguments'] ?? null;
+                    if ($given !== null && (!is_array($given) || ($given !== [] && array_is_list($given)))) {
+                        return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32602, 'message' => 'arguments must be an object']];
+                    }
+                    $given ??= [];
                 }
-                $arguments = $given ?? [];
                 // Arguments that do not fit the tool's schema are the call's
                 // answer, as aamio-python and the Node runtime give it: a model
                 // reads what is wrong and can call again with what fits.
@@ -788,14 +872,21 @@ final class McpServer
                 // from, and an add-on judges its tools' own.
                 $listed = $this->core[$name] ?? null;
                 if ($listed !== null && $name !== 'aamio_partner_add') {
-                    $wrong = self::wrongArguments($listed, $arguments);
+                    $wrong = self::wrongArguments($listed, $given, $exact);
                     if ($wrong !== null) {
-                        return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(self::resultOf(['error' => $wrong, 'error_code' => 'invalid_arguments', 'fix' => self::ARGUMENTS_FIX], true), $modern)];
+                        $gate = $given instanceof \stdClass ? ($given->gate ?? null) : ($given['gate'] ?? null);
+
+                        return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(self::resultOf(self::unfit($listed, $wrong, $gate), true), $modern)];
                     }
-                    foreach ($listed['inputSchema']['properties'] ?? [] as $field => $want) {
-                        if (($want['type'] ?? null) === 'integer' && is_float($arguments[$field] ?? null)) {
-                            $arguments[$field] = (int) $arguments[$field];
-                        }
+                }
+                $arguments = $given instanceof \stdClass ? self::plain($given) : $given;
+                // data goes on as it was sent, keys and all: as arrays, {"0": "a"} went out as ["a"].
+                if ($given instanceof \stdClass && property_exists($given, 'data')) {
+                    $arguments['data'] = Codec::jsonValue($given->data);
+                }
+                foreach ($listed['inputSchema']['properties'] ?? [] as $field => $want) {
+                    if (($want['type'] ?? null) === 'integer' && is_float($arguments[$field] ?? null)) {
+                        $arguments[$field] = (int) $arguments[$field];
                     }
                 }
                 try {
@@ -825,10 +916,10 @@ final class McpServer
     }
 
     /** handle, with anything it did not expect answered as an internal error instead of ending the server. */
-    public function safely(mixed $message): ?array
+    public function safely(mixed $message, mixed $sent = null): ?array
     {
         try {
-            return $this->handle($message);
+            return $this->handle($message, $sent);
         } catch (\Throwable $error) {
             $kind = (new \ReflectionClass($error))->getShortName();
             ($this->runtime->log)($kind . ': ' . $error->getMessage());
@@ -965,12 +1056,23 @@ final class McpServer
             if (json_last_error() !== JSON_ERROR_NONE) {
                 $reply = ['jsonrpc' => '2.0', 'id' => null, 'error' => ['code' => -32700, 'message' => 'Parse error']];
             } else {
+                // The same line with its objects kept as objects, so a call is
+                // judged as it was sent: see handle().
+                $exact = json_decode($line, false);
+                // A batch is a list that holds something, told from the line as
+                // it was sent. Read as arrays, {} was the empty list, a batch of
+                // nothing, and went unanswered, as [] did, and an object whose
+                // keys are numbers was served as a batch. Each of those is a
+                // request that cannot be read, answered once, as in the other
+                // two runtimes (a check of 13 November 2026).
+                $batch = is_array($exact) && $exact !== [];
                 // One at a time and asked about just before, since serving one
                 // call can wait on the user, and a later call in the same batch
                 // can be cancelled meanwhile.
                 $replies = [];
-                foreach (is_array($message) && array_is_list($message) ? $message : [$message] as $one) {
-                    $reply = $this->skips($one) ? null : $this->safely($one);
+                foreach ($batch ? $message : [$message] as $at => $one) {
+                    $sent = $batch ? (is_array($exact) ? ($exact[$at] ?? null) : null) : $exact;
+                    $reply = $this->skips($one) ? null : $this->safely($one, $sent);
                     if ($reply !== null) {
                         $replies[] = $reply;
                     }
@@ -978,7 +1080,7 @@ final class McpServer
                 if ($replies === []) {
                     continue;
                 }
-                $reply = is_array($message) && array_is_list($message) ? $replies : $replies[0];
+                $reply = $batch ? $replies : $replies[0];
             }
             $this->send($reply);
         }

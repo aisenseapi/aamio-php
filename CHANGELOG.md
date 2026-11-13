@@ -4,6 +4,38 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.20 - 2026-11-13
+
+- Over MCP a call's arguments are judged as they were sent. Read as arrays,
+  JSON's `{}` and `[]` were one thing and `{"0": "sample"}` was a list: an
+  empty list passed for the arguments, `data` with the key `"0"` was refused,
+  and `names: {}` asked for every partner. Arguments that are `null` or a list
+  are a request the server cannot read, as in the other two runtimes.
+- A line that is an empty object, `{}`, is a request the server cannot read,
+  answered once with `-32600` as in the other two runtimes, and so are `[]`
+  and an object whose keys are numbers. Read as arrays, `{}` was a batch of
+  nothing and went unanswered, as `[]` did, and the object was served as a
+  batch.
+- `data` goes out and comes in as it was written. Over MCP, on the command
+  line, in what `read` hands over and in what the archive gives back,
+  `{"0": "sample"}` was `["sample"]` and `{}` was `[]`, so what a sender wrote
+  was not what the reader got. An object an array says the same as is still
+  an array, so a reader of `$data['n']` reads it as before; one an array would
+  make a list stays an object. `--data` takes any JSON value, as in the other
+  two: one that was neither an object nor a list was dropped.
+- Over MCP a tool's schema is checked into the fields it declares, as in the
+  other two runtimes: a gate whose `pow` has `"5"` bits, one with a field no
+  gate has, or a `pow` without `bits` is the gate's refusal, `invalid_gate`,
+  with what is wrong by its path, as `gate.require.pow.bits`, and the gate's
+  fix. They went on to the service. `data` declares no fields, and takes any.
+- `doctor` says whether the service answered, whether it is healthy and
+  whether this client fits it, each apart: `service.reachable`,
+  `service.healthy` and `service.status`, beside `compatibility`. A 503 from
+  `/health` was said as no answer, beside a fit read from the descriptor,
+  which had answered.
+- The help says that `--host` moves the service and nothing else: the board
+  is `AAMIO_BOARD` and the receipt anchor `AAMIO_VERIFYUM`.
+
 ## 0.3.19 - 2026-11-13
 
 - `board replies` lists an answer as it was first written down. One read again

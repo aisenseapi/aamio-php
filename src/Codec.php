@@ -73,6 +73,36 @@ final class Codec
     }
 
     /** JSON the way the wire wants it: no escaped slashes, raw UTF-8, floats kept. */
+    /**
+     * A JSON value decoded with its objects kept, made into what this client
+     * reads elsewhere: an object is an array where an array says the same, and
+     * stays a stdClass where an array would make it a list, as {} and an
+     * object whose keys are 0, 1, 2 in order. Read as arrays, {"0": "sample"}
+     * went out and came in as ["sample"], and {} as [] (a check of 13 November
+     * 2026); a reader of $data['n'] reads it as before.
+     */
+    public static function jsonValue(mixed $value): mixed
+    {
+        if ($value instanceof \stdClass) {
+            $fields = get_object_vars($value);
+            if ($fields === [] || array_is_list($fields)) {
+                $kept = new \stdClass();
+                foreach ($fields as $key => $inner) {
+                    $kept->{(string) $key} = self::jsonValue($inner);
+                }
+
+                return $kept;
+            }
+
+            return array_map([self::class, 'jsonValue'], $fields);
+        }
+        if (is_array($value)) {
+            return array_map([self::class, 'jsonValue'], $value);
+        }
+
+        return $value;
+    }
+
     public static function json(mixed $value): string
     {
         return json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR);

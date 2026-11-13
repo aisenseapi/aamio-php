@@ -132,7 +132,6 @@ if (trim($able) !== 'yes') {
             ['aamio_close_channel', [], 'aamio_close_channel needs label'],
             ['aamio_open_channel', ['label' => 'room', 'ttl' => 5], 'ttl is not what aamio_open_channel takes: '],
             ['aamio_open_channel', ['label' => 'room', 'ttl' => '600'], 'ttl is not what aamio_open_channel takes: '],
-            ['aamio_open_channel', ['label' => 'room', 'ttl' => 600, 'gate' => [1]], 'gate is not what aamio_open_channel takes: '],
             ['aamio_open_channel', ['label' => '', 'ttl' => 600], 'label is not what aamio_open_channel takes: '],
             ['aamio_send', ['to' => 'b', 're' => str_repeat('a', 64) . "\n"], 're is not what aamio_send takes: '],
             ['aamio_read', ['limit' => 999], 'limit is not what aamio_read takes: '],
@@ -147,6 +146,64 @@ if (trim($able) !== 'yes') {
     } finally {
         $codesRuntime->close();
     }
+    // A call as it was sent, objects kept apart from lists, as the serving
+    // loop hands it over (a check of 13 November 2026). Read as arrays, an
+    // empty list passed for the arguments object, {"0": "sample"} was no
+    // object, and names: {} asked for every partner.
+    $exactHome = $cliDir . DIRECTORY_SEPARATOR . 'home-mcp-exact';
+    $exactRuntime = new \Aamio\Runtime($exactHome, 'http://127.0.0.1:9', null, false);
+    try {
+        $exactServer = new \Aamio\McpServer($exactRuntime);
+        $exactServer->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['protocolVersion' => '2025-06-18']]);
+        $exactly = static function (string $line) use ($exactServer): ?array {
+            return $exactServer->handle(json_decode($line, true), json_decode($line, false));
+        };
+        foreach (['[]', 'null', '"x"'] as $arguments) {
+            $refused = $exactly('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aamio_channels","arguments":' . $arguments . '}}');
+            $check(($refused['error'] ?? null) === ['code' => -32602, 'message' => 'arguments must be an object'], 'arguments ' . $arguments . ' are a request that cannot be read, as in the other two', json_encode($refused));
+        }
+        $plainCall = $exactly('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aamio_channels"}}');
+        $check(($plainCall['result']['isError'] ?? null) === false, 'and arguments left out are none', json_encode($plainCall));
+        $data = $exactly('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aamio_send","arguments":{"to":"nobody-known","text":"x","data":{"0":"sample"}}}}');
+        $check(($data['result']['structuredContent']['error_code'] ?? null) === 'unknown_partner', 'data with the key "0" is an object, and the send goes on to find the partner', json_encode($data));
+        $names = $exactly('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aamio_presence_lookup","arguments":{"names":{}}}}');
+        $check(($names['result']['structuredContent']['error_code'] ?? null) === 'invalid_arguments', 'names: {} is no list, and asks for no partner', json_encode($names));
+        foreach ([
+            ['"pow"', 'gate is not what aamio_open_channel takes: '],
+            ['{"require":{"pow":{"bits":"5"}}}', 'gate.require.pow.bits is not what aamio_open_channel takes: {"type":"integer"'],
+            ['{"require":{"pow":{"bits":5},"extra":1}}', 'gate.require has no field called extra'],
+            ['{"require":{"pow":{}}}', 'gate.require.pow needs bits'],
+            ['{"advise":[]}', 'gate.advise is not what aamio_open_channel takes: '],
+        ] as [$gate, $said]) {
+            $told = $exactly('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aamio_open_channel","arguments":{"label":"room","ttl":600,"gate":' . $gate . '}}}')['result']['structuredContent'] ?? [];
+            $check(($told['error_code'] ?? null) === 'invalid_gate' && str_starts_with((string) ($told['error'] ?? ''), $said) && json_encode($told['given'] ?? null) === $gate && str_starts_with((string) ($told['fix'] ?? ''), 'Send a gate with require'), 'what is wrong inside the gate ' . $gate . ' is the gate\'s refusal, with its fix', json_encode($told));
+        }
+        // What a reader is handed keeps the data as it was written, and so
+        // does what the archive gives back: as arrays, {"0": "sample"} came
+        // out as ["sample"].
+        [$openedBody] = $exactRuntime->open(['body' => '{"text":"x","data":{"0":"sample","empty":{}}}', 'verified' => true, 'from' => \Aamio\Keys::generate()->public]);
+        $check(json_encode($openedBody['data'] ?? null) === '{"0":"sample","empty":{}}', 'a message\'s data is handed over as it was written, objects as objects', json_encode($openedBody));
+        @mkdir($exactHome . DIRECTORY_SEPARATOR . 'archive', 0700, true);
+        file_put_contents($exactHome . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'board.jsonl', '{"kind":"received","body":{"text":"x","data":{"0":"sample"}}}' . "\n");
+        $archivedRows = $exactRuntime->archived('board', 'received');
+        $check(count($archivedRows) === 1 && json_encode($archivedRows[0]['body']['data'] ?? null) === '{"0":"sample"}', 'and the archive gives it back as it was written', json_encode($archivedRows));
+    } finally {
+        $exactRuntime->close();
+    }
+    // A line that is an empty object, an empty list or an object whose keys
+    // are numbers is a request that cannot be read, answered once, as JSON-RPC
+    // and the other two runtimes have it, and a list that holds something is a
+    // batch. Read as arrays, {} was a batch of nothing and went unanswered, as
+    // [] did, and the object was served as a batch.
+    $linesIn = fopen('php://memory', 'r+');
+    $linesOut = fopen('php://memory', 'r+');
+    fwrite($linesIn, "{}\n[]\n{\"0\":{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}}\n[{}]\n");
+    rewind($linesIn);
+    (new \Aamio\McpServer(new \Aamio\Runtime($cliDir . DIRECTORY_SEPARATOR . 'home-mcp-lines', 'http://127.0.0.1:9', null, false)))->serve($linesIn, $linesOut);
+    rewind($linesOut);
+    $linesSaid = array_values(array_filter(explode("\n", (string) stream_get_contents($linesOut)), static fn (string $line): bool => trim($line) !== ''));
+    $invalidRequest = '{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid Request"}}';
+    $check($linesSaid === [$invalidRequest, $invalidRequest, $invalidRequest, '[' . $invalidRequest . ']'], 'an empty object, an empty list and an object whose keys are numbers are each a request that cannot be read, answered once, and [{}] is a batch', json_encode($linesSaid));
     // trace of a counterpart nothing is recorded about is the one said on
     // stderr, with nothing on stdout, in all three alike.
     [$traceStatus, $traceOut, $traceErr] = $failing('trace', 'nobody-at-all');
@@ -216,4 +273,28 @@ if (trim($able) !== 'yes') {
     $silent = $strict($silentOut);
     $check($up && $answeredStatus === 0 && $answered !== null && ($answered['service']['reachable'] ?? null) === true && str_contains($answeredErr, 'aamio-test: a deprecation raised during the run'), 'with a service that answers, stdout is JSON and nothing else, and the notice raised during the run is on stderr', substr($answeredOut, 0, 120) . ' | ' . substr($answeredErr, 0, 120));
     $check($silentStatus === 0 && $silent !== null && ($silent['service']['reachable'] ?? null) === false && str_contains($silentErr, 'aamio-test: a deprecation raised during the run'), 'and with nothing listening, the same: the failure is in the JSON and the notice on stderr', substr($silentOut, 0, 120) . ' | ' . substr($silentErr, 0, 120));
+    $check(($silent['service']['healthy'] ?? null) === false && ($silent['service']['status'] ?? null) === 0 && ($silent['service']['problem'] ?? null) === "no answer from /health, so the service's version and health were not read", 'no answer is said as no answer', json_encode($silent['service'] ?? null));
+    // A service that answers /health with 503 is reachable and not healthy,
+    // said apart from whether this client fits it, which the descriptor says.
+    // It was said as no answer (a check of 13 November 2026).
+    $unwellRouter = $cliDir . DIRECTORY_SEPARATOR . 'router-unwell.php';
+    file_put_contents($unwellRouter, "<?php\nheader('Content-Type: application/json');\nif (parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/health') {\n    http_response_code(503);\n    echo json_encode(['status' => 'down']);\n    return;\n}\necho json_encode(['version' => '0.0.0-test', 'protocol' => ['version' => 1, 'capabilities' => ['threads', 'signing', 'long-poll']]]);\n");
+    $unwellPort = $freePort();
+    $unwellServer = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $unwellPort, $unwellRouter], [1 => ['file', $cliDir . DIRECTORY_SEPARATOR . 'unwell.out', 'w'], 2 => ['file', $cliDir . DIRECTORY_SEPARATOR . 'unwell.err', 'w']], $unwellPipes);
+    $unwellUp = false;
+    for ($i = 0; $i < 100 && !$unwellUp; $i++) {
+        $unwellUp = @file_get_contents('http://127.0.0.1:' . $unwellPort . '/.well-known/aamio.json') !== false;
+        if (!$unwellUp) {
+            usleep(50000);
+        }
+    }
+    [, $unwellOut] = $doctor($cliDir . DIRECTORY_SEPARATOR . 'home-unwell', 'http://127.0.0.1:' . $unwellPort);
+    if (is_resource($unwellServer)) {
+        proc_terminate($unwellServer);
+        proc_close($unwellServer);
+    }
+    $unwell = $strict($unwellOut);
+    $check($unwellUp && ($unwell['service']['reachable'] ?? null) === true && ($unwell['service']['healthy'] ?? null) === false && ($unwell['service']['status'] ?? null) === 503
+        && ($unwell['service']['problem'] ?? null) === '/health answered 503 and not 200: the service is reachable and not healthy, and its version was not read'
+        && ($unwell['compatibility']['verdict'] ?? null) !== 'unknown', 'a 503 from /health is a service that is reachable and not healthy, said apart from whether this client fits it', json_encode([$unwell['service'] ?? null, $unwell['compatibility']['verdict'] ?? null]));
 }

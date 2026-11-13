@@ -796,8 +796,15 @@ final class Runtime
         }
         $found = [];
         foreach ($lines as $number => $line) {
-            $record = json_decode($number === 0 ? Storage::pastMark($line) : $line, true);
+            $text = $number === 0 ? Storage::pastMark($line) : $line;
+            $record = json_decode($text, true);
             if (is_array($record) && ($record['kind'] ?? null) === $kind) {
+                if (is_array($record['body'] ?? null) && array_key_exists('data', $record['body'])) {
+                    $written = json_decode($text, false);
+                    if (($written->body ?? null) instanceof \stdClass && property_exists($written->body, 'data')) {
+                        $record['body']['data'] = Codec::jsonValue($written->body->data);
+                    }
+                }
                 $found[] = $record;
             }
         }
@@ -1269,6 +1276,9 @@ final class Runtime
         }
         if (array_key_exists('aamio_scope', $entry['body'])) {
             $entry['body']['aamio_scope'] = ['kept' => false, 'note' => 'not kept: a scope is shared in data.aamio_scope'];
+        }
+        if (($entry['body']['data'] ?? null) instanceof \stdClass && property_exists($entry['body']['data'], 'aamio_scope')) {
+            $entry['body']['data'] = json_decode((string) json_encode($entry['body']['data']), true);
         }
         if (!is_array($entry['body']['data'] ?? null) || !array_key_exists('aamio_scope', $entry['body']['data'])) {
             return;
@@ -2207,7 +2217,7 @@ final class Runtime
      * Answer a post, sealed to the poster's key and signed by ours, carrying the post id and our reply address.
      * A post in a scope is never served by id alone, so with $scope it is looked up in that scope.
      */
-    public function boardAnswer(array|string $post, ?string $text = null, ?array $data = null, ?string $scope = null): array
+    public function boardAnswer(array|string $post, ?string $text = null, mixed $data = null, ?string $scope = null): array
     {
         if (is_string($post)) {
             $postId = $post;
@@ -2615,7 +2625,7 @@ final class Runtime
      * It goes in the sealed body as re, so the other side can tell which of its
      * messages this is about.
      */
-    public function send(string $to, ?string $text = null, ?array $data = null, ?string $replyTo = null, ?string $answers = null): array
+    public function send(string $to, ?string $text = null, mixed $data = null, ?string $replyTo = null, ?string $answers = null): array
     {
         self::checkRe($answers);
         [$w, $key, $partner] = $this->recipient($to);
@@ -2674,7 +2684,7 @@ final class Runtime
      * an address given as it is. $archivedData stands in for $data in the
      * archive, for a message carrying what no file should.
      */
-    private function sendSealed(string $w, string $key, ?string $partner, ?string $text = null, ?array $data = null, ?string $replyTo = null, ?array $archivedData = null, ?string $answers = null): array
+    private function sendSealed(string $w, string $key, ?string $partner, ?string $text = null, mixed $data = null, ?string $replyTo = null, ?array $archivedData = null, ?string $answers = null): array
     {
         // What the inbox asks of writers is read before anything is stored,
         // with how long it still takes writes, so work that would not be done
@@ -3265,6 +3275,24 @@ final class Runtime
         return [$body, $meta];
     }
 
+    /**
+     * A body's data as it was written: JSON's objects stay objects, keys and
+     * all. Read as arrays, {"0": "sample"} was handed over as ["sample"] and {}
+     * as [], so what a sender wrote was not what the reader got (a check of 13
+     * November 2026). The rest of the body is read as arrays, as before.
+     */
+    private static function dataAsWritten(array $content, string $json): array
+    {
+        if (array_key_exists('data', $content)) {
+            $written = json_decode($json, false);
+            if ($written instanceof \stdClass && property_exists($written, 'data')) {
+                $content['data'] = Codec::jsonValue($written->data);
+            }
+        }
+
+        return $content;
+    }
+
     /** What was said, and separately, what can be trusted about it: [body, meta]. */
     public function open(array $message): array
     {
@@ -3280,7 +3308,7 @@ final class Runtime
             if (is_array($parsed) && !array_is_list($parsed)) {
                 [$content, $extra] = self::canonical($parsed);
 
-                return [$content, ['signed' => true, 'encrypted' => false, 'format' => 'json'] + $extra];
+                return [self::dataAsWritten($content, $raw), ['signed' => true, 'encrypted' => false, 'format' => 'json'] + $extra];
             }
 
             return [['text' => $raw], ['signed' => true, 'encrypted' => false, 'format' => 'json']];
@@ -3315,7 +3343,7 @@ final class Runtime
         if (is_array($parsed) && !array_is_list($parsed)) {
             [$content, $extra] = self::canonical($parsed);
 
-            return [$content, ['signed' => true, 'encrypted' => true, 'format' => 'json'] + $extra];
+            return [self::dataAsWritten($content, $plaintext), ['signed' => true, 'encrypted' => true, 'format' => 'json'] + $extra];
         }
 
         return [['text' => $parsed], ['signed' => true, 'encrypted' => true, 'format' => 'json']];

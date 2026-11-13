@@ -9,6 +9,9 @@ declare(strict_types=1);
  *
  *   aamio [--home DIR] [--host URL] [--tags a,b] [--no-archive] <command> ...
  *   aamio --version              (aamio and the version of this client)
+ *   (--host moves the service and nothing else: the board is AAMIO_BOARD, else
+ *   https://board.aamio.at, and a receipt is anchored at AAMIO_VERIFYUM, else
+ *   Verifyum's MCP server. For a copy of both on this machine, name both)
  *
  *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
  *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] [--re SHA256]
@@ -47,6 +50,7 @@ foreach ([__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php
 }
 
 use Aamio\Addons;
+use Aamio\Codec;
 use Aamio\CodedInvalidArgument;
 use Aamio\Compat;
 use Aamio\GateStop;
@@ -482,12 +486,19 @@ try {
             // who can read the home, what is kept. Nothing here is a guess
             // reported as a finding: what could not be checked says so.
             $health = $runtime->client->health();
-            $service = ['host' => $runtime->host, 'reachable' => $health['status'] === 200];
+            // Whether the service answered and whether it is well are two
+            // things, and both apart from whether this client fits it. A 503
+            // from /health was said as no answer, beside a fit read from the
+            // descriptor, which had answered (a check of 13 November 2026). As
+            // aamio-python and the Node runtime say it.
+            $service = ['host' => $runtime->host, 'reachable' => $health['status'] > 0, 'healthy' => $health['status'] === 200, 'status' => $health['status']];
             if ($health['status'] === 200 && is_array($health['body'])) {
                 $service['version'] = $health['body']['version'] ?? null;
                 $service['revision'] = $health['body']['revision'] ?? null;
+            } elseif ($health['status'] === 0) {
+                $service['problem'] = "no answer from /health, so the service's version and health were not read";
             } else {
-                $service['problem'] = 'no answer from /health (' . $health['status'] . '), so nothing below about the service was checked';
+                $service['problem'] = '/health answered ' . $health['status'] . ' and not 200: the service is reachable and not healthy, and its version was not read';
             }
             $descriptor = $runtime->client->descriptor();
             $fits = Compat::check($descriptor['status'] === 200 && is_array($descriptor['body']) ? $descriptor['body'] : null);
@@ -530,8 +541,10 @@ try {
             out($runtime->lookup(array_slice($args, 1) ?: null, (int) ($opts['wait'] ?? 0)));
             break;
         case 'send':
-            $data = isset($opts['data']) ? json_decode((string) $opts['data'], true, 512, JSON_THROW_ON_ERROR) : null;
-            out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), is_array($data) ? $data : null, null, isset($opts['re']) ? (string) $opts['re'] : null));
+            // As it was given, objects as objects: as arrays, {"0": "a"} went
+            // out as ["a"], and a value that was not an array not at all.
+            $data = isset($opts['data']) ? Codec::jsonValue(json_decode((string) $opts['data'], false, 512, JSON_THROW_ON_ERROR)) : null;
+            out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), $data, null, isset($opts['re']) ? (string) $opts['re'] : null));
             break;
         case 'trace':
             try {
@@ -604,8 +617,8 @@ try {
                     out($runtime->boardTags());
                     break;
                 case 'answer':
-                    $answerData = isset($opts['data']) ? json_decode((string) $opts['data'], true, 512, JSON_THROW_ON_ERROR) : null;
-                    out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT')), is_array($answerData) ? $answerData : null, isset($opts['scope']) ? (string) $opts['scope'] : null));
+                    $answerData = isset($opts['data']) ? Codec::jsonValue(json_decode((string) $opts['data'], false, 512, JSON_THROW_ON_ERROR)) : null;
+                    out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT')), $answerData, isset($opts['scope']) ? (string) $opts['scope'] : null));
                     break;
                 case 'replies':
                     // Always, and the board inboxes only. With no wait given

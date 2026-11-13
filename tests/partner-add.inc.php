@@ -192,7 +192,7 @@ foreach (['2025-11-25', '2025-06-18'] as $version) {
 $check($legacy, 'before 2026-07-28 the question goes to the app while the call waits, with a mode from 2025-11-25 on, and the answer adds the key');
 
 $r = $askRuntime();
-$written = $served($r, [$opening(), $legacyCall(), ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'ping'], ['jsonrpc' => '2.0', 'id' => 4, 'method' => 'tools/call', 'params' => ['name' => 'aamio_partners', 'arguments' => []]], 'not json', $answering($accept($carol))]);
+$written = $served($r, [$opening(), $legacyCall(), ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'ping'], ['jsonrpc' => '2.0', 'id' => 4, 'method' => 'tools/call', 'params' => ['name' => 'aamio_partners', 'arguments' => new \stdClass()]], 'not json', $answering($accept($carol))]);
 $check($ids($written) === [1, 'aamio-1', 3, 2, 4, null] && ($written[3]['result']['structuredContent']['added'] ?? false) === true && in_array('carol', array_column($written[4]['result']['structuredContent']['partners'] ?? [], 'name'), true) && ($written[5]['error']['code'] ?? null) === -32700, 'a ping is answered during the wait, and what else came is served after it, in order', json_encode($ids($written)));
 
 $r = $askRuntime();
