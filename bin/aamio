@@ -491,14 +491,28 @@ try {
             // from /health was said as no answer, beside a fit read from the
             // descriptor, which had answered (a check of 13 November 2026). As
             // aamio-python and the Node runtime say it.
-            $service = ['host' => $runtime->host, 'reachable' => $health['status'] > 0, 'healthy' => $health['status'] === 200, 'status' => $health['status']];
-            if ($health['status'] === 200 && is_array($health['body'])) {
-                $service['version'] = $health['body']['version'] ?? null;
-                $service['revision'] = $health['body']['revision'] ?? null;
+            // Healthy is aamio's own health answer, an object with "service":
+            // "aamio" and "status": "ok" as the service gives it. A 200 from a
+            // proxy or a login page in front of the host was said as healthy,
+            // beside "answered 200 and not 200" (a check of 13 November 2026).
+            $body = $health['body'];
+            $unlike = match (true) {
+                $health['status'] !== 200 => null,
+                $body === null || $body === '' => 'an empty body',
+                is_string($body) => 'a body that is not JSON',
+                !is_array($body) || ($body['service'] ?? null) !== 'aamio' || ($body['status'] ?? null) !== 'ok' => "JSON that is not aamio's health answer",
+                default => null,
+            };
+            $service = ['host' => $runtime->host, 'reachable' => $health['status'] > 0, 'healthy' => $health['status'] === 200 && $unlike === null, 'status' => $health['status']];
+            if ($service['healthy']) {
+                $service['version'] = $body['version'] ?? null;
+                $service['revision'] = $body['revision'] ?? null;
             } elseif ($health['status'] === 0) {
                 $service['problem'] = "no answer from /health, so the service's version and health were not read";
-            } else {
+            } elseif ($health['status'] !== 200) {
                 $service['problem'] = '/health answered ' . $health['status'] . ' and not 200: the service is reachable and not healthy, and its version was not read';
+            } else {
+                $service['problem'] = '/health answered 200 with ' . $unlike . ", so the service's version and health were not read: check that --host names the aamio service and not a page in front of it";
             }
             $descriptor = $runtime->client->descriptor();
             $fits = Compat::check($descriptor['status'] === 200 && is_array($descriptor['body']) ? $descriptor['body'] : null);

@@ -204,6 +204,12 @@ if (trim($able) !== 'yes') {
     $linesSaid = array_values(array_filter(explode("\n", (string) stream_get_contents($linesOut)), static fn (string $line): bool => trim($line) !== ''));
     $invalidRequest = '{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid Request"}}';
     $check($linesSaid === [$invalidRequest, $invalidRequest, $invalidRequest, '[' . $invalidRequest . ']'], 'an empty object, an empty list and an object whose keys are numbers are each a request that cannot be read, answered once, and [{}] is a batch', json_encode($linesSaid));
+    // A gate whose numbers are written 5.0 goes on with whole numbers, as JSON
+    // Schema and the Node runtime have it: the service refuses 5.0, and the
+    // channel did not open (a check of 13 November 2026).
+    $wholeGate = \Aamio\Runtime::checkGate(['require' => ['pow' => ['bits' => 5.0], 'per_key' => 2.0], 'advise' => ['pow' => ['bits' => 3]]]);
+    // Written as the client writes it, which keeps ".0": json_encode drops it by itself.
+    $check(\Aamio\Codec::json($wholeGate) === '{"require":{"pow":{"bits":5},"per_key":2},"advise":{"pow":{"bits":3}}}', 'a gate whose numbers are written 5.0 goes on with whole numbers', \Aamio\Codec::json($wholeGate));
     // trace of a counterpart nothing is recorded about is the one said on
     // stderr, with nothing on stdout, in all three alike.
     [$traceStatus, $traceOut, $traceErr] = $failing('trace', 'nobody-at-all');
@@ -297,4 +303,44 @@ if (trim($able) !== 'yes') {
     $check($unwellUp && ($unwell['service']['reachable'] ?? null) === true && ($unwell['service']['healthy'] ?? null) === false && ($unwell['service']['status'] ?? null) === 503
         && ($unwell['service']['problem'] ?? null) === '/health answered 503 and not 200: the service is reachable and not healthy, and its version was not read'
         && ($unwell['compatibility']['verdict'] ?? null) !== 'unknown', 'a 503 from /health is a service that is reachable and not healthy, said apart from whether this client fits it', json_encode([$unwell['service'] ?? null, $unwell['compatibility']['verdict'] ?? null]));
+    // What answers 200 at /health and is not aamio's health answer is
+    // reachable and not healthy, said with what came. A 200 from a proxy or a
+    // login page in front of the host was said as healthy, beside "answered
+    // 200 and not 200" (a check of 13 November 2026).
+    $pageRouter = $cliDir . DIRECTORY_SEPARATOR . 'router-page.php';
+    $pageBody = $cliDir . DIRECTORY_SEPARATOR . 'page-body.txt';
+    file_put_contents($pageRouter, "<?php\nif (parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/health') {\n    header('Content-Type: text/html');\n    echo file_get_contents(__DIR__ . '/page-body.txt');\n    return;\n}\nheader('Content-Type: application/json');\necho json_encode(['version' => '0.0.0-test', 'protocol' => ['version' => 1, 'capabilities' => ['threads', 'signing', 'long-poll']]]);\n");
+    file_put_contents($pageBody, '');
+    $pagePort = $freePort();
+    $pageServer = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $pagePort, $pageRouter], [1 => ['file', $cliDir . DIRECTORY_SEPARATOR . 'page.out', 'w'], 2 => ['file', $cliDir . DIRECTORY_SEPARATOR . 'page.err', 'w']], $pagePipes);
+    $pageUp = false;
+    for ($i = 0; $i < 100 && !$pageUp; $i++) {
+        $pageUp = @file_get_contents('http://127.0.0.1:' . $pagePort . '/.well-known/aamio.json') !== false;
+        if (!$pageUp) {
+            usleep(50000);
+        }
+    }
+    $pages = [];
+    foreach ([
+        ['<!doctype html><title>Sign in</title>', 'a body that is not JSON'],
+        ['', 'an empty body'],
+        ['[]', "JSON that is not aamio's health answer"],
+        ['{"status": "ok"}', "JSON that is not aamio's health answer"],
+        ['{"status": "ok", "service": "aamio", "version": "0.0.0-test"}', null],
+    ] as $at => [$text, $what]) {
+        file_put_contents($pageBody, $text);
+        [, $pageOut] = $doctor($cliDir . DIRECTORY_SEPARATOR . 'home-page-' . $at, 'http://127.0.0.1:' . $pagePort);
+        $pages[] = [$what, $strict($pageOut)['service'] ?? null];
+    }
+    if (is_resource($pageServer)) {
+        proc_terminate($pageServer);
+        proc_close($pageServer);
+    }
+    foreach ($pages as [$what, $pageService]) {
+        $wanted = $what === null
+            ? ($pageService['healthy'] ?? null) === true && ($pageService['version'] ?? null) === '0.0.0-test' && !isset($pageService['problem'])
+            : ($pageService['reachable'] ?? null) === true && ($pageService['healthy'] ?? null) === false && ($pageService['status'] ?? null) === 200 && !array_key_exists('version', $pageService ?? [])
+                && ($pageService['problem'] ?? null) === '/health answered 200 with ' . $what . ", so the service's version and health were not read: check that --host names the aamio service and not a page in front of it";
+        $check($pageUp && $wanted, $what === null ? "aamio's own health answer is healthy" : 'a 200 at /health with ' . $what . ' is reachable and not healthy, and says what came', json_encode($pageService));
+    }
 }

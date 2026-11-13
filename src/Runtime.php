@@ -1939,7 +1939,8 @@ final class Runtime
     }
 
     /**
-     * The shape of a gate, refused before the call rather than after it.
+     * The shape of a gate, refused before the call rather than after it, with
+     * its whole numbers as integers.
      *
      * Only the shape. What the numbers may be is the service's to decide, it decides
      * that in one place, and its refusal carries the detail. The whole rule written
@@ -1980,7 +1981,26 @@ final class Runtime
             }
         }
 
-        return $gate;
+        return self::wholeNumbers($gate);
+    }
+
+    /**
+     * $value with every whole number written as 5.0 made 5, through objects and
+     * lists. JSON has one kind of number, and JSON Schema and the Node runtime
+     * take 5.0 for the integer 5. Sent on as 5.0, a gate's bits were refused by
+     * the service, which wants integers, and the channel did not open (a check
+     * of 13 November 2026). For a gate only: data goes on as it was written.
+     */
+    private static function wholeNumbers(mixed $value): mixed
+    {
+        if (is_float($value) && is_finite($value) && floor($value) === $value && abs($value) <= PHP_INT_MAX) {
+            return (int) $value;
+        }
+        if (is_array($value)) {
+            return array_map(self::wholeNumbers(...), $value);
+        }
+
+        return $value;
     }
 
     /**
