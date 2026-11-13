@@ -74,6 +74,63 @@ final class Codec
 
     /** JSON the way the wire wants it: no escaped slashes, raw UTF-8, floats kept. */
     /**
+     * What a body may be and still be read as JSON, in all three runtimes:
+     * every number finite and nested at most this deep, the outermost array or
+     * object counted as one. Anything else is handed over as text (a security
+     * review of 13 November 2026).
+     */
+    public const BODY_MAX_DEPTH = 64;
+
+    /**
+     * [path, what] for the first part of $value no reader can hold, in
+     * document order, or null: "not finite" for a number such as 1e999, which
+     * JSON can write and nothing that reads it can hold, and "too deep" for
+     * arrays and objects nested deeper than $limit. Arrays and objects as
+     * json_decode gives them, either way. The path names keys and indices with
+     * dots, and is "" for $value itself.
+     */
+    public static function unfitJson(mixed $value, int $limit = self::BODY_MAX_DEPTH): ?array
+    {
+        $stack = [[$value, '', 0]];
+        while ($stack !== []) {
+            [$node, $path, $level] = array_pop($stack);
+            if (is_float($node)) {
+                if (!is_finite($node)) {
+                    return [$path, 'not finite'];
+                }
+                continue;
+            }
+            if (!is_array($node) && !$node instanceof \stdClass) {
+                continue;
+            }
+            if ($level + 1 > $limit) {
+                return [$path, 'too deep'];
+            }
+            $items = [];
+            foreach ((array) $node as $key => $child) {
+                $items[] = [$child, $path === '' ? (string) $key : $path . '.' . $key, $level + 1];
+            }
+            foreach (array_reverse($items) as $item) {
+                $stack[] = $item;
+            }
+        }
+
+        return null;
+    }
+
+    /** What is wrong with an argument unfitJson found, as all three runtimes say it. */
+    public static function unfitText(array $unfit): string
+    {
+        [$path, $what] = $unfit;
+        $where = $path === '' ? 'arguments' : $path;
+        if ($what === 'not finite') {
+            return $where . ' is a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it';
+        }
+
+        return $where . ' is nested deeper than ' . self::BODY_MAX_DEPTH . ': a reader hands a message nested that deep over as text';
+    }
+
+    /**
      * A JSON value decoded with its objects kept, made into what this client
      * reads elsewhere: an object is an array where an array says the same, and
      * stays a stdClass where an array would make it a list, as {} and an

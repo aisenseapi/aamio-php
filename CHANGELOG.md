@@ -4,6 +4,28 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.3.21 - 2026-11-13
+
+- A body is read as JSON only when every number in it is finite and it is
+  nested at most 64 deep, as in the other two runtimes; anything else is
+  handed over as text. A number such as `1e999`, which JSON can write and
+  nothing that reads it can hold, or a body nested thousands deep, could be
+  sent by any writer the channel admits.
+  Here `1e999` decoded to `INF`, the read that weighed it threw, and its
+  channel answered that it could not be read for as long as the thread lived,
+  the messages behind it with it. Nested 510 deep, a body passed the decoding
+  and threw in the answer after the cursor had moved past it.
+- Over MCP, arguments holding such a number, or nested deeper than 64, are
+  refused with `invalid_arguments` before any tool runs, an add-on's
+  included, with the path of what is wrong.
+- `--data` and `--gate` holding such a number, and `--data` nested so deep
+  that the message around it passes 64, are refused before the home with 2.
+  One such number made every argument go missing on the way to the tool, so
+  an add-on ran with its defaults.
+- A line with a member name that starts with U+0000, which this PHP cannot
+  hold with its objects as objects, is refused with `-32600`. It was judged by
+  the arrays' reading, where `names: {}` asks for every partner.
+
 ## 0.3.20 - 2026-11-13
 
 - Over MCP a call's arguments are judged as they were sent. Read as arrays,

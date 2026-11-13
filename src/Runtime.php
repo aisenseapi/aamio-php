@@ -3313,6 +3313,26 @@ final class Runtime
         return $content;
     }
 
+    /**
+     * A body's JSON as arrays, as [true, value], or [false, null] when it is to
+     * be read as text: not JSON, nested deeper than Codec::BODY_MAX_DEPTH, or
+     * holding a number that is not finite. 1e999 decoded to INF here, and the
+     * read that weighed it threw, so its channel answered "could not be read"
+     * for as long as the thread lived, the messages behind it with it; nested
+     * 510 deep it passed the decoding and threw in the answer after the cursor
+     * had moved past it (a security review of 13 November 2026). As
+     * aamio-python and the Node runtime read it.
+     */
+    private static function bodyJson(string $text): array
+    {
+        $parsed = json_decode($text, true, Codec::BODY_MAX_DEPTH + 1);
+        if (json_last_error() !== JSON_ERROR_NONE || Codec::unfitJson($parsed) !== null) {
+            return [false, null];
+        }
+
+        return [true, $parsed];
+    }
+
     /** What was said, and separately, what can be trusted about it: [body, meta]. */
     public function open(array $message): array
     {
@@ -3321,8 +3341,8 @@ final class Runtime
             return [['text' => $raw], ['signed' => false, 'encrypted' => false, 'format' => 'unsigned']];
         }
         if (!Keys::isEnvelope($raw)) {
-            $parsed = json_decode($raw, true);
-            if (json_last_error() !== JSON_ERROR_NONE) {
+            [$isJson, $parsed] = self::bodyJson($raw);
+            if (!$isJson) {
                 return [['text' => $raw], ['signed' => true, 'encrypted' => false, 'format' => 'text']];
             }
             if (is_array($parsed) && !array_is_list($parsed)) {
@@ -3355,9 +3375,9 @@ final class Runtime
             return [['text' => null], ['signed' => true, 'encrypted' => true, 'format' => 'unreadable', 'error' => 'NotUtf8']];
         }
 
-        $parsed = json_decode($plaintext, true);
+        [$isJson, $parsed] = self::bodyJson($plaintext);
 
-        if (json_last_error() !== JSON_ERROR_NONE) {
+        if (!$isJson) {
             return [['text' => $plaintext], ['signed' => true, 'encrypted' => true, 'format' => 'text']];
         }
         if (is_array($parsed) && !array_is_list($parsed)) {

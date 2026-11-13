@@ -292,10 +292,29 @@ if ($command !== 'addon') {
             return null;
         }
         try {
-            return json_decode((string) $opts[$name], true, 512, JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
-            fail($wrong, 2);
+            $value = json_decode((string) $opts[$name], true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $error) {
+            if ($error->getCode() !== JSON_ERROR_DEPTH) {
+                fail($wrong, 2);
+            }
+            $value = [[]];
         }
+        // A number that is not finite, as 1e999 is, which decodes to INF here,
+        // and --data nested so deep that the message around it passes
+        // Codec::BODY_MAX_DEPTH, which a reader hands over as text. The three
+        // runtimes refuse both alike (a security review of 13 November 2026).
+        $unreadable = Codec::unfitJson($value, $name === 'data' ? Codec::BODY_MAX_DEPTH - 1 : PHP_INT_MAX);
+        if (isset($error) && $error->getCode() === JSON_ERROR_DEPTH) {
+            $unreadable = ['', 'too deep'];
+        }
+        if ($unreadable !== null && $unreadable[1] === 'not finite') {
+            fail('--' . $name . ' holds a number that is not finite, as 1e999 is: JSON can write it, and nothing that reads it can hold it.', 2);
+        }
+        if ($unreadable !== null) {
+            fail('--' . $name . ' is nested too deep: with the message around it, it is deeper than ' . Codec::BODY_MAX_DEPTH . ', and a reader hands such a message over as text.', 2);
+        }
+
+        return $value;
     };
     $noData = '--data is not JSON. Give a JSON value, quoted for the shell.';
     $scopeName = static function (string $option) use ($opts, $asUsage): void {

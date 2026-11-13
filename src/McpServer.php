@@ -198,7 +198,10 @@ final class McpServer
     /** Arguments as they were sent, as the arrays the tools read. data is put back as it was sent afterwards. */
     private static function plain(\stdClass $arguments): array
     {
-        return (array) json_decode((string) json_encode($arguments, JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), true);
+        // Throws rather than handing over no arguments: one number that was not
+        // finite made json_encode fail, and every argument went missing, so an
+        // add-on ran with its defaults (a security review of 13 November 2026).
+        return (array) json_decode(json_encode($arguments, JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
     }
 
     /** A string's length in characters, as JSON Schema counts it. */
@@ -865,6 +868,16 @@ final class McpServer
                     }
                     $given ??= [];
                 }
+                // A number that is not finite, as 1e999 is, or nesting deeper
+                // than a reader reads as JSON, is refused before any tool runs,
+                // an add-on's included, as in the other two runtimes. 1e999
+                // decoded to INF, the arguments went missing on the way to the
+                // tool, and an add-on ran with its defaults (a security review
+                // of 13 November 2026).
+                $unreadable = Codec::unfitJson($given);
+                if ($unreadable !== null) {
+                    return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(self::resultOf(['error' => Codec::unfitText($unreadable), 'error_code' => 'invalid_arguments', 'fix' => self::ARGUMENTS_FIX], true), $modern)];
+                }
                 // Arguments that do not fit the tool's schema are the call's
                 // answer, as aamio-python and the Node runtime give it: a model
                 // reads what is wrong and can call again with what fits.
@@ -1059,6 +1072,25 @@ final class McpServer
                 // The same line with its objects kept as objects, so a call is
                 // judged as it was sent: see handle().
                 $exact = json_decode($line, false);
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    // JSON this PHP cannot hold with its objects as objects: a
+                    // member name that starts with U+0000. The call was then
+                    // judged by the arrays' reading, where names: {} asks for
+                    // every partner (a security review of 13 November 2026).
+                    // Each request in the line is told it cannot be read as sent.
+                    $listed = is_array($message) && array_is_list($message) && $message !== [];
+                    $refusals = [];
+                    foreach ($listed ? $message : [$message] as $one) {
+                        if (is_array($one) && !array_is_list($one) && isset($one['method']) && !array_key_exists('id', $one)) {
+                            continue;
+                        }
+                        $refusals[] = ['jsonrpc' => '2.0', 'id' => is_array($one) ? ($one['id'] ?? null) : null, 'error' => ['code' => -32600, 'message' => 'This request holds a member name that starts with U+0000, which this server cannot read as it was sent. Rename it or leave it out.']];
+                    }
+                    if ($refusals !== []) {
+                        $this->send($listed ? $refusals : $refusals[0]);
+                    }
+                    continue;
+                }
                 // A batch is a list that holds something, told from the line as
                 // it was sent. Read as arrays, {} was the empty list, a batch of
                 // nothing, and went unanswered, as [] did, and an object whose
