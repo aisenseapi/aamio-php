@@ -19,7 +19,7 @@ declare(strict_types=1);
  *   archive [status|keep|off|days:N|prune] [--max-mb M] [--all] | doctor
  *   channel list | channel close LABEL | board post KIND TITLE TEXT [--tags a,b] [--ttl N] [--lang L] [--deadline ISO] [--scope NAME]
  *   board find [--kind K] [--tags a,b] [--lang L] [--after N] [--wait N] [--min-work-bits N] [--scope NAME]
- *   board tags | board answer POST TEXT [--scope NAME] | board replies [--post ID] [--wait N] | board withdraw POST
+ *   board tags | board answer POST TEXT [--data JSON] [--scope NAME] | board replies [--post ID] [--wait N] | board withdraw POST
  *   (board replies filters. read shows everything on the inbox, opened bodies and the ones that would not open)
  *   board channel KEY [--ttl N] [--reply-to W] [--note TEXT]
  *   scope new NAME | scope add NAME (--key KEY | --address ADDRESS) | scope list | scope key NAME
@@ -47,6 +47,7 @@ foreach ([__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php
 }
 
 use Aamio\Addons;
+use Aamio\CodedInvalidArgument;
 use Aamio\Compat;
 use Aamio\GateStop;
 use Aamio\Http;
@@ -100,7 +101,7 @@ function csv(?string $text): ?array
     return array_values(array_filter(array_map('trim', explode(',', $text)), static fn (string $t): bool => $t !== ''));
 }
 
-[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'help', 'version']);
+[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'all', 'help', 'version']);
 // An option that takes a value, given without one, is refused before anything
 // is read or written: `--home` alone would otherwise mean the default home.
 foreach (['home' => 'DIR', 'host' => 'URL', 'tags' => 'a,b'] as $takesValue => $what) {
@@ -189,6 +190,250 @@ if ($command === 'addon') {
     $code = $addon->early(array_slice($args, 2), $opts);
     if ($code !== null) {
         exit($code);
+    }
+}
+
+// What can be seen to be wrong from the command line alone is refused here,
+// before the home is opened or made, as aamio-python and the Node runtime
+// refuse it: on stderr, with 2. It was refused after the home was made, with
+// 1, an option the command does not take was passed over, and a number that
+// was no number was taken as 0 (a check of 13 November 2026). A partner's
+// name or key and send --re are the command's answer instead, as JSON with 1,
+// as in the other two, and no home is made for them either.
+if ($command !== 'addon') {
+    $commands = [
+        // The words it takes, how many of the last may be left out, its options, its switches.
+        'init' => [[], 0, ['archive'], []],
+        'whoami' => [[], 0, [], []],
+        'doctor' => [[], 0, [], []],
+        'serve' => [[], 0, [], []],
+        'partner add' => [['name', 'key'], 0, [], []],
+        'partner list' => [[], 0, [], []],
+        'partner remove' => [['name'], 0, [], []],
+        'lookup' => [null, 0, ['wait'], []],
+        'send' => [['to', 'text'], 0, ['data', 're'], []],
+        'read' => [[], 0, ['wait', 'limit', 'max-bytes'], []],
+        'receipt' => [[], 0, ['channel'], ['anchor']],
+        'outbox pending' => [[], 0, [], []],
+        'outbox retry' => [[], 0, ['id'], []],
+        'outbox forget' => [['id'], 0, [], []],
+        'trace' => [['who'], 1, ['limit'], []],
+        'board post' => [['kind', 'title', 'text'], 0, ['ttl', 'lang', 'deadline', 'scope'], []],
+        'board find' => [[], 0, ['kind', 'lang', 'after', 'wait', 'min-work-bits', 'scope'], []],
+        'board tags' => [[], 0, [], []],
+        'board answer' => [['post', 'text'], 0, ['data', 'scope'], []],
+        'board withdraw' => [['post'], 0, [], []],
+        'board replies' => [[], 0, ['post', 'wait'], []],
+        'board channel' => [['key'], 0, ['ttl', 'reply-to', 'note'], []],
+        'scope new' => [['name'], 0, [], []],
+        'scope add' => [['name'], 0, ['key', 'address'], []],
+        'scope list' => [[], 0, [], []],
+        'scope key' => [['name'], 0, [], []],
+        'scope share' => [['name', 'partner'], 0, ['access'], []],
+        'scope remove' => [['name'], 0, [], []],
+        'channel open' => [['label'], 0, ['ttl', 'allow', 'gate'], []],
+        'channel list' => [[], 0, [], []],
+        'channel close' => [['label'], 0, [], []],
+        'archive' => [['policy'], 1, ['max-mb'], ['all']],
+    ];
+    $used = in_array($command, ['partner', 'outbox', 'board', 'scope', 'channel'], true) ? trim($command . ' ' . (string) ($args[1] ?? '')) : (string) $command;
+    if (!isset($commands[$used])) {
+        fail('Expected one of: ' . implode(', ', array_keys($commands)) . '. Run aamio help for usage.', 2);
+    }
+    [$words, $optional, $takes, $switches] = $commands[$used];
+    $given = array_slice($args, count(explode(' ', $used)));
+    if ($words !== null && (count($given) < count($words) - $optional || count($given) > count($words))) {
+        $named = array_map(static fn (string $word, int $at): string => $at < count($words) - $optional ? strtoupper($word) : '[' . strtoupper($word) . ']', $words, array_keys($words));
+        fail($used . ' takes ' . ($words === [] ? 'no arguments' : implode(' ', $named)) . '. Run aamio help for usage.', 2);
+    }
+    // --tags is the runtime's own on every command here, as it always was, and
+    // the tags of a post or a filter on board post and board find.
+    foreach ($opts as $name => $value) {
+        if (in_array($name, ['home', 'host', 'tags', 'no-archive', 'help', 'version'], true)) {
+            continue;
+        }
+        if (in_array($name, $switches, true)) {
+            if ($value !== true) {
+                fail('--' . $name . ' takes no value.', 2);
+            }
+            continue;
+        }
+        if (!in_array($name, $takes, true)) {
+            fail($used . ' does not take --' . $name . '. Run aamio help for usage.', 2);
+        }
+        if (!is_string($value)) {
+            fail('--' . $name . ' needs a value.', 2);
+        }
+    }
+    $whole = static function (string $name, int $low, ?int $high = null) use ($opts): void {
+        if (!isset($opts[$name])) {
+            return;
+        }
+        $value = (string) $opts[$name];
+        if (preg_match('/^[0-9]{1,15}$/D', $value) !== 1 || (int) $value < $low || ($high !== null && (int) $value > $high)) {
+            fail($high === null ? '--' . $name . ' is a whole number, ' . $low . ' or more.' : '--' . $name . ' is a whole number from ' . $low . ' to ' . $high . '.', 2);
+        }
+    };
+    // A check of the runtime's, said as a usage error, as the Node runtime says it.
+    $asUsage = static function (callable $check): void {
+        try {
+            $check();
+        } catch (\InvalidArgumentException $wrong) {
+            $text = $wrong->getMessage();
+            fail(ucfirst($text) . (str_ends_with($text, '.') ? '' : '.'), 2);
+        }
+    };
+    $json = static function (string $name, string $wrong) use ($opts): mixed {
+        if (!isset($opts[$name])) {
+            return null;
+        }
+        try {
+            return json_decode((string) $opts[$name], true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            fail($wrong, 2);
+        }
+    };
+    $noData = '--data is not JSON. Give a JSON value, quoted for the shell.';
+    $scopeName = static function (string $option) use ($opts, $asUsage): void {
+        if (isset($opts[$option])) {
+            $asUsage(static fn () => Runtime::checkScopeName($opts[$option]));
+        }
+    };
+    // The command's answer, as JSON with 1, before anything is opened or made.
+    $answer = static function (callable $check): void {
+        try {
+            $check();
+        } catch (CodedInvalidArgument $wrong) {
+            out(['error' => $wrong->getMessage(), 'error_code' => $wrong->errorCode()]);
+            exit(1);
+        }
+    };
+    switch ($used) {
+        case 'init':
+            if (isset($opts['archive'])) {
+                $asUsage(static fn () => Storage::parsePolicy((string) $opts['archive'], null));
+            }
+            break;
+        case 'archive':
+            $policy = (string) ($given[0] ?? 'status');
+            $size = $opts['max-mb'] ?? null;
+            if ($size !== null && (preg_match('/^[0-9]{1,9}(?:\.[0-9]{1,6})?$/D', (string) $size) !== 1 || !((float) $size > 0))) {
+                fail('--max-mb is a size in megabytes above zero.', 2);
+            }
+            if ($policy === 'status' || $policy === 'prune') {
+                if ($size !== null) {
+                    fail('--max-mb goes with a choice: archive keep, archive off or archive days:N.', 2);
+                }
+                if (isset($opts['all']) && $policy !== 'prune') {
+                    fail('--all goes with archive prune, and removes the whole archive.', 2);
+                }
+            } else {
+                if (isset($opts['all'])) {
+                    fail('--all goes with archive prune, and removes the whole archive.', 2);
+                }
+                $asUsage(static fn () => Storage::parsePolicy($policy, $size === null ? null : (float) $size));
+            }
+            break;
+        case 'partner add':
+            $answer(static fn () => Runtime::checkPartner($given[0], $given[1]));
+            break;
+        case 'lookup':
+            $whole('wait', 0, 25);
+            break;
+        case 'send':
+            $answer(static fn () => Runtime::checkRe($opts['re'] ?? null));
+            $json('data', $noData);
+            break;
+        case 'trace':
+            $whole('limit', 1, 50);
+            break;
+        case 'read':
+            $whole('wait', 0, 25);
+            $whole('limit', 1, 200);
+            $whole('max-bytes', 512);
+            break;
+        case 'receipt':
+            if (($opts['channel'] ?? null) === '') {
+                fail("--channel names a channel, as a message's channel field does: inbox, board or an older generation.", 2);
+            }
+            break;
+        case 'outbox retry':
+            if (($opts['id'] ?? null) === '') {
+                fail('--id names one message, as outbox pending shows it.', 2);
+            }
+            break;
+        case 'outbox forget':
+            if ($given[0] === '') {
+                fail('outbox forget takes the id of one message, as outbox pending shows it.', 2);
+            }
+            break;
+        case 'board post':
+            if (!in_array($given[0], ['need', 'offer'], true)) {
+                fail('A post is a need or an offer.', 2);
+            }
+            $whole('ttl', 60, 3600);
+            $scopeName('scope');
+            break;
+        case 'board find':
+            if (isset($opts['kind']) && !in_array($opts['kind'], ['need', 'offer'], true)) {
+                fail('A post is a need or an offer.', 2);
+            }
+            $whole('after', 0, 999999);
+            $whole('wait', 0, 25);
+            $whole('min-work-bits', 0, 16);
+            $scopeName('scope');
+            break;
+        case 'board answer':
+            $json('data', $noData);
+            $scopeName('scope');
+            break;
+        case 'board replies':
+            $whole('wait', 0, 25);
+            if (($opts['post'] ?? null) === '') {
+                fail('--post names one post by its id, as board post answered it.', 2);
+            }
+            break;
+        case 'board channel':
+            $whole('ttl', 30, 3600);
+            if (isset($opts['reply-to']) && preg_match('/^[a-z2-7]{20}$/D', (string) $opts['reply-to']) !== 1) {
+                fail('--reply-to is a write address: 20 characters of a-z and 2-7, as a verified answer gives it in reply_to.', 2);
+            }
+            if (isset($opts['note']) && !isset($opts['reply-to'])) {
+                fail('--note travels with the address to the inbox --reply-to names, so without --reply-to there is nothing to carry it.', 2);
+            }
+            if ($given[0] === '') {
+                fail("board channel takes a key, or a partner's name.", 2);
+            }
+            break;
+        case 'channel open':
+            $asUsage(static fn () => Runtime::checkLabel($given[0]));
+            $whole('ttl', 30, 3600);
+            $asUsage(static fn () => Runtime::checkChannelTtl((int) ($opts['ttl'] ?? 600)));
+            if (isset($opts['gate'])) {
+                $gate = $json('gate', "--gate is not JSON. Quote it as one argument, as in --gate '{\"require\": {\"pow\": {\"bits\": 20}}}'.");
+                $asUsage(static fn () => Runtime::checkGate($gate));
+            }
+            break;
+        case 'channel close':
+            if ($given[0] === '') {
+                fail('channel close takes the label of one channel, as channel list shows it.', 2);
+            }
+            break;
+        case 'scope new':
+        case 'scope key':
+        case 'scope remove':
+            $asUsage(static fn () => Runtime::checkScopeName($given[0]));
+            break;
+        case 'scope share':
+            $asUsage(static fn () => Runtime::checkScopeName($given[0]));
+            if (!isset($opts['access'])) {
+                fail('scope share takes --access read, which gives the key to read and post, or --access write, which gives the address to post only.', 2);
+            }
+            $asUsage(static fn () => Runtime::checkAccess($opts['access']));
+            break;
+        case 'scope add':
+            $asUsage(static fn () => Runtime::checkScopeAdd($given[0], $opts['key'] ?? null, $opts['address'] ?? null));
+            break;
     }
 }
 
@@ -359,7 +604,8 @@ try {
                     out($runtime->boardTags());
                     break;
                 case 'answer':
-                    out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT')), null, isset($opts['scope']) ? (string) $opts['scope'] : null));
+                    $answerData = isset($opts['data']) ? json_decode((string) $opts['data'], true, 512, JSON_THROW_ON_ERROR) : null;
+                    out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT')), is_array($answerData) ? $answerData : null, isset($opts['scope']) ? (string) $opts['scope'] : null));
                     break;
                 case 'replies':
                     // Always, and the board inboxes only. With no wait given
@@ -445,7 +691,7 @@ try {
     if ($command === 'serve') {
         fail($error->getMessage());
     }
-    out(['error' => $error->getMessage(), 'error_code' => (new \ReflectionClass($error))->getShortName()]);
+    out(['error' => $error->getMessage(), 'error_code' => Runtime::errorCode($error)]);
     exit(1);
 } catch (\Throwable $error) {
     fail($error->getMessage());

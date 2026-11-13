@@ -77,23 +77,68 @@ if (trim($able) !== 'yes') {
     $failing = static fn (string ...$words): array => $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $failedHome, '--host', 'http://127.0.0.1:9'], $words));
     [$closeStatus, $closeOut, $closeErr] = $failing('channel', 'close', 'no-such-channel');
     $closed = json_decode($closeOut, true);
-    $check($closeStatus === 1 && is_array($closed) && array_keys($closed) === ['error', 'error_code'] && $closed['error'] === 'no such channel: no-such-channel' && $closed['error_code'] === 'InvalidArgumentException', 'a command that cannot do what it was asked answers with JSON on stdout, error and error_code, and exit 1', json_encode([$closeStatus, $closeOut, $closeErr]));
-    [$keyStatus, $keyOut, $keyErr] = $failing('partner', 'add', 'bob', 'not-a-key');
-    $refused = json_decode($keyOut, true);
-    $check($keyStatus === 1 && is_array($refused) && isset($refused['error'], $refused['error_code']), 'and so does an argument that is wrong for the command, as a key that is no key', json_encode([$keyStatus, $keyOut, $keyErr]));
+    // error_code is the code the three runtimes share, never the name of a class.
+    $check($closeStatus === 1 && is_array($closed) && array_keys($closed) === ['error', 'error_code'] && $closed['error'] === 'no such channel: no-such-channel' && $closed['error_code'] === 'unknown_channel', 'a command that cannot do what it was asked answers with JSON on stdout, error and the shared error_code, and exit 1', json_encode([$closeStatus, $closeOut, $closeErr]));
+    // A partner's name or key and send --re are the command's answer, as JSON
+    // with 1, as in the other two, and no home is made for them.
+    $KEY = str_repeat('w', 42) . 'A';
+    foreach ([[['partner', 'add', 'bob', 'not-a-key'], 'invalid_key'], [['partner', 'add', str_repeat('x', 65), $KEY], 'invalid_name'], [['partner', 'add', "a\tb", $KEY], 'invalid_name'], [['send', 'bob', 'hi', '--re', 'xyz'], 'invalid_re']] as [$words, $code]) {
+        $unmade = $cliDir . DIRECTORY_SEPARATOR . 'home-answer-' . $code . '-' . count($words);
+        [$answerStatus, $answerOut, $answerErr] = $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $unmade, '--host', 'http://127.0.0.1:9'], $words));
+        $told = json_decode($answerOut, true);
+        $check($answerStatus === 1 && is_array($told) && ($told['error_code'] ?? null) === $code && !file_exists($unmade), 'and so is ' . implode(' ', array_slice($words, 0, 2)) . ' with ' . $code . ', before any home is made', json_encode([$answerStatus, $answerOut, $answerErr]));
+    }
+    // What can be seen to be wrong from the command line alone is refused
+    // before the home is opened or made, on stderr with 2, as aamio-python and
+    // the Node runtime refuse it. It was refused after the home was made, with
+    // 1, and a number that was no number was taken as 0.
+    foreach ([['read', '--limit', '0'], ['read', '--limit', 'x'], ['read', '--max-bytes', '100'], ['read', '--frob', '1'], ['lookup', '--wait', 'x'], ['trace', '--limit', '51'],
+        ['send', 'bob'], ['send', 'bob', 'hi', '--data', '{not json'], ['board', 'answer', 'post', 'text', '--data', '{not json'], ['channel', 'open', 'room', '--gate', '{not json'],
+        ['channel', 'open', 'room', '--gate', '[]'], ['channel', 'open', '../x'], ['channel', 'open', 'room', '--ttl', '5'], ['board', 'post', 'maybe', 't', 'x'],
+        ['board', 'post', 'need', 't', 'x', '--ttl', '5'], ['board', 'find', '--min-work-bits', '99'], ['board', 'channel', $KEY, '--reply-to', 'bad'], ['board', 'channel', $KEY, '--note', 'hi'],
+        ['board', 'replies', '--wait', '99'], ['scope', 'new', 'bad/name'], ['scope', 'add', 'team'], ['scope', 'share', 'team', 'bob'], ['scope', 'frob'], ['archive', 'keep', '--all'],
+        ['archive', 'status', '--max-mb', '5'], ['archive', 'keep', '--max-mb', 'inf'], ['init', '--archive', 'sometimes'], ['frobnicate']] as $at => $words) {
+        $unmade = $cliDir . DIRECTORY_SEPARATOR . 'home-usage-' . $at;
+        [$usageStatus, $usageOut, $usageErr] = $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $unmade, '--host', 'http://127.0.0.1:9'], $words));
+        $check($usageStatus === 2 && $usageOut === '' && trim($usageErr) !== '' && !file_exists($unmade), implode(' ', $words) . ' is refused before the home, on stderr with 2', json_encode([$usageStatus, $usageOut, $usageErr]));
+    }
+    // A name is counted in characters, as in the other two.
+    \Aamio\Runtime::checkPartner(str_repeat("\u{1F600}", 64), $KEY);
+    try {
+        \Aamio\Runtime::checkPartner(str_repeat("\u{1F600}", 65), $KEY);
+        $longName = null;
+    } catch (\Aamio\CodedInvalidArgument $wrong) {
+        $longName = $wrong->errorCode();
+    }
+    $check($longName === 'invalid_name', 'a partner\'s name of 64 characters outside the basic plane is taken, and one of 65 is not', (string) $longName);
+    $check(\Aamio\Runtime::errorCode(new \RuntimeException('x')) === 'RuntimeException' && \Aamio\Runtime::errorCode(new \Aamio\CodedRuntime('not_saved', 'x')) === 'not_saved', 'an error without a shared code is said by its class');
+    // Over MCP a failure carries the same code, as in the other two.
+    $mcpHome = $cliDir . DIRECTORY_SEPARATOR . 'home-mcp-codes';
+    $codesRuntime = new \Aamio\Runtime($mcpHome, 'http://127.0.0.1:9', null, false);
+    try {
+        $codesServer = new \Aamio\McpServer($codesRuntime);
+        $codesServer->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['protocolVersion' => '2025-06-18']]);
+        $codeOf = static fn (string $tool, array $arguments): mixed => $codesServer->handle(['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/call', 'params' => ['name' => $tool, 'arguments' => $arguments]])['result']['structuredContent']['error_code'] ?? null;
+        $codes = [$codeOf('aamio_close_channel', ['label' => 'nope']), $codeOf('aamio_open_channel', ['label' => 'room', 'ttl' => 5]), $codeOf('aamio_open_channel', ['label' => 'room', 'gate' => []])];
+        $check($codes === ['unknown_channel', 'invalid_ttl', 'invalid_gate'], 'over MCP a failure carries the code the command line says', json_encode($codes));
+    } finally {
+        $codesRuntime->close();
+    }
     // trace of a counterpart nothing is recorded about is the one said on
     // stderr, with nothing on stdout, in all three alike.
     [$traceStatus, $traceOut, $traceErr] = $failing('trace', 'nobody-at-all');
     $check($traceStatus === 1 && $traceOut === '' && str_contains($traceErr, 'nothing sent to or received from nobody-at-all is recorded here'), 'trace of a counterpart nothing is recorded about says so on stderr, as the other two say it', json_encode([$traceStatus, $traceOut, $traceErr]));
-    // serve's stdout is the protocol's alone. A server that cannot start, here
-    // with no service to open its inbox at, says why on stderr, where the host
-    // keeps its log, and nothing the host would read as a message. Its input
-    // is closed, so a server that did start would end at once, and say 0.
+    // serve starts without the service, as the Node runtime's does, says on
+    // stderr that the inbox could not be opened yet, and answers on stdout,
+    // which is the protocol's alone. It stopped with the reason, and a host
+    // that started it while the network was down showed a server that had
+    // failed. initialize is answered, and its input then ends.
     $serveErrFile = (string) tempnam(sys_get_temp_dir(), 'aamio-serve-');
     $serving = proc_open(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $cliDir . DIRECTORY_SEPARATOR . 'home-serve', '--host', 'http://127.0.0.1:9', 'serve']), [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $serveErrFile, 'w']], $servePipes);
     $serveStatus = -1;
     $serveOut = '';
     if (is_resource($serving)) {
+        fwrite($servePipes[0], json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['protocolVersion' => '2025-06-18', 'capabilities' => new \stdClass(), 'clientInfo' => ['name' => 'test', 'version' => '0']]]) . "\n");
         fclose($servePipes[0]);
         $serveOut = (string) stream_get_contents($servePipes[1]);
         fclose($servePipes[1]);
@@ -101,7 +146,10 @@ if (trim($able) !== 'yes') {
     }
     $serveErr = (string) @file_get_contents($serveErrFile);
     @unlink($serveErrFile);
-    $check($serveStatus === 1 && $serveOut === '' && str_contains($serveErr, 'could not open inbox'), "serve that cannot start says why on stderr, and nothing on stdout, which is the protocol's", json_encode([$serveStatus, $serveOut, substr($serveErr, -300)]));
+    $served = array_map(static fn (string $line): mixed => json_decode($line, true), array_values(array_filter(explode("\n", $serveOut), static fn (string $line): bool => trim($line) !== '')));
+    $protocol = $served !== [] && array_filter($served, static fn (mixed $line): bool => !is_array($line) || ($line['jsonrpc'] ?? null) !== '2.0') === [];
+    $answered = array_values(array_map(static fn (array $line): mixed => $line['id'] ?? null, array_filter($served, static fn (mixed $line): bool => is_array($line) && isset($line['result']))));
+    $check($serveStatus === 0 && $protocol && $answered === [1] && str_contains($serveErr, 'the inbox could not be opened yet'), "serve without the service starts, answers on stdout, which is the protocol's, and says on stderr that the inbox could not be opened yet", json_encode([$serveStatus, substr($serveOut, 0, 200), substr($serveErr, -300)]));
     // Raised after the command line has started, as the transport's notice was.
     $late = $cliDir . DIRECTORY_SEPARATOR . 'late-notice.php';
     file_put_contents($late, "<?php\nregister_shutdown_function(static function (): void {\n    trigger_error('aamio-test: a deprecation raised during the run', E_USER_DEPRECATED);\n});\n");

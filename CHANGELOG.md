@@ -100,9 +100,31 @@ not what moved in the source.
 - A command that cannot do what it was asked answers with JSON on standard
   output, `error` and `error_code`, as aamio-python and the Node runtime
   answer. It said so on standard error. A send that stops exits 1, as in the
-  other two: it exited 2, which is a command given wrong. `serve` that cannot
-  start still says why on standard error, which is where the host keeps its
-  log: its standard output is the protocol's alone.
+  other two: it exited 2, which is a command given wrong. `error_code` is the
+  code the three runtimes share, as `unknown_channel` or `invalid_key`, and
+  over MCP too, where a failed call had none; an error without a shared code
+  is said by the short name of its class.
+- What can be seen to be wrong from the command line alone is refused before
+  the home is opened or made, on standard error with 2, as aamio-python and the
+  Node runtime refuse it: a missing or extra word, an option the command does
+  not take, a number that is no number or is outside its bounds, `--data` or
+  `--gate` that is not JSON, and a label, scope name, lifetime or archive
+  choice that cannot be. They were refused with 1 after the home was made, an
+  option the command did not take was passed over, and a number that was no
+  number was taken as 0: `lookup --wait x` waited 0 seconds and said nothing.
+  A partner's name or key and `send --re` are the command's answer, as JSON
+  with 1, and no home is made for them either.
+- `serve` starts when the service cannot be reached, as the Node runtime's
+  server does, and says on standard error that the inbox could not be opened
+  yet: a call that needs it opens it then, and says why when it cannot. It
+  stopped, and a host that started it while the network was down showed a
+  server that had failed. Its standard output stays the protocol's alone.
+- A partner's name is 1 to 64 characters with no control characters, as in the
+  other two. Any name was taken, and one with a line break in it went into
+  partners.json and into every list that showed it.
+- A channel's lifetime is checked here, 30 to 3600 seconds, before the service
+  is asked, by `channel open`, `board channel` and over MCP.
+- `board answer` takes `--data JSON`, as in the other two runtimes.
 - `doctor` and `init` read who can read the home with icacls when Get-Acl is
   not there, as aamio-python and the Node runtime do, and said nothing could
   be checked. whoami, icacls and PowerShell are asked by their place in

@@ -21,6 +21,8 @@ final class Runtime
 {
     public const INBOX_TTL = 3600;
     public const BOARD_TTL = 1800;
+    public const CHANNEL_TTL_MIN = 30;
+    public const CHANNEL_TTL_MAX = 3600;
     // What a post leaves its inbox: time for the work the board advises and
     // the round trip. The board refuses a post that would outlive the inbox
     // when it arrives, and the lifetime is in the body the work covers, so it
@@ -346,7 +348,7 @@ final class Runtime
         }
         if ($text === false || trim($text) === '') {
             if ($text === false && $shape !== null) {
-                throw new \RuntimeException($this->unreadable($name, 'it would not open'));
+                throw new CodedRuntime('state_unreadable', $this->unreadable($name, 'it would not open'));
             }
 
             return $default;
@@ -356,10 +358,10 @@ final class Runtime
             if ($shape === null) {
                 return $default;
             }
-            throw new \RuntimeException($this->unreadable($name, 'not UTF-8 JSON'));
+            throw new CodedRuntime('state_unreadable', $this->unreadable($name, 'not UTF-8 JSON'));
         }
         if ($shape !== null && ($shape === 'list' ? !is_array($raw) : !$raw instanceof \stdClass)) {
-            throw new \RuntimeException($this->unreadable($name, 'not a JSON ' . $shape));
+            throw new CodedRuntime('state_unreadable', $this->unreadable($name, 'not a JSON ' . $shape));
         }
 
         return $assoc ? json_decode($text, true) : $raw;
@@ -392,7 +394,7 @@ final class Runtime
         // A write that failed says so. Quietly carrying on, a scope was reported
         // kept that was never on disk.
         if ($written === false || !@rename($tmp, $path)) {
-            throw new \RuntimeException('could not write ' . $path);
+            throw new CodedRuntime('not_saved', 'could not write ' . $path);
         }
     }
 
@@ -417,14 +419,14 @@ final class Runtime
     {
         $real = realpath($this->home) ?: $this->home;
         if (isset(self::$lockedHomes[$real])) {
-            throw new \RuntimeException('another aamio in this process is already using ' . $this->home);
+            throw new CodedRuntime('home_in_use', 'another aamio in this process is already using ' . $this->home);
         }
         if ($this->holdOwnerLock() === false) {
             // The owner writes its pid just after it takes the lock, so a
             // moment may pass with none, or an old one, there to name.
             $holder = $this->lockHolder();
             $named = is_int($holder['pid'] ?? null) ? ' (pid ' . $holder['pid'] . ')' : '';
-            throw new \RuntimeException(sprintf('another aamio%s is using %s. Stop it, or use a different AAMIO_HOME.', $named, $this->home));
+            throw new CodedRuntime('home_in_use', sprintf('another aamio%s is using %s. Stop it, or use a different AAMIO_HOME.', $named, $this->home));
         }
         try {
             $this->checkOlderOwner($probe);
@@ -462,7 +464,7 @@ final class Runtime
             umask($mask);
         }
         if ($handle === false) {
-            throw new \RuntimeException(sprintf('cannot establish exclusive ownership of %s: %s could not be opened (%s). Restore file access, or use a different AAMIO_HOME on a local disk.', $this->home, $path, $why));
+            throw new CodedRuntime('lock_unavailable', sprintf('cannot establish exclusive ownership of %s: %s could not be opened (%s). Restore file access, or use a different AAMIO_HOME on a local disk.', $this->home, $path, $why));
         }
         $wouldBlock = 0;
         error_clear_last();
@@ -478,7 +480,7 @@ final class Runtime
             return false;
         }
 
-        throw new \RuntimeException(sprintf('cannot establish exclusive ownership of %s: %s could not be locked (%s). Restore locking support, or use a different AAMIO_HOME on a local disk.', $this->home, $path, $why));
+        throw new CodedRuntime('lock_unavailable', sprintf('cannot establish exclusive ownership of %s: %s could not be locked (%s). Restore locking support, or use a different AAMIO_HOME on a local disk.', $this->home, $path, $why));
     }
 
     /** What the pid file says, for a message. Nothing when it cannot be read. */
@@ -507,13 +509,13 @@ final class Runtime
         }
         $alive = ($probe ?? self::pidAlive(...))($held['pid']);
         if ($alive === null) {
-            throw new \RuntimeException(sprintf('could not determine whether aamio (pid %d) is still using %s; the lock is left untouched. Process inspection was unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. Do not remove the lock unless you have independently confirmed its owner has stopped.', $held['pid'], $this->home));
+            throw new CodedRuntime('home_in_use', sprintf('could not determine whether aamio (pid %d) is still using %s; the lock is left untouched. Process inspection was unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. Do not remove the lock unless you have independently confirmed its owner has stopped.', $held['pid'], $this->home));
         }
         // The lock is written after its owner started. A process that
         // started later got the pid after the owner was gone.
         $started = $alive && (is_int($held['at'] ?? null) || is_float($held['at'] ?? null)) ? self::startedAt($held['pid']) : null;
         if ($alive && ($started === null || $started <= $held['at'] + 2)) {
-            throw new \RuntimeException(sprintf('another aamio (pid %d) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, the one that took the lock stopped without letting go of it: delete %s and start again.', $held['pid'], $this->home, $this->path('lock')));
+            throw new CodedRuntime('home_in_use', sprintf('another aamio (pid %d) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, the one that took the lock stopped without letting go of it: delete %s and start again.', $held['pid'], $this->home, $this->path('lock')));
         }
     }
 
@@ -676,7 +678,7 @@ final class Runtime
         if (file_exists($path)) {
             $text = @file_get_contents($path);
             if ($text === false) {
-                throw new \RuntimeException($this->unreadable('key', 'it would not open'));
+                throw new CodedRuntime('key_unreadable', $this->unreadable('key', 'it would not open'));
             }
             // Not past a mark, as the home's other files are: the key holds
             // the seed and nothing else, in all three runtimes.
@@ -684,7 +686,7 @@ final class Runtime
                 // A new key over it would be a new identity, and the old one
                 // gone for good. Partners know this runtime by that key.
                 if (preg_match('/^[0-9a-f]{64}$/D', trim($text)) !== 1) {
-                    throw new \RuntimeException($this->unreadable('key', 'not a 64 character hex seed'));
+                    throw new CodedRuntime('key_unreadable', $this->unreadable('key', 'not a 64 character hex seed'));
                 }
 
                 return Keys::fromSeedHex(trim($text));
@@ -699,7 +701,7 @@ final class Runtime
         }
         @chmod($path, 0600);
         if ($written === false) {
-            throw new \RuntimeException('could not write ' . $path);
+            throw new CodedRuntime('not_saved', 'could not write ' . $path);
         }
 
         return $keys;
@@ -824,9 +826,7 @@ final class Runtime
      */
     public function partnerAdd(string $name, string $key): array
     {
-        if (!Codec::isKey($key)) {
-            throw new \InvalidArgumentException('not a base64url Ed25519 public key of 32 bytes');
-        }
+        self::checkPartner($name, $key);
         foreach ($this->partners as $p) {
             if ($p['name'] !== $name && CaseFold::lower($p['name']) === CaseFold::lower($name) && $p['key'] !== $key) {
                 throw new AmbiguousPartner(sprintf('%s is in the address book with another key, and %s differs from it only in upper and lower case, which would make a send by name a guess. Give %s exactly to replace its key, or choose another name.', $p['name'], $name, $p['name']));
@@ -1074,7 +1074,7 @@ final class Runtime
     {
         $i = $this->scopeIndex($name);
         if ($i === null) {
-            throw new \RuntimeException('no scope called ' . $name . ' here. The scope list shows the ones this runtime holds');
+            throw new CodedRuntime('unknown_scope', 'no scope called ' . $name . ' here. The scope list shows the ones this runtime holds');
         }
 
         return $this->scopes[$i];
@@ -1088,7 +1088,7 @@ final class Runtime
     private static function scopeNameOk(mixed $name): string
     {
         if (!is_string($name) || preg_match(self::SCOPE_NAME, $name) !== 1) {
-            throw new \InvalidArgumentException('a scope name is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit');
+            throw new CodedInvalidArgument('invalid_scope', 'a scope name is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit');
         }
 
         return $name;
@@ -1099,7 +1099,7 @@ final class Runtime
     {
         $name = self::scopeNameOk($name);
         if ($this->scopeIndex($name) !== null) {
-            throw new \InvalidArgumentException('there is a scope called ' . $name . ' already');
+            throw new CodedInvalidArgument('scope_exists', 'there is a scope called ' . $name . ' already');
         }
         $key = Address::newScopeKey();
         $scope = ['name' => $name, 'key' => $key, 'address' => Address::scope($key)];
@@ -1124,21 +1124,21 @@ final class Runtime
     {
         $name = self::scopeNameOk($name);
         if ($key === null && $address === null) {
-            throw new \InvalidArgumentException('give the key, to read and post, or the address, to post only');
+            throw new CodedInvalidArgument('invalid_scope', 'give the key, to read and post, or the address, to post only');
         }
         if ($key !== null && (!is_string($key) || !Address::isScopeKey($key))) {
-            throw new \InvalidArgumentException('a scope key is 26 to 64 characters of a-z and 0-9. The 20 character address goes in address');
+            throw new CodedInvalidArgument('invalid_scope', 'a scope key is 26 to 64 characters of a-z and 0-9. The 20 character address goes in address');
         }
         if ($address !== null && (!is_string($address) || !Address::isW($address))) {
-            throw new \InvalidArgumentException('a scope address is the 20 characters of a-z and 2-7 that go on a post');
+            throw new CodedInvalidArgument('invalid_scope', 'a scope address is the 20 characters of a-z and 2-7 that go on a post');
         }
         $derived = $key !== null ? Address::scope($key) : $address;
         if ($address !== null && $derived !== $address) {
-            throw new \InvalidArgumentException('that key does not give that address, so one of the two is wrong');
+            throw new CodedInvalidArgument('invalid_scope', 'that key does not give that address, so one of the two is wrong');
         }
         $index = $this->scopeIndex($name);
         if ($index !== null && $this->scopes[$index]['address'] !== $derived) {
-            throw new \InvalidArgumentException('there is a scope called ' . $name . ' already, with another address. Remove it or choose another name');
+            throw new CodedInvalidArgument('scope_exists', 'there is a scope called ' . $name . ' already, with another address. Remove it or choose another name');
         }
         foreach ($index === null ? $this->scopes : [] as $i => $scope) {
             if ($scope['address'] === $derived) {
@@ -1205,7 +1205,7 @@ final class Runtime
     {
         $scope = $this->scopeNamed($name);
         if (empty($scope['key'])) {
-            throw new \InvalidArgumentException('scope ' . $scope['name'] . ' is held to post only, so there is no key here');
+            throw new CodedInvalidArgument('scope_write_only', 'scope ' . $scope['name'] . ' is held to post only, so there is no key here');
         }
 
         return ['name' => $scope['name'], 'key' => $scope['key'], 'address' => $scope['address']];
@@ -1221,15 +1221,13 @@ final class Runtime
     public function scopeShare(string $name, string $to, mixed $access): array
     {
         $scope = $this->scopeNamed($name);
-        if ($access !== 'read' && $access !== 'write') {
-            throw new \InvalidArgumentException('access is read, which gives the key to read and post, or write, which gives the address to post only');
-        }
+        self::checkAccess($access);
         if ($access === 'read' && empty($scope['key'])) {
-            throw new \InvalidArgumentException('scope ' . $scope['name'] . ' is held to post only, so it can only be shared with access write');
+            throw new CodedInvalidArgument('scope_write_only', 'scope ' . $scope['name'] . ' is held to post only, so it can only be shared with access write');
         }
         $partner = Codec::isKey($to) ? $this->partnerByKey($to) : $this->partnerByName($to);
         if ($partner === null) {
-            throw new \InvalidArgumentException('a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone\'s');
+            throw new CodedInvalidArgument('unknown_partner', 'a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone\'s');
         }
         $share = $access === 'read' ? ['name' => $scope['name'], 'key' => $scope['key']] : ['name' => $scope['name'], 'address' => $scope['address']];
         [$w, $key] = $this->addressFor($partner['name']);
@@ -1573,7 +1571,7 @@ final class Runtime
             return $this->channels['inbox'];
         }
         if ($inbox === null || $inbox->gone || $inbox->expireAt <= time()) {
-            throw new \RuntimeException('could not open inbox: ' . $outcome['error']);
+            throw new CodedRuntime('inbox_unavailable', 'could not open inbox: ' . $outcome['error']);
         }
 
         // The old one still holds; it is read on, and attention says why.
@@ -1639,18 +1637,19 @@ final class Runtime
     public function openChannel(string $label, int $ttl, ?array $allowNames = null, mixed $gate = null, ?string $to = null, ?string $note = null): array
     {
         self::checkLabel($label);
+        self::checkChannelTtl($ttl);
         $taken = $this->channelCalled($label);
         if ($taken !== null) {
-            throw new \InvalidArgumentException('there is a channel called ' . $taken->label . ' already. Close it or choose another label');
+            throw new CodedInvalidArgument('channel_exists', 'there is a channel called ' . $taken->label . ' already. Close it or choose another label');
         }
         if ($note !== null && $to === null) {
-            throw new \InvalidArgumentException('note travels with the address to whoever to names, so without to there is nothing to carry it');
+            throw new CodedInvalidArgument('invalid_note', 'note travels with the address to whoever to names, so without to there is nothing to carry it');
         }
         $keys = [];
         foreach ($allowNames ?? [] as $name) {
             $partner = $this->partnerByName((string) $name);
             if ($partner === null) {
-                throw new \InvalidArgumentException('unknown partner: ' . $name);
+                throw new CodedInvalidArgument('unknown_partner', 'unknown partner: ' . $name);
             }
             $keys[] = $partner['key'];
         }
@@ -1675,7 +1674,7 @@ final class Runtime
 
         $opened = $this->client->open($ttl, $keys !== [] ? $keys : null, $gate);
         if ($opened['status'] !== 201) {
-            throw new \RuntimeException('could not open channel: ' . $opened['status'] . ' ' . json_encode($opened['body']));
+            throw new CodedRuntime('channel_unavailable', 'could not open channel: ' . $opened['status'] . ' ' . json_encode($opened['body']));
         }
         $channel = new Channel($label, $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], $keys);
         $this->channels[$label] = $channel;
@@ -1706,13 +1705,90 @@ final class Runtime
      * runtime's own channels. The rule and its words are aamio-python's and
      * the Node runtime's.
      */
+    /**
+     * A partner's name and key as the three runtimes take them, before
+     * anything is opened or written. A name is 1 to 64 characters, none of
+     * them a control character, as in the Node runtime. This one took any
+     * name, and one with a line break in it went into partners.json and into
+     * every list that showed it (a check of 13 November 2026).
+     */
+    public static function checkPartner(mixed $name, mixed $key): void
+    {
+        if (!is_string($name) || preg_match('/^[^\x00-\x1f\x7f]{1,64}$/uD', $name) !== 1) {
+            throw new CodedInvalidArgument('invalid_name', "A partner's name is 1 to 64 characters, with no control characters.");
+        }
+        if (!is_string($key) || !Codec::isKey($key)) {
+            throw new CodedInvalidArgument('invalid_key', 'not a base64url Ed25519 public key of 32 bytes');
+        }
+    }
+
+    /** re as send takes it: the sha256 of the message it answers, or nothing. */
+    public static function checkRe(mixed $re): void
+    {
+        if ($re !== null && (!is_string($re) || !self::isMessageHash($re))) {
+            throw new CodedInvalidArgument('invalid_re', 're is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it');
+        }
+    }
+
+    /** A channel's lifetime as the service takes it, checked here as in the Node runtime: a whole number of seconds from 30 to 3600. */
+    public static function checkChannelTtl(mixed $ttl): void
+    {
+        if (!is_int($ttl) || $ttl < self::CHANNEL_TTL_MIN || $ttl > self::CHANNEL_TTL_MAX) {
+            throw new CodedInvalidArgument('invalid_ttl', 'a channel lives a whole number of seconds from ' . self::CHANNEL_TTL_MIN . ' to ' . self::CHANNEL_TTL_MAX);
+        }
+    }
+
+    /** A scope's name as scope new, key, share and remove take it. */
+    public static function checkScopeName(mixed $name): void
+    {
+        self::scopeNameOk($name);
+    }
+
+    /** What scope add was given, as far as it can be judged without the home: a name, and a key or an address that fit each other. */
+    public static function checkScopeAdd(mixed $name, mixed $key, mixed $address): void
+    {
+        self::scopeNameOk($name);
+        if ($key === null && $address === null) {
+            throw new CodedInvalidArgument('invalid_scope', 'give the key, to read and post, or the address, to post only');
+        }
+        if ($key !== null && (!is_string($key) || !Address::isScopeKey($key))) {
+            throw new CodedInvalidArgument('invalid_scope', 'a scope key is 26 to 64 characters of a-z and 0-9. The 20 character address goes in address');
+        }
+        if ($address !== null && (!is_string($address) || !Address::isW($address))) {
+            throw new CodedInvalidArgument('invalid_scope', 'a scope address is the 20 characters of a-z and 2-7 that go on a post');
+        }
+        if ($key !== null && $address !== null && Address::scope($key) !== $address) {
+            throw new CodedInvalidArgument('invalid_scope', 'that key does not give that address, so one of the two is wrong');
+        }
+    }
+
+    /** read, which gives the key to read and post, or write, which gives the address to post only. */
+    public static function checkAccess(mixed $access): void
+    {
+        if ($access !== 'read' && $access !== 'write') {
+            throw new CodedInvalidArgument('invalid_access', 'access is read, which gives the key to read and post, or write, which gives the address to post only');
+        }
+    }
+
+    /** board_unreachable when nothing answered, board_failed when the board said no, as the Node runtime names them. */
+    private static function boardCode(int $status): string
+    {
+        return $status === 0 ? 'board_unreachable' : 'board_failed';
+    }
+
+    /** The code of an error, as error_code says it: the one the three runtimes share, or the short name of its class. */
+    public static function errorCode(\Throwable $error): string
+    {
+        return $error instanceof Coded ? $error->errorCode() : (new \ReflectionClass($error))->getShortName();
+    }
+
     public static function checkLabel(mixed $label): void
     {
         if (!Storage::isSafeLabel($label)) {
-            throw new \InvalidArgumentException("a channel's label is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit, and not a name the system keeps for a device: it names the channel's file in the archive");
+            throw new CodedInvalidArgument('invalid_label', "a channel's label is 1 to 64 letters, digits, dots, dashes and underscores, starting with a letter or a digit, and not a name the system keeps for a device: it names the channel's file in the archive");
         }
         if (preg_match('/\A(?:inbox|board)/i', $label) === 1) {
-            throw new \InvalidArgumentException('the label ' . $label . " is the runtime's own: a label that starts with inbox or board names an inbox or a board inbox. Choose another");
+            throw new CodedInvalidArgument('invalid_label', 'the label ' . $label . " is the runtime's own: a label that starts with inbox or board names an inbox or a board inbox. Choose another");
         }
     }
 
@@ -1786,7 +1862,7 @@ final class Runtime
         $body += ['seen' => str_repeat('0', 64)];
         $envelope = $this->keys->seal($key, Codec::json($body));
         if (strlen($envelope) > Client::MAX_MESSAGE_BYTES) {
-            throw new \InvalidArgumentException('with this note the message carrying the address would be ' . strlen($envelope) . ' bytes, and a message is at most ' . Client::MAX_MESSAGE_BYTES . ', so no channel was opened. Shorten the note, and send the rest on the channel once it is open.');
+            throw new CodedInvalidArgument('too_large', 'with this note the message carrying the address would be ' . strlen($envelope) . ' bytes, and a message is at most ' . Client::MAX_MESSAGE_BYTES . ', so no channel was opened. Shorten the note, and send the rest on the channel once it is open.');
         }
     }
 
@@ -1869,11 +1945,11 @@ final class Runtime
     public static function checkGate(mixed $gate): array
     {
         if (!is_array($gate)) {
-            throw new \InvalidArgumentException('a gate must be an object, not ' . get_debug_type($gate) . '. ' . self::GATE_SHAPE);
+            throw new CodedInvalidArgument('invalid_gate', 'a gate must be an object, not ' . get_debug_type($gate) . '. ' . self::GATE_SHAPE);
         }
 
         if ($gate !== [] && array_is_list($gate)) {
-            throw new \InvalidArgumentException('a gate must be an object, not a list. ' . self::GATE_SHAPE);
+            throw new CodedInvalidArgument('invalid_gate', 'a gate must be an object, not a list. ' . self::GATE_SHAPE);
         }
 
         $unknown = array_values(array_diff(array_keys($gate), ['require', 'advise']));
@@ -1881,16 +1957,16 @@ final class Runtime
         if ($unknown !== []) {
             sort($unknown);
 
-            throw new \InvalidArgumentException('a gate has no field ' . implode(', ', $unknown) . '. ' . self::GATE_SHAPE);
+            throw new CodedInvalidArgument('invalid_gate', 'a gate has no field ' . implode(', ', $unknown) . '. ' . self::GATE_SHAPE);
         }
 
         if ($gate === []) {
-            throw new \InvalidArgumentException('an empty gate asks for nothing; leave the gate out instead. ' . self::GATE_SHAPE);
+            throw new CodedInvalidArgument('invalid_gate', 'an empty gate asks for nothing; leave the gate out instead. ' . self::GATE_SHAPE);
         }
 
         foreach (['require', 'advise'] as $part) {
             if (isset($gate[$part]) && (!is_array($gate[$part]) || ($gate[$part] !== [] && array_is_list($gate[$part])))) {
-                throw new \InvalidArgumentException('gate.' . $part . ' must be an object. ' . self::GATE_SHAPE);
+                throw new CodedInvalidArgument('invalid_gate', 'gate.' . $part . ' must be an object. ' . self::GATE_SHAPE);
             }
         }
 
@@ -1912,7 +1988,7 @@ final class Runtime
     {
         $channel = $this->channels[$label] ?? null;
         if ($channel === null) {
-            throw new \InvalidArgumentException('no such channel: ' . $label);
+            throw new CodedInvalidArgument('unknown_channel', 'no such channel: ' . $label);
         }
         $status = (int) $this->client->close($channel->w, $channel->readKey)['status'];
         if (!in_array($status, [200, 404, 410], true)) {
@@ -1927,7 +2003,7 @@ final class Runtime
         } catch (\Throwable $error) {
             $this->channels[$label] = $channel;
 
-            throw new \RuntimeException(($status === 200 ? 'the thread is deleted at the service' : 'there is no thread at the service any more') . ', and state.json could not be written (' . $error->getMessage() . '), so this home still lists ' . $label . '. Close it again once the disk takes writes.');
+            throw new CodedRuntime('not_saved', ($status === 200 ? 'the thread is deleted at the service' : 'there is no thread at the service any more') . ', and state.json could not be written (' . $error->getMessage() . '), so this home still lists ' . $label . '. Close it again once the disk takes writes.');
         }
         $channel->closed = true;
         $closed = ['label' => $label, 'w' => $channel->w, 'status' => $status, 'deleted' => $status === 200, 'closed_here' => true];
@@ -1959,7 +2035,7 @@ final class Runtime
         $ttl = min(self::INBOX_TTL, max($seconds + 60, 900));
         $opened = $this->client->open($ttl, ['*']);
         if ($opened['status'] !== 201) {
-            throw new \RuntimeException('could not open the board inbox: ' . $opened['status'] . ' ' . json_encode($opened['body']));
+            throw new CodedRuntime('board_inbox_unavailable', 'could not open the board inbox: ' . $opened['status'] . ' ' . json_encode($opened['body']));
         }
         $channel = new Channel('board', $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], ['*']);
         $before = $this->channels;
@@ -1976,7 +2052,7 @@ final class Runtime
             if ($held !== null) {
                 $held->label = (string) $label;
             }
-            throw new \RuntimeException('the board inbox could not be written down (' . $error->getMessage() . '), so nothing was posted or sent: an answer would come where this home cannot read after a restart');
+            throw new CodedRuntime('not_saved', 'the board inbox could not be written down (' . $error->getMessage() . '), so nothing was posted or sent: an answer would come where this home cannot read after a restart');
         }
         ($this->log)(sprintf('board inbox %s until %d (any key, signed only)', $channel->w, $channel->expireAt));
 
@@ -2011,7 +2087,7 @@ final class Runtime
         }
         [$status, $answer] = Http::call('POST', rtrim($this->board->host, '/') . '/', $bytes, $headers);
         if ($status !== 201) {
-            throw new \RuntimeException('post failed: ' . $status . ' ' . json_encode($answer));
+            throw new CodedRuntime(self::boardCode((int) $status), 'post failed: ' . $status . ' ' . json_encode($answer));
         }
         // The post is made. A record of it that cannot be written is said
         // beside it, and is no reason to tell the caller the post failed: it
@@ -2050,17 +2126,17 @@ final class Runtime
     {
         $held = $scope !== null ? $this->scopeNamed($scope) : null;
         if ($held !== null && empty($held['key'])) {
-            throw new \InvalidArgumentException('scope ' . $held['name'] . ' is held to post only. Reading it takes the key, which a partner can share with access read');
+            throw new CodedInvalidArgument('scope_write_only', 'scope ' . $held['name'] . ' is held to post only. Reading it takes the key, which a partner can share with access read');
         }
         try {
             // In the body and nowhere else. A board older than scopes answers
             // 400 to the field, so it never reads the public board instead.
             $found = $this->board->find($kind, $tags ?? [], $lang, $key, $after, $wait, $minWorkBits, $held['key'] ?? null);
         } catch (\UnexpectedValueException) {
-            throw new \RuntimeException('the board did not say it read scope ' . $held['name'] . ', so these posts are not shown');
+            throw new CodedRuntime('board_failed', 'the board did not say it read scope ' . $held['name'] . ', so these posts are not shown');
         }
         if ($found['status'] !== 200) {
-            throw new \RuntimeException('board find failed: ' . $found['status'] . ' ' . json_encode($found['body']));
+            throw new CodedRuntime(self::boardCode((int) $found['status']), 'board find failed: ' . $found['status'] . ' ' . json_encode($found['body']));
         }
         foreach ((array) ($found['body']['posts'] ?? []) as $post) {
             if (!empty($post['w']) && !empty($post['key'])) {
@@ -2093,14 +2169,14 @@ final class Runtime
             return null;
         }
 
-        throw new \RuntimeException('the board answered ' . $got['status'] . ' for post ' . $postId . ', so whether that post is live is unknown. Ask again rather than treating it as gone');
+        throw new CodedRuntime('board_failed', 'the board answered ' . $got['status'] . ' for post ' . $postId . ', so whether that post is live is unknown. Ask again rather than treating it as gone');
     }
 
     public function boardTags(): array
     {
         $tags = $this->board->tags();
         if ($tags['status'] !== 200) {
-            throw new \RuntimeException('board tags failed: ' . $tags['status']);
+            throw new CodedRuntime(self::boardCode((int) $tags['status']), 'board tags failed: ' . $tags['status']);
         }
 
         return $tags['body'];
@@ -2118,7 +2194,7 @@ final class Runtime
     {
         $done = $this->board->withdraw($postId);
         if ($done['status'] !== 200) {
-            throw new \RuntimeException('withdraw failed: ' . $done['status'] . ' ' . json_encode($done['body']));
+            throw new CodedRuntime(self::boardCode((int) $done['status']), 'withdraw failed: ' . $done['status'] . ' ' . json_encode($done['body']));
         }
         $answer = is_array($done['body']) ? $done['body'] : [];
         // The record the other two write: the post's id, under id.
@@ -2153,7 +2229,7 @@ final class Runtime
                 $after = (int) $found['next'];
             }
             if ($fetched === null) {
-                throw new \RuntimeException('no live post with that id' . ($scope !== null ? ' in scope ' . $scope : ". A post in a scope is found with the scope's name"));
+                throw new CodedRuntime('unknown_post', 'no live post with that id' . ($scope !== null ? ' in scope ' . $scope : ". A post in a scope is found with the scope's name"));
             }
             $post = $fetched;
         }
@@ -2408,10 +2484,11 @@ final class Runtime
     /** A private channel only that key may write to, with its address handed over sealed. */
     public function openChannelWith(string $key, int $ttl = 900, ?string $label = null, ?string $replyTo = null, ?string $note = null): array
     {
+        self::checkChannelTtl($ttl);
         if (!Codec::isKey($key)) {
             $partner = $this->partnerByName($key);
             if ($partner === null) {
-                throw new \InvalidArgumentException('not a key and not a known partner: ' . $key);
+                throw new CodedInvalidArgument('unknown_partner', 'not a key and not a known partner: ' . $key);
             }
             $key = $partner['key'];
         }
@@ -2434,7 +2511,7 @@ final class Runtime
         }
         $opened = $this->client->open($ttl, [$key]);
         if ($opened['status'] !== 201) {
-            throw new \RuntimeException('could not open channel: ' . $opened['status'] . ' ' . json_encode($opened['body']));
+            throw new CodedRuntime('channel_unavailable', 'could not open channel: ' . $opened['status'] . ' ' . json_encode($opened['body']));
         }
         $channel = new Channel($label, $opened['id'], $opened['w'], (int) $opened['body']['expire_at'], [$key]);
         $this->channels[$label] = $channel;
@@ -2513,7 +2590,7 @@ final class Runtime
     {
         $partner = is_array($name) ? $name : $this->partnerByName($name);
         if ($partner === null) {
-            throw new \InvalidArgumentException('unknown partner: ' . $name);
+            throw new CodedInvalidArgument('unknown_partner', 'unknown partner: ' . $name);
         }
         $result = $this->lookup([$partner['name']]);
         foreach ($result['online'] as $entry) {
@@ -2521,7 +2598,7 @@ final class Runtime
                 return [$entry['w'], $partner['key']];
             }
         }
-        throw new \RuntimeException($partner['name'] . ' is not online right now');
+        throw new CodedRuntime('partner_offline', $partner['name'] . ' is not online right now');
     }
 
     // --------------------------------------------------------------- send --
@@ -2540,9 +2617,7 @@ final class Runtime
      */
     public function send(string $to, ?string $text = null, ?array $data = null, ?string $replyTo = null, ?string $answers = null): array
     {
-        if ($answers !== null && !self::isMessageHash($answers)) {
-            throw new \InvalidArgumentException('re is the sha256 of the message this answers: 64 lowercase hex characters, as read shows it');
-        }
+        self::checkRe($answers);
         [$w, $key, $partner] = $this->recipient($to);
 
         return $this->sendSealed($w, $key, $partner, $text, $data, $replyTo, null, $answers);
@@ -2564,7 +2639,7 @@ final class Runtime
             // looked up again, it could become another partner of that name.
             $partner = $this->partnerByKey($to);
             if ($partner === null) {
-                throw new \InvalidArgumentException('key is not in partners');
+                throw new CodedInvalidArgument('unknown_partner', 'key is not in partners');
             }
             [$w, $key] = $this->addressFor($partner);
 
@@ -2577,14 +2652,14 @@ final class Runtime
                 // text or data is the dead end an agent on MCP walks into: the
                 // tool that opens a channel returns an address, and nothing here
                 // learns whose it is from reading it (item 5 of the round-2 list).
-                throw new \RuntimeException('no key known for address ' . $to . '. A runtime learns whose an address is from presence, or from reply_to or channel in a verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its reply_to, or ask the owner to hand the address over: aamio_open_channel with to, or aamio board channel KEY --reply-to ADDRESS on the command line');
+                throw new CodedRuntime('unknown_address', 'no key known for address ' . $to . '. A runtime learns whose an address is from presence, or from reply_to or channel in a verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its reply_to, or ask the owner to hand the address over: aamio_open_channel with to, or aamio board channel KEY --reply-to ADDRESS on the command line');
             }
 
             return [$to, $key, null];
         }
         $partner = $this->partnerByName($to);
         if ($partner === null) {
-            throw new \InvalidArgumentException('unknown partner: ' . $to);
+            throw new CodedInvalidArgument('unknown_partner', 'unknown partner: ' . $to);
         }
         [$w, $key] = $this->addressFor($partner);
 
@@ -2722,7 +2797,7 @@ final class Runtime
         // message that could never go looking as if it might have (a health
         // check of 30 September 2026).
         if (strlen($envelope) > Client::MAX_MESSAGE_BYTES) {
-            throw new \InvalidArgumentException('this message is ' . strlen($envelope) . ' bytes sealed, and a message is at most ' . Client::MAX_MESSAGE_BYTES . ', so nothing was stored or sent. Send a URL and a hash instead.');
+            throw new CodedInvalidArgument('too_large', 'this message is ' . strlen($envelope) . ' bytes sealed, and a message is at most ' . Client::MAX_MESSAGE_BYTES . ', so nothing was stored or sent. Send a URL and a hash instead.');
         }
         $entry = [
             'id' => 'm-' . substr(Codec::sha256hex($this->keys->public . '|' . $w . '|' . $envelope), 0, 16),
@@ -4179,7 +4254,7 @@ final class Runtime
         $key = $this->traceKey($who);
         $book = $key === null ? null : ($this->traces[$key] ?? null);
         if (!is_array($book)) {
-            throw new \RuntimeException('nothing sent to or received from ' . $who . ' is recorded here');
+            throw new CodedRuntime('no_trace', 'nothing sent to or received from ' . $who . ' is recorded here');
         }
         $view = self::traceView($book, $limit);
 
@@ -4433,11 +4508,11 @@ final class Runtime
     {
         $channel = $this->channels[$label] ?? null;
         if ($channel === null) {
-            throw new \InvalidArgumentException('no such channel: ' . $label);
+            throw new CodedInvalidArgument('unknown_channel', 'no such channel: ' . $label);
         }
         $taken = $this->client->receipt($channel->w, $channel->readKey);
         if ($taken['status'] !== 200) {
-            throw new \RuntimeException('receipt failed: ' . $taken['status'] . ' ' . json_encode($taken['body']));
+            throw new CodedRuntime('receipt_failed', 'receipt failed: ' . $taken['status'] . ' ' . json_encode($taken['body']));
         }
         $data = $taken['body'];
         // Checked as a receipt for this channel before anything is compared,
@@ -4446,7 +4521,7 @@ final class Runtime
         // review of 10 November 2026).
         $fault = self::receiptFault($data, $channel->w);
         if ($fault !== null) {
-            throw new \RuntimeException('receipt failed: the service\'s answer is not a receipt for this channel: ' . $fault . '. Nothing was compared, signed or anchored.');
+            throw new CodedRuntime('receipt_failed', 'receipt failed: the service\'s answer is not a receipt for this channel: ' . $fault . '. Nothing was compared, signed or anchored.');
         }
         // What this process read counts only for the thread it was read on. After
         // the service restarted, a new thread at the same address was compared

@@ -538,6 +538,7 @@ final class McpServer
                         } catch (\InvalidArgumentException $wrong) {
                             return self::resultOf([
                                 'error' => $wrong->getMessage(),
+                                'error_code' => Runtime::errorCode($wrong),
                                 'fix' => 'Send a gate with require, advise or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}, or leave gate out to take writes from anyone on the allowlist.',
                                 'given' => $a['gate'],
                             ], true);
@@ -610,7 +611,9 @@ final class McpServer
         } catch (GateStop $error) {
             return self::resultOf(($error->opened === null ? [] : ['opened' => $error->opened]) + ['error' => $error->getMessage(), 'error_code' => 'gate', 'operation' => $name === 'aamio_open_channel' ? 'open_channel' : 'send', 'retryable' => false, 'fix' => self::stillOpen($error->opened) . ($error->opened === null ? '' : 'Nothing was sent, so nobody has been given its address: close it with aamio_close_channel, and open a new one when the inbox\'s conditions can be met. ') . $error->fix], true);
         } catch (\InvalidArgumentException | \RuntimeException | \LogicException $error) {
-            return self::resultOf(['error' => $error->getMessage()], true);
+            // With the code the other two runtimes give the same failure, as
+            // the command line says it (a check of 13 November 2026).
+            return self::resultOf(['error' => $error->getMessage(), 'error_code' => Runtime::errorCode($error)], true);
         } catch (\TypeError | \ValueError | \JsonException $error) {
             // An argument of a type the runtime does not take. This call's
             // failure, and the server stays up for the next one.
@@ -858,7 +861,16 @@ final class McpServer
         $this->runtime->log = static function (string $line): void {
             fwrite(STDERR, '[aamio ' . date('H:i:s') . '] ' . $line . "\n");
         };
-        $this->runtime->ensureInbox();
+        // Without the service the server starts all the same, as the Node
+        // runtime's does: a call that needs the inbox opens it then, and says
+        // why when it cannot. It stopped here, and a host that started it while
+        // the network was down showed a server that had failed (a check of 13
+        // November 2026).
+        try {
+            $this->runtime->ensureInbox();
+        } catch (\RuntimeException $error) {
+            ($this->runtime->log)('the inbox could not be opened yet: ' . $error->getMessage() . '. A call that needs the inbox tries again, and says so.');
+        }
         ($this->runtime->log)('serving on stdio, inbox ' . ($this->runtime->whoami()['inbox'] ?? '?'));
         $this->in = $in;
         $this->out = $out;

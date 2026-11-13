@@ -647,11 +647,11 @@ final class Storage
             $policy['mode'] = 'days';
             $policy['days'] = (int) substr($text, 5);
         } else {
-            throw new \InvalidArgumentException('the archive is keep, off or days:N with N a whole number of days, not ' . $text);
+            throw new CodedInvalidArgument('invalid_archive', 'the archive is keep, off or days:N with N a whole number of days, not ' . $text);
         }
         if ($maxMb !== null) {
             if ($maxMb <= 0) {
-                throw new \InvalidArgumentException('--max-mb is a size above zero');
+                throw new CodedInvalidArgument('invalid_archive', '--max-mb is a size above zero');
             }
             $policy['max_mb'] = $maxMb;
         }
