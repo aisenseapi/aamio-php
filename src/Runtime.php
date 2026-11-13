@@ -3413,8 +3413,32 @@ final class Runtime
      * the service returned beyond it is fetched again by the next poll. It used
      * to be the caller that cut the list, after the cursor had moved past
      * everything: the messages over the limit were gone for good.
+     *
+     * A read that throws leaves nothing of itself in memory: the cursor, the
+     * thread it was on, the hashes, what board replies keep and the bindings
+     * are as they were, and the messages wait at the service for the next
+     * read, which hands them over. One that threw halfway through its messages
+     * kept the hashes of the ones it had taken, the next channel's save wrote
+     * them down, and the next read handed those messages over marked replay,
+     * never having handed them over at all (the release check of 13 November
+     * 2026).
      */
     public function poll(Channel $channel, int $wait = 0, ?int $limit = null, ?int $maxBytes = null): array
+    {
+        $before = [$channel->after, $channel->createdAt, $channel->expireAt, $channel->instance, $channel->gone, $channel->seen, $channel->seenFrom, count($channel->received), $this->peers];
+        try {
+            return $this->pollChannel($channel, $wait, $limit, $maxBytes);
+        } catch (\Throwable $error) {
+            [$channel->after, $channel->createdAt, $channel->expireAt, $channel->instance, $channel->gone, $channel->seen, $channel->seenFrom] = $before;
+            $channel->received = array_slice($channel->received, 0, $before[7]);
+            $this->peers = $before[8];
+
+            throw $error;
+        }
+    }
+
+    /** One read of one channel, as poll describes it: [state, entries]. */
+    private function pollChannel(Channel $channel, int $wait, ?int $limit, ?int $maxBytes): array
     {
         $channel->leftWaiting = 0;
         $channel->moreAtService = false;

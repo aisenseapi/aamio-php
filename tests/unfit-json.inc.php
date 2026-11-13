@@ -69,6 +69,36 @@ foreach (['a number that is not finite' => '{"text":"x","data":{"n":1e999}}', 'n
     $check(($unfitServer->dispatch('aamio_read', [])['structuredContent']['messages'] ?? null) === [], '... and the cursor is past all four');
 }
 
+// A channel that threw halfway through its messages kept the hashes of the ones
+// it had taken before it threw, the next channel's save wrote them down, and the
+// next read handed those messages over marked replay, never having handed them
+// over at all (the release check of 13 November 2026). Nothing in this read is
+// known to throw any more, so the logger does, at the note the second message
+// makes: it names an address the first one bound to another key.
+$halfThrows = false;
+$halfHome = $root . DIRECTORY_SEPARATOR . 'unfit-half';
+mkdir($halfHome, 0700, true);
+$halfReader = new Runtime($halfHome, 'https://fake.test', ['half'], false, static function (string $line) use (&$halfThrows): void {
+    if ($halfThrows && str_contains($line, 'is already bound to')) {
+        throw new \RuntimeException('the test made the second message fail');
+    }
+});
+$halfW = $halfReader->openChannel('side', 600)['w'];
+foreach ([[$unfitWriter, 'first on the side'], [$unfitReader, 'second on the side']] as [$halfSigner, $halfText]) {
+    $halfBody = Codec::json(['text' => $halfText, 'reply_to' => $unfitInbox]);
+    $halfSeq = count($fake->threads[$halfW]['messages']) + 1;
+    $fake->threads[$halfW]['messages'][] = ['seq' => $halfSeq, 'at' => $fake->now + $halfSeq, 'type' => 'text', 'body' => $halfBody, 'sha256' => hash('sha256', $halfBody), 'from' => $halfSigner->keys->public, 'sig' => $halfSigner->keys->sign(Keys::threadSigningInput($halfW, $halfBody)), 'verified' => true, 'sealed' => false];
+}
+$halfServer = new McpServer($halfReader);
+$halfThrows = true;
+$halfFirst = $halfServer->dispatch('aamio_read', [])['structuredContent'] ?? [];
+$check(($halfFirst['messages'] ?? null) === [] && array_filter($halfFirst['attention'] ?? [], static fn (array $note): bool => ($note['channel'] ?? null) === 'side' && ($note['state'] ?? null) === 'unread') !== [], 'a channel that throws on its second message hands nothing of it over and says the channel could not be read', json_encode($halfFirst));
+$halfThrows = false;
+// The inbox is read first and written down, with whatever the side holds in memory.
+$halfAgain = $halfServer->dispatch('aamio_read', [])['structuredContent']['messages'] ?? [];
+$check(array_map(static fn (array $m): array => [$m['body']['text'] ?? null, $m['replay'] ?? null], $halfAgain) === [['first on the side', false], ['second on the side', false]], '... and the next read hands both over, neither marked a copy: neither was handed over before', json_encode($halfAgain));
+$halfReader->close();
+
 // Over MCP, as the serving loop hands a call over: the line read twice.
 $unfitServer = new McpServer($unfitReader);
 $unfitServer->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['protocolVersion' => '2025-06-18']]);

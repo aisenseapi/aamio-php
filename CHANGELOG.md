@@ -17,14 +17,21 @@ not what moved in the source.
   and threw in the answer after the cursor had moved past it.
 - Over MCP, arguments holding such a number, or nested deeper than 64, are
   refused with `invalid_arguments` before any tool runs, an add-on's
-  included, with the path of what is wrong.
+  included, with the path of what is wrong. One such number made every
+  argument go missing on the way to the tool, so an add-on ran with its
+  defaults.
 - `--data` and `--gate` holding such a number, and `--data` nested so deep
   that the message around it passes 64, are refused before the home with 2.
-  One such number made every argument go missing on the way to the tool, so
-  an add-on ran with its defaults.
 - A line with a member name that starts with U+0000, which this PHP cannot
   hold with its objects as objects, is refused with `-32600`. It was judged by
   the arrays' reading, where `names: {}` asks for every partner.
+- A channel whose read throws leaves nothing of that read in memory, as in the
+  other two runtimes: its cursor, the hashes of what it took, what board
+  replies keep and the addresses it bound are as they were, and the next read
+  hands its messages over. One that threw halfway through kept the hashes of
+  the messages it had taken, the next channel's save wrote them down, and the
+  next read handed those messages over marked `replay`, though they had never
+  been handed over.
 
 ## 0.3.20 - 2026-11-13
 
