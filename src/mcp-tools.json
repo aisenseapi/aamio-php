@@ -206,6 +206,8 @@
         "properties": {
           "label": {
             "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
             "description": "what the channel is called here: letters, digits, dots, dashes and underscores, and not starting with inbox or board"
           },
           "ttl": {
@@ -539,6 +541,8 @@
         "properties": {
           "id": {
             "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
             "description": "the message_id of one unsettled message"
           }
         },
@@ -562,6 +566,8 @@
         "properties": {
           "id": {
             "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
             "description": "the message_id of one unsettled message"
           }
         },

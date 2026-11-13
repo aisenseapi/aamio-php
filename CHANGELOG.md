@@ -125,6 +125,14 @@ not what moved in the source.
 - A channel's lifetime is checked here, 30 to 3600 seconds, before the service
   is asked, by `channel open`, `board channel` and over MCP.
 - `board answer` takes `--data JSON`, as in the other two runtimes.
+- Over MCP a call's arguments are checked against the tool's schema first, as
+  in the other two runtimes: a name spelt wrong, a value of another type, one
+  outside its bounds or one that is missing is the call's answer, with
+  `error_code` `invalid_arguments`, what is wrong and a fix, where a model
+  reads it and can call again. A name spelt wrong was passed over, and a value
+  of another type went on to the runtime. Arguments that are no object are a
+  protocol error; they were read as none. A channel's label and a message's id
+  take 1 to 64 characters in the schema, as in the Node runtime.
 - `doctor` and `init` read who can read the home with icacls when Get-Acl is
   not there, as aamio-python and the Node runtime do, and said nothing could
   be checked. whoami, icacls and PowerShell are asked by their place in

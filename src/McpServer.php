@@ -73,15 +73,73 @@ final class McpServer
     private int $asked = 0;
     /** @var list<mixed> Ids of calls cancelled during a wait, until the backlog is served. */
     private array $cancelled = [];
+    /** @var array<string, array> The core's tools by name, as mcp-tools.json has them, to check a call's arguments against. */
+    private array $core = [];
 
     public function __construct(private readonly Runtime $runtime)
     {
         $spec = json_decode((string) file_get_contents(__DIR__ . '/mcp-tools.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->core = array_column($spec['tools'], null, 'name');
         // The core's tools, and the ones the add-ons enabled in this runtime's home bring beside them.
         $this->tools = array_merge(self::objects($spec['tools']), self::objects(Addons::tools($spec['tools'], null, $runtime->home)));
         $this->instructions = $spec['instructions'];
         $this->supported = $spec['protocol_versions'];
         $this->secret = random_bytes(32);
+    }
+
+    /** What a call whose arguments do not fit is told to do, in the three runtimes alike. */
+    private const ARGUMENTS_FIX = "Check each argument against the tool's inputSchema and call again.";
+
+    /**
+     * Arguments as the tool's schema says, checked as aamio-python and the Node
+     * runtime check them: an object of known names, each of its type, with what
+     * is required there. A sentence naming what is wrong, or null. Nothing
+     * checked them here: a name spelt wrong was passed over, and a value of
+     * another type went on to the runtime (a check of 13 November 2026).
+     */
+    private static function wrongArguments(array $tool, array $arguments): ?string
+    {
+        $properties = $tool['inputSchema']['properties'] ?? [];
+        foreach ($arguments as $name => $value) {
+            $want = $properties[$name] ?? null;
+            if (!is_array($want)) {
+                return $tool['name'] . ' takes no argument called ' . $name;
+            }
+            $fits = match ($want['type'] ?? null) {
+                // $ is the end of the text, as JavaScript reads it, never before a last line break.
+                'string' => is_string($value) && (!isset($want['pattern']) || preg_match('/' . str_replace('/', '\/', (string) $want['pattern']) . '/uD', $value) === 1)
+                    && self::characters($value) >= ($want['minLength'] ?? 0) && self::characters($value) <= ($want['maxLength'] ?? PHP_INT_MAX)
+                    && (!isset($want['enum']) || in_array($value, $want['enum'], true)),
+                'integer' => self::whole($value) && $value >= ($want['minimum'] ?? PHP_INT_MIN) && $value <= ($want['maximum'] ?? PHP_INT_MAX),
+                'boolean' => is_bool($value),
+                // JSON's {} arrives as an empty array, so an empty array is an object here.
+                'object' => is_array($value) && ($value === [] || !array_is_list($value)),
+                'array' => is_array($value) && array_is_list($value) && array_filter($value, static fn (mixed $item): bool => !is_string($item)) === [] && count($value) <= ($want['maxItems'] ?? PHP_INT_MAX),
+                default => false,
+            };
+            if (!$fits) {
+                return $name . ' is not what ' . $tool['name'] . ' takes: ' . json_encode($want, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            }
+        }
+        foreach ($tool['inputSchema']['required'] ?? [] as $name) {
+            if (!array_key_exists($name, $arguments)) {
+                return $tool['name'] . ' needs ' . $name;
+            }
+        }
+
+        return null;
+    }
+
+    /** A string's length in characters, as JSON Schema counts it. */
+    private static function characters(string $value): int
+    {
+        return (int) preg_match_all('/./su', $value);
+    }
+
+    /** An integer as JSON has it: 5.0 is 5, as in the Node runtime, and true is no number. */
+    private static function whole(mixed $value): bool
+    {
+        return is_int($value) || (is_float($value) && is_finite($value) && floor($value) === $value);
     }
 
     /** @return list<array> the core's tools, as mcp-tools.json has them, for the registry to check an add-on's names against */
@@ -715,7 +773,31 @@ final class McpServer
                 return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(['tools' => $this->tools], $modern, true)];
             case 'tools/call':
                 $name = is_string($params['name'] ?? null) ? $params['name'] : '';
-                $arguments = is_array($params['arguments'] ?? null) ? $params['arguments'] : [];
+                // An object, or nothing. Anything else is a request this server
+                // cannot read, as in the other two runtimes: it was read as no
+                // arguments. JSON's {} arrives as an empty array.
+                $given = $params['arguments'] ?? null;
+                if ($given !== null && (!is_array($given) || ($given !== [] && array_is_list($given)))) {
+                    return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32602, 'message' => 'arguments must be an object']];
+                }
+                $arguments = $given ?? [];
+                // Arguments that do not fit the tool's schema are the call's
+                // answer, as aamio-python and the Node runtime give it: a model
+                // reads what is wrong and can call again with what fits.
+                // aamio_partner_add answers its own, with where a key comes
+                // from, and an add-on judges its tools' own.
+                $listed = $this->core[$name] ?? null;
+                if ($listed !== null && $name !== 'aamio_partner_add') {
+                    $wrong = self::wrongArguments($listed, $arguments);
+                    if ($wrong !== null) {
+                        return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(self::resultOf(['error' => $wrong, 'error_code' => 'invalid_arguments', 'fix' => self::ARGUMENTS_FIX], true), $modern)];
+                    }
+                    foreach ($listed['inputSchema']['properties'] ?? [] as $field => $want) {
+                        if (($want['type'] ?? null) === 'integer' && is_float($arguments[$field] ?? null)) {
+                            $arguments[$field] = (int) $arguments[$field];
+                        }
+                    }
+                }
                 try {
                     $result = $this->dispatch($name, $arguments, $this->asker($params, $version, $id));
                 } catch (McpInterrupt $interrupt) {

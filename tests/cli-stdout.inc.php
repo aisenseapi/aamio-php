@@ -119,8 +119,31 @@ if (trim($able) !== 'yes') {
         $codesServer = new \Aamio\McpServer($codesRuntime);
         $codesServer->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['protocolVersion' => '2025-06-18']]);
         $codeOf = static fn (string $tool, array $arguments): mixed => $codesServer->handle(['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/call', 'params' => ['name' => $tool, 'arguments' => $arguments]])['result']['structuredContent']['error_code'] ?? null;
-        $codes = [$codeOf('aamio_close_channel', ['label' => 'nope']), $codeOf('aamio_open_channel', ['label' => 'room', 'ttl' => 5]), $codeOf('aamio_open_channel', ['label' => 'room', 'gate' => []])];
-        $check($codes === ['unknown_channel', 'invalid_ttl', 'invalid_gate'], 'over MCP a failure carries the code the command line says', json_encode($codes));
+        // What the schema takes and the runtime does not is the runtime's to name.
+        $codes = [$codeOf('aamio_close_channel', ['label' => 'nope']), $codeOf('aamio_open_channel', ['label' => '../x', 'ttl' => 600])];
+        $check($codes === ['unknown_channel', 'invalid_label'], 'over MCP a failure carries the code the command line says', json_encode($codes));
+        // Arguments that do not fit the tool's schema are the call's answer, as
+        // in the other two, where a model reads what is wrong. A name spelt
+        // wrong was passed over here, and a value of another type went on to
+        // the runtime.
+        $answerOf = static fn (string $tool, mixed $arguments): ?array => $codesServer->handle(['jsonrpc' => '2.0', 'id' => 3, 'method' => 'tools/call', 'params' => ['name' => $tool, 'arguments' => $arguments]]);
+        foreach ([
+            ['aamio_send', ['to' => 'b', 'txt' => 'typo'], 'aamio_send takes no argument called txt'],
+            ['aamio_close_channel', [], 'aamio_close_channel needs label'],
+            ['aamio_open_channel', ['label' => 'room', 'ttl' => 5], 'ttl is not what aamio_open_channel takes: '],
+            ['aamio_open_channel', ['label' => 'room', 'ttl' => '600'], 'ttl is not what aamio_open_channel takes: '],
+            ['aamio_open_channel', ['label' => 'room', 'ttl' => 600, 'gate' => [1]], 'gate is not what aamio_open_channel takes: '],
+            ['aamio_open_channel', ['label' => '', 'ttl' => 600], 'label is not what aamio_open_channel takes: '],
+            ['aamio_send', ['to' => 'b', 're' => str_repeat('a', 64) . "\n"], 're is not what aamio_send takes: '],
+            ['aamio_read', ['limit' => 999], 'limit is not what aamio_read takes: '],
+            ['aamio_receipt', ['anchor' => 'yes'], 'anchor is not what aamio_receipt takes: '],
+            ['aamio_outbox_forget', ['id' => ''], 'id is not what aamio_outbox_forget takes: '],
+        ] as [$tool, $arguments, $said]) {
+            $result = $answerOf($tool, $arguments)['result'] ?? [];
+            $check(($result['isError'] ?? null) === true && ($result['structuredContent']['error_code'] ?? null) === 'invalid_arguments' && str_starts_with((string) ($result['structuredContent']['error'] ?? ''), $said) && str_contains((string) ($result['structuredContent']['fix'] ?? ''), 'inputSchema'), 'over MCP ' . $tool . ' ' . json_encode($arguments) . ' is the call\'s answer, invalid_arguments', json_encode($result['structuredContent'] ?? null));
+        }
+        $listed = $answerOf('aamio_send', ['b', 'x']);
+        $check(($listed['error'] ?? null) === ['code' => -32602, 'message' => 'arguments must be an object'] && !isset($listed['result']), 'arguments that are no object are a request that cannot be read', json_encode($listed));
     } finally {
         $codesRuntime->close();
     }
