@@ -66,6 +66,9 @@ if (trim($able) !== 'yes') {
 } else {
     $cliDir = $root . DIRECTORY_SEPARATOR . 'cli-stdout';
     mkdir($cliDir, 0700, true);
+    // As aamio-python and the Node runtime print theirs. It printed the help.
+    [$versionStatus, $versionOut, $versionErr] = $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--version']));
+    $check($versionStatus === 0 && $versionOut === 'aamio ' . \Aamio\Http::VERSION . "\n", '--version prints aamio and the version, and nothing else', json_encode([$versionStatus, $versionOut, $versionErr]));
     // Raised after the command line has started, as the transport's notice was.
     $late = $cliDir . DIRECTORY_SEPARATOR . 'late-notice.php';
     file_put_contents($late, "<?php\nregister_shutdown_function(static function (): void {\n    trigger_error('aamio-test: a deprecation raised during the run', E_USER_DEPRECATED);\n});\n");

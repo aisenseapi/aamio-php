@@ -38,7 +38,11 @@ final class Runtime
     // answered so said the address may have arrived, and retry sent the same
     // bytes to the same refusal (a check of 12 November 2026).
     public const SEND_DETERMINISTIC = [400, 401, 403, 409, 410, 413, 415, 422, 428, 501];
-    public const SEND_TRY_LATER = [429, 502, 503, 504];
+    // A rate window or a busy service, as aamio-python and the Node runtime
+    // take them. 502 and 504 were here as well, and a message the service may
+    // have stored before the gateway gave up was said to be declined for now
+    // (a check of 12 November 2026).
+    public const SEND_TRY_LATER = [429, 503];
     /**
      * Answers that prove the message was never stored: the deterministic ones, and a
      * rate window, which aamio decides before it reads the body. 502, 503 and 504 are

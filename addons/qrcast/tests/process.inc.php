@@ -527,3 +527,16 @@ echo "qrcast: the process\n";
         $check($said['exit_code'] === 3 && ($said['result']['status'] ?? null) === 'nothing_seen' && ($said['result']['engine'] ?? null) === 'aisense', 'live: and finds no code in a white picture');
     }
 })();
+
+// An unknown call is said as the editions for Python and Node say it: a name as it is, anything else as JSON.
+(static function () use ($check): void {
+    $base = ['aamio_addon' => 2, 'kind' => 'command', 'arguments' => [], 'subject' => null, 'own_key' => null, 'state_dir' => null, 'deadline_seconds' => 90, 'aamio' => ['version' => '0.3.13', 'runtime' => 'php']];
+    $named = \Aamio\Qrcast\Process::handle($base + ['name' => 'nope'])['result']['fix'] ?? null;
+    $odd = \Aamio\Qrcast\Process::handle($base + ['name' => ['not' => 'a name']])['result']['fix'] ?? null;
+    $check(
+        $named === 'The add-on qrcast has no command called nope. aamio addon qrcast --help lists its commands, and aamio addon list its tools.'
+            && $odd === 'The add-on qrcast has no command called {"not":"a name"}. aamio addon qrcast --help lists its commands, and aamio addon list its tools.',
+        'an unknown call is said as the other two editions say it: a name as it is, anything else as JSON',
+        json_encode([$named, $odd])
+    );
+})();

@@ -95,6 +95,11 @@ not what moved in the source.
   It answered every status alike, with `post`, `status` and `withdrawn`, and
   wrote the record of a withdrawal that had not happened. The record has the
   post's id under `id`, as the other two write it.
+- `aamio --version` prints `aamio 0.3.19`, as aamio-python and the Node
+  runtime print theirs. It printed the help.
+- A send answered 502 or 504 is unsettled, as in aamio-python and the Node
+  runtime: the message may have been stored before the gateway gave up. It
+  was said to be declined for now and to be sent again.
 - After `partner remove`, the inbox that named the removed key is read until it
   expires, as in aamio-python and the Node runtime from the same release. What
   the partners still in the book write there is handed over; what the removed

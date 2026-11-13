@@ -841,3 +841,17 @@ $check(Storage::pastMark("\xEF\xBB\xBFx") === 'x' && Storage::pastMark("x\xEF\xB
 foreach ($checkOpen as $one) {
     $one->close();
 }
+
+// ---------------------------------------------------------------- 502 and 504 are not a rate window
+//
+// aamio-python and the Node runtime say of a 502 or a 504 that the message may
+// have been stored. This runtime said it was declined for now, to be sent again.
+[$retry502, $said502] = Runtime::sendAdvice('attempted', 502);
+[$retry504] = Runtime::sendAdvice('attempted', 504);
+[$retry503, $said503] = Runtime::sendAdvice('attempted', 503);
+$check(
+    Runtime::SEND_TRY_LATER === [429, 503] && $retry502 === null && $retry504 === null && str_contains($said502, 'which this client does not classify')
+        && $retry503 === true && str_contains($said503, 'a rate window or a busy service'),
+    '502 and 504 are said as the other two runtimes say them: unsettled, and not declined for now',
+    json_encode([$retry502, $said502, $retry503])
+);

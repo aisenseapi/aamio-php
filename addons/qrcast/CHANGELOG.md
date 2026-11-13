@@ -6,7 +6,9 @@ changed for somebody using it.
 
 ## 0.1.2 - 2026-11-12
 
-- Nothing changed in this edition. The number is the add-on's, the same for
+- An unknown call is said as the editions for Python and Node say it: a name
+  as it is, and anything else as JSON. The kind and the name were in quotes.
+- The number is the add-on's, the same for
   aamio-python, aamio-php and Node: in the edition for aamio-python, a card
   whose time is far ahead stopped the reader on Windows, and 0.1.2 puts that
   right there. This edition read such a card already.

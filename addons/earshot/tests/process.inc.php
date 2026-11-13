@@ -498,3 +498,16 @@ echo "earshot: the process\n";
         $check($said['exit_code'] === 3 && ($said['result']['status'] ?? null) === 'nothing_heard', 'live: and hears nothing in silence');
     }
 })();
+
+// An unknown call is said as the editions for Python and Node say it: a name as it is, anything else as JSON.
+(static function () use ($check): void {
+    $base = ['aamio_addon' => 2, 'kind' => 'command', 'arguments' => [], 'subject' => null, 'own_key' => null, 'state_dir' => null, 'deadline_seconds' => 90, 'aamio' => ['version' => '0.3.13', 'runtime' => 'php']];
+    $named = \Aamio\Earshot\Process::handle($base + ['name' => 'shout'])['result']['fix'] ?? null;
+    $odd = \Aamio\Earshot\Process::handle($base + ['name' => ['not' => 'a name']])['result']['fix'] ?? null;
+    $check(
+        $named === 'The add-on earshot has no command called shout. aamio addon earshot --help lists its commands, and aamio addon list its tools.'
+            && $odd === 'The add-on earshot has no command called {"not":"a name"}. aamio addon earshot --help lists its commands, and aamio addon list its tools.',
+        'an unknown call is said as the other two editions say it: a name as it is, anything else as JSON',
+        json_encode([$named, $odd])
+    );
+})();

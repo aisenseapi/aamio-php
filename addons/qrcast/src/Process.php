@@ -74,6 +74,12 @@ final class Process
         return ['status' => 'invalid', 'reason' => $reason, 'fix' => $fix] + $known;
     }
 
+    /** A name as it is, and anything else as JSON, as the editions for Python and Node say it. */
+    private static function said(mixed $value): string
+    {
+        return is_string($value) ? $value : (string) json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+
     /**
      * @param array<string, mixed> $known
      * @return array<string, mixed>
@@ -574,7 +580,7 @@ final class Process
             return self::answer(self::scan($arguments, $kind, $frames, $readFrame, $clock));
         }
 
-        return self::answer(self::refused('unknown_call', 'The add-on ' . self::NAME . ' has no ' . json_encode($kind) . ' called ' . json_encode($name) . '. aamio addon ' . self::NAME . ' --help lists its commands, and aamio addon list its tools.'));
+        return self::answer(self::refused('unknown_call', 'The add-on ' . self::NAME . ' has no ' . self::said($kind) . ' called ' . self::said($name) . '. aamio addon ' . self::NAME . ' --help lists its commands, and aamio addon list its tools.'));
     }
 
     /** Standard input to standard output, once. */

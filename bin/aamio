@@ -8,6 +8,7 @@ declare(strict_types=1);
  * CLI, over the same home directory layout.
  *
  *   aamio [--home DIR] [--host URL] [--tags a,b] [--no-archive] <command> ...
+ *   aamio --version              (aamio and the version of this client)
  *
  *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
  *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] [--re SHA256]
@@ -99,7 +100,7 @@ function csv(?string $text): ?array
     return array_values(array_filter(array_map('trim', explode(',', $text)), static fn (string $t): bool => $t !== ''));
 }
 
-[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'help']);
+[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'help', 'version']);
 // An option that takes a value, given without one, is refused before anything
 // is read or written: `--home` alone would otherwise mean the default home.
 foreach (['home' => 'DIR', 'host' => 'URL', 'tags' => 'a,b'] as $takesValue => $what) {
@@ -108,6 +109,12 @@ foreach (['home' => 'DIR', 'host' => 'URL', 'tags' => 'a,b'] as $takesValue => $
     }
 }
 $command = $args[0] ?? null;
+// As aamio-python and the Node runtime print it. It printed the help instead
+// (a check of 13 November 2026).
+if ($command === null && ($opts['version'] ?? null) === true) {
+    fwrite(STDOUT, 'aamio ' . Http::VERSION . "\n");
+    exit(0);
+}
 if ($command === null || in_array($command, ['help', '-h'], true)) {
     fail(trim(preg_replace('/^ \* ?/m', '', (string) preg_replace('!^.*?/\*\*(.*?)\*/.*$!s', '$1', (string) file_get_contents(__FILE__)))), 0);
 }
