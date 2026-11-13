@@ -69,6 +69,39 @@ if (trim($able) !== 'yes') {
     // As aamio-python and the Node runtime print theirs. It printed the help.
     [$versionStatus, $versionOut, $versionErr] = $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--version']));
     $check($versionStatus === 0 && $versionOut === 'aamio ' . \Aamio\Http::VERSION . "\n", '--version prints aamio and the version, and nothing else', json_encode([$versionStatus, $versionOut, $versionErr]));
+    // What a command could not do is its answer: JSON on stdout with error and
+    // error_code, and exit 1, as aamio-python and the Node runtime answer it.
+    // It was a line on stderr (a check of 13 November 2026). Nothing goes out:
+    // the host is a port where nothing listens.
+    $failedHome = $cliDir . DIRECTORY_SEPARATOR . 'home-failed';
+    $failing = static fn (string ...$words): array => $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $failedHome, '--host', 'http://127.0.0.1:9'], $words));
+    [$closeStatus, $closeOut, $closeErr] = $failing('channel', 'close', 'no-such-channel');
+    $closed = json_decode($closeOut, true);
+    $check($closeStatus === 1 && is_array($closed) && array_keys($closed) === ['error', 'error_code'] && $closed['error'] === 'no such channel: no-such-channel' && $closed['error_code'] === 'InvalidArgumentException', 'a command that cannot do what it was asked answers with JSON on stdout, error and error_code, and exit 1', json_encode([$closeStatus, $closeOut, $closeErr]));
+    [$keyStatus, $keyOut, $keyErr] = $failing('partner', 'add', 'bob', 'not-a-key');
+    $refused = json_decode($keyOut, true);
+    $check($keyStatus === 1 && is_array($refused) && isset($refused['error'], $refused['error_code']), 'and so does an argument that is wrong for the command, as a key that is no key', json_encode([$keyStatus, $keyOut, $keyErr]));
+    // trace of a counterpart nothing is recorded about is the one said on
+    // stderr, with nothing on stdout, in all three alike.
+    [$traceStatus, $traceOut, $traceErr] = $failing('trace', 'nobody-at-all');
+    $check($traceStatus === 1 && $traceOut === '' && str_contains($traceErr, 'nothing sent to or received from nobody-at-all is recorded here'), 'trace of a counterpart nothing is recorded about says so on stderr, as the other two say it', json_encode([$traceStatus, $traceOut, $traceErr]));
+    // serve's stdout is the protocol's alone. A server that cannot start, here
+    // with no service to open its inbox at, says why on stderr, where the host
+    // keeps its log, and nothing the host would read as a message. Its input
+    // is closed, so a server that did start would end at once, and say 0.
+    $serveErrFile = (string) tempnam(sys_get_temp_dir(), 'aamio-serve-');
+    $serving = proc_open(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $cliDir . DIRECTORY_SEPARATOR . 'home-serve', '--host', 'http://127.0.0.1:9', 'serve']), [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $serveErrFile, 'w']], $servePipes);
+    $serveStatus = -1;
+    $serveOut = '';
+    if (is_resource($serving)) {
+        fclose($servePipes[0]);
+        $serveOut = (string) stream_get_contents($servePipes[1]);
+        fclose($servePipes[1]);
+        $serveStatus = proc_close($serving);
+    }
+    $serveErr = (string) @file_get_contents($serveErrFile);
+    @unlink($serveErrFile);
+    $check($serveStatus === 1 && $serveOut === '' && str_contains($serveErr, 'could not open inbox'), "serve that cannot start says why on stderr, and nothing on stdout, which is the protocol's", json_encode([$serveStatus, $serveOut, substr($serveErr, -300)]));
     // Raised after the command line has started, as the transport's notice was.
     $late = $cliDir . DIRECTORY_SEPARATOR . 'late-notice.php';
     file_put_contents($late, "<?php\nregister_shutdown_function(static function (): void {\n    trigger_error('aamio-test: a deprecation raised during the run', E_USER_DEPRECATED);\n});\n");

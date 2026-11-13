@@ -66,6 +66,19 @@ final class Storage
      * whoever created or owns the file.
      */
     private const WINDOWS_EXPECTED = ['S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-1-3-4'];
+    /**
+     * SDDL writes the well known accounts as two letters and everyone else as a
+     * full SID, as aamio-python's storage.py has them. An alias not here stays
+     * as the two letters, which reads as an account nobody recognises and is
+     * reported: the safe direction for a check about who can read your keys.
+     */
+    private const SDDL_SIDS = [
+        'BA' => 'S-1-5-32-544', 'SY' => 'S-1-5-18', 'CO' => 'S-1-3-0', 'CG' => 'S-1-3-1', 'WD' => 'S-1-1-0', 'AU' => 'S-1-5-11', 'BU' => 'S-1-5-32-545',
+        'BG' => 'S-1-5-32-546', 'PU' => 'S-1-5-32-547', 'IU' => 'S-1-5-4', 'NU' => 'S-1-5-2', 'AN' => 'S-1-5-7', 'LS' => 'S-1-5-19', 'NS' => 'S-1-5-20',
+        'RC' => 'S-1-5-12', 'OW' => 'S-1-3-4', 'AC' => 'S-1-15-2-1', 'AO' => 'S-1-5-32-548', 'SO' => 'S-1-5-32-549', 'PO' => 'S-1-5-32-550',
+        'BO' => 'S-1-5-32-551', 'RE' => 'S-1-5-32-552', 'RU' => 'S-1-5-32-554', 'SU' => 'S-1-5-6', 'PS' => 'S-1-5-10', 'ED' => 'S-1-5-9',
+    ];
+
     private const WINDOWS_NAMES = [
         'S-1-1-0' => 'Everyone',
         'S-1-5-11' => 'Authenticated Users',
@@ -361,12 +374,150 @@ final class Storage
         return [$me, $rules];
     }
 
+    /**
+     * A Windows tool by its place in System32, so another one earlier on the
+     * path is not the one asked: Git Bash puts its own whoami.exe first. As
+     * aamio-python and the Node runtime ask them (a check of 13 November 2026).
+     */
+    private static function systemTool(string ...$parts): string
+    {
+        $root = getenv('SystemRoot') ?: (getenv('windir') ?: 'C:\\Windows');
+        $path = $root . '\\System32\\' . implode('\\', $parts);
+
+        return is_file($path) ? $path : $parts[count($parts) - 1];
+    }
+
     /** @return array{0: string, 1: string[]} the current user's SID, and one line per access rule */
     private static function windowsRules(string $path): array
     {
-        [$status, $out, $err] = self::run(['powershell', '-NoProfile', '-NonInteractive', '-Command', self::windowsScript($path)]);
+        [$status, $out, $err] = self::run([self::systemTool('WindowsPowerShell', 'v1.0', 'powershell.exe'), '-NoProfile', '-NonInteractive', '-Command', self::windowsScript($path)]);
 
         return self::windowsParse($status, $out, $err);
+    }
+
+    /** One code point as UTF-8, without mbstring, which a PHP does not always have. */
+    private static function utf8(int $code): string
+    {
+        if ($code < 0x80) {
+            return chr($code);
+        }
+        if ($code < 0x800) {
+            return chr(0xC0 | ($code >> 6)) . chr(0x80 | ($code & 0x3F));
+        }
+        if ($code < 0x10000) {
+            return chr(0xE0 | ($code >> 12)) . chr(0x80 | (($code >> 6) & 0x3F)) . chr(0x80 | ($code & 0x3F));
+        }
+
+        return chr(0xF0 | ($code >> 18)) . chr(0x80 | (($code >> 12) & 0x3F)) . chr(0x80 | (($code >> 6) & 0x3F)) . chr(0x80 | ($code & 0x3F));
+    }
+
+    /** UTF-16 as icacls writes it, read strictly: a byte short or half a pair is no export, and never a shorter list. */
+    private static function utf16(string $bytes): string
+    {
+        $big = false;
+        if (str_starts_with($bytes, "\xFE\xFF")) {
+            $big = true;
+            $bytes = substr($bytes, 2);
+        } elseif (str_starts_with($bytes, "\xFF\xFE")) {
+            $bytes = substr($bytes, 2);
+        }
+        $length = strlen($bytes);
+        if ($length % 2 !== 0) {
+            throw new \UnexpectedValueException('icacls wrote an export cut short');
+        }
+        $unit = static fn (int $at): int => $big ? (ord($bytes[$at]) << 8) | ord($bytes[$at + 1]) : ord($bytes[$at]) | (ord($bytes[$at + 1]) << 8);
+        $text = '';
+        for ($at = 0; $at < $length; $at += 2) {
+            $code = $unit($at);
+            if ($code >= 0xD800 && $code <= 0xDBFF) {
+                $low = $at + 2 < $length ? $unit($at + 2) : -1;
+                if ($low < 0xDC00 || $low > 0xDFFF) {
+                    throw new \UnexpectedValueException('icacls wrote half a character');
+                }
+                $code = 0x10000 + (($code - 0xD800) << 10) + ($low - 0xDC00);
+                $at += 2;
+            } elseif ($code >= 0xDC00 && $code <= 0xDFFF) {
+                throw new \UnexpectedValueException('icacls wrote half a character');
+            }
+            $text .= self::utf8($code);
+        }
+
+        return $text;
+    }
+
+    /**
+     * The same rules as Get-Acl, read with two .exe calls and no PowerShell
+     * module: whoami for the SID, and icacls for the folder's access list as
+     * SDDL, which gives SIDs where what icacls prints gives account names in
+     * the machine's language. aamio-python and the Node runtime read it so
+     * when Get-Acl is not there, and this one said nothing could be checked.
+     *
+     * @return array{0: string, 1: string[]} the current user's SID, and one sid|rights|allow line per access rule
+     */
+    public static function windowsRulesIcacls(string $path): array
+    {
+        [$status, $out, $err] = self::run([self::systemTool('whoami.exe'), '/user', '/fo', 'csv', '/nh']);
+        if ($status !== 0) {
+            throw new \RuntimeException('whoami ended with status ' . $status . ($err !== '' ? ': ' . self::firstLine($err) : ''));
+        }
+        $fields = array_map(static fn (string $part): string => trim(trim($part), '"'), explode(',', trim($out)));
+        $me = (string) end($fields);
+        if (!str_starts_with($me, 'S-1-')) {
+            throw new \UnexpectedValueException('whoami did not give a SID');
+        }
+        // Resolved once, so a relative path and its exported name are the same
+        // folder. icacls /save writes the final name only.
+        $target = realpath($path) ?: $path;
+        $folder = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-acl-' . bin2hex(random_bytes(8));
+        if (!@mkdir($folder, 0700)) {
+            throw new \RuntimeException('no folder for the export could be made');
+        }
+        $saved = $folder . DIRECTORY_SEPARATOR . 'acl.txt';
+        try {
+            [$status, $out, $err] = self::run([self::systemTool('icacls.exe'), $target, '/save', $saved]);
+            if ($status !== 0) {
+                throw new \RuntimeException('icacls ended with status ' . $status . ($err !== '' ? ': ' . self::firstLine($err) : ''));
+            }
+            $bytes = @file_get_contents($saved);
+            if ($bytes === false) {
+                throw new \RuntimeException('icacls wrote no export');
+            }
+            $exported = preg_split('/\r\n|\n|\r/', self::utf16($bytes)) ?: [];
+        } finally {
+            @unlink($saved);
+            @rmdir($folder);
+        }
+        if ($exported !== [] && end($exported) === '') {
+            array_pop($exported);
+        }
+        if (count($exported) !== 2 || strtolower($exported[0]) !== strtolower(basename($target))) {
+            throw new \UnexpectedValueException('icacls did not export exactly the requested folder');
+        }
+        // The complete list, not fragments of a cut one. NO_ACCESS_CONTROL is
+        // not an empty private list. A root can carry S: as well, its integrity
+        // label, which grants nothing: only the D: rules belong here.
+        if (preg_match('/^D:(?:P|AI|AR)*((?:\([^()]*\))*)(?:S:(?:P|AI|AR)*(?:\([^()]*\))*)?$/D', $exported[1], $matched) !== 1) {
+            throw new \UnexpectedValueException('icacls wrote an incomplete or unsupported access control list');
+        }
+        preg_match_all('/\(([^()]*)\)/', $matched[1], $aces);
+        $rules = [];
+        foreach ($aces[1] as $ace) {
+            $parts = explode(';', $ace);
+            if (count($parts) !== 6) {
+                throw new \UnexpectedValueException('icacls wrote an unsupported access rule');
+            }
+            [$kind, $rights, $sid] = [trim($parts[0]), trim($parts[2]), trim($parts[5])];
+            if (!in_array($kind, ['A', 'D'], true) || $rights === '' || $sid === '' || $parts[3] !== '' || $parts[4] !== '') {
+                throw new \UnexpectedValueException('icacls wrote an incomplete or unsupported access rule');
+            }
+            // A is allow, and only allow rules say who can read this.
+            if ($kind === 'D') {
+                continue;
+            }
+            $rules[] = (self::SDDL_SIDS[strtoupper($sid)] ?? $sid) . '|' . $rights . '|allow';
+        }
+
+        return [$me, $rules];
     }
 
     /**
@@ -379,11 +530,18 @@ final class Storage
         $result = ['home' => $home, 'private' => null, 'how' => "the folder's access control list, read with Get-Acl. Mode bits say nothing on Windows.", 'findings' => []];
         try {
             [$me, $rules] = self::windowsRules($home);
-        } catch (\Throwable $error) {
-            $result['how'] = 'not checked: the access control list could not be read (' . $error->getMessage() . ')';
-            $result['fix'] = 'Run `icacls "' . $home . '"` and see that only you, SYSTEM and Administrators are listed.';
+        } catch (\Throwable $first) {
+            // Get-Acl lives in a PowerShell module that does not load
+            // everywhere. icacls is an .exe and needs none.
+            try {
+                [$me, $rules] = self::windowsRulesIcacls($home);
+                $result['how'] = "the folder's access control list, read with icacls after Get-Acl was not available (" . $first->getMessage() . '). Mode bits say nothing on Windows.';
+            } catch (\Throwable $second) {
+                $result['how'] = 'not checked: the access control list could not be read, by Get-Acl (' . $first->getMessage() . ') or by icacls (' . $second->getMessage() . ')';
+                $result['fix'] = 'Run `icacls "' . $home . '"` and see that only you, SYSTEM and Administrators are listed.';
 
-            return $result;
+                return $result;
+            }
         }
         $result['findings'] = self::windowsAclFindings($rules, $me);
         $result['private'] = $result['findings'] === [];

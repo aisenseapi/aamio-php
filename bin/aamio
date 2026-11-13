@@ -431,9 +431,22 @@ try {
     }
 } catch (SendFailed | GateStop $error) {
     // With the channel that is open, when the message that was stopped
-    // carried a channel's address: board channel opens one first.
+    // carried a channel's address: board channel opens one first. Exit 1, as
+    // in aamio-python and the Node runtime: 2 is a command given wrong.
     out(Runtime::commandLineStop($error));
-    exit(2);
+    exit(1);
+} catch (\Exception $error) {
+    // What a command could not do is its answer: JSON on standard output with
+    // error and error_code, as aamio-python and the Node runtime answer it. It
+    // was a line on standard error (a check of 13 November 2026). A fault in
+    // this client itself is still said there. So is a server that cannot
+    // start: standard output is the protocol's alone, and a line there that is
+    // no protocol message is one the host cannot read.
+    if ($command === 'serve') {
+        fail($error->getMessage());
+    }
+    out(['error' => $error->getMessage(), 'error_code' => (new \ReflectionClass($error))->getShortName()]);
+    exit(1);
 } catch (\Throwable $error) {
     fail($error->getMessage());
 }

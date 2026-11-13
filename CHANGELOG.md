@@ -97,6 +97,16 @@ not what moved in the source.
   post's id under `id`, as the other two write it.
 - `aamio --version` prints `aamio 0.3.19`, as aamio-python and the Node
   runtime print theirs. It printed the help.
+- A command that cannot do what it was asked answers with JSON on standard
+  output, `error` and `error_code`, as aamio-python and the Node runtime
+  answer. It said so on standard error. A send that stops exits 1, as in the
+  other two: it exited 2, which is a command given wrong. `serve` that cannot
+  start still says why on standard error, which is where the host keeps its
+  log: its standard output is the protocol's alone.
+- `doctor` and `init` read who can read the home with icacls when Get-Acl is
+  not there, as aamio-python and the Node runtime do, and said nothing could
+  be checked. whoami, icacls and PowerShell are asked by their place in
+  System32, so another program of the same name on the path is not.
 - A send answered 502 or 504 is unsettled, as in aamio-python and the Node
   runtime: the message may have been stored before the gateway gave up. It
   was said to be declined for now and to be sent again.

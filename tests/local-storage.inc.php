@@ -116,7 +116,7 @@ $scripted(0, $whole);
 $found = Storage::windowsCheck($root);
 $check($found['private'] === true && $found['findings'] === [] && !isset($found['fix']), 'a list read to the end with only you, SYSTEM and Administrators on it is private');
 $script = implode(' ', is_array($ran) ? $ran : []);
-$check(is_array($ran) && $ran[0] === 'powershell' && in_array('-NonInteractive', $ran, true) && str_contains($script, 'Get-Acl') && str_contains($script, "\$ErrorActionPreference = 'Stop'"), 'through PowerShell without a profile or a prompt, with every error terminating');
+$check(is_array($ran) && strtolower(basename(str_replace('\\', '/', $ran[0]))) === 'powershell.exe' && in_array('-NonInteractive', $ran, true) && str_contains($script, 'Get-Acl') && str_contains($script, "\$ErrorActionPreference = 'Stop'"), 'through PowerShell without a profile or a prompt, with every error terminating');
 $check(preg_match('/Set-Acl|icacls|\/grant|\/inheritance|Remove-|Add-/i', $script) !== 1, 'and the script only reads: a diagnostic never changes an access list');
 
 $scripted(0, "me|$me\r\nrule|$me|FullControl|Allow\r\nrule|S-1-5-32-545|ReadAndExecute, Synchronize|Allow\r\nend|2\r\n");
@@ -326,3 +326,61 @@ $check($onRuntime->archive('board', ['kind' => 'received', 'at' => 1]) === true,
 $check(is_file($loudHome . '/archive/board.jsonl'), 'and the file is there');
 $offRuntime->close();
 $onRuntime->close();
+
+// icacls stands in for Get-Acl, as in aamio-python and the Node runtime, with
+// the exports their tests give it: a SID from whoami and the folder's access
+// list as SDDL, in UTF-16.
+$sid = 'S-1-5-21-1-2-3-1001';
+// UTF-16LE of ASCII text, as icacls writes it. The folder's name goes into the
+// export in UTF-16 as well: put in as plain text, it was put in nowhere, and
+// every export named a folder called NAME.
+$wide = static fn (string $text): string => $text === '' ? '' : implode('', array_map(static fn (string $char): string => $char . "\x00", str_split($text)));
+$utf16 = static fn (string $text): string => "\xFF\xFE" . $wide($text);
+$exporting = static function (?string $record, int $icaclsStatus = 0) use ($sid, $wide, &$ran): void {
+    Storage::$shell = static function (array $command) use ($record, $icaclsStatus, $sid, $wide, &$ran): array {
+        $ran = $command;
+        $tool = strtolower(basename(str_replace('\\', '/', $command[0])));
+        if ($tool === 'powershell.exe') {
+            return [3, "error|Get-Acl : The 'Get-Acl' command was found in the module 'Microsoft.PowerShell.Security', but the module could not be loaded.\r\n", ''];
+        }
+        if ($tool === 'whoami.exe') {
+            return [0, '"pc\\me","' . $sid . '"' . "\r\n", ''];
+        }
+        if ($tool === 'icacls.exe' && $record !== null) {
+            // icacls names the folder it was asked for.
+            file_put_contents($command[3], str_replace($wide('NAME'), $wide(basename(str_replace('\\', '/', $command[1]))), $record));
+        }
+
+        return [$tool === 'icacls.exe' ? $icaclsStatus : 1, '', ''];
+    };
+};
+foreach ([['D:', true], ['D:P(D;;FA;;;WD)', true], ['D:AI(A;OICI;FA;;;SY)(A;;FA;;;OW)', true], ['D:PAI(A;;FA;;;WD)', false], ['D:ARAI(A;;FA;;;SY)S:P(ML;OINPIO;NW;;;HI)', true]] as [$dacl, $expected]) {
+    $exporting($utf16("NAME\r\n" . $dacl . "\r\n"));
+    $found = Storage::windowsCheck($root);
+    $check($found['private'] === $expected && str_contains((string) $found['how'], 'read with icacls after Get-Acl was not available (Get-Acl failed'), 'icacls stands in for Get-Acl: ' . $dacl, json_encode($found));
+}
+// Each one by its own reason. While the folder's name never reached the
+// export, every one of these failed at the name, and passed.
+$failures = [
+    'exit' => [null, 5, 'icacls ended with status 5'],
+    'missing' => [null, 0, 'icacls wrote no export'],
+    'encoding' => ["\xFF\xFE\x00", 0, 'icacls wrote an export cut short'],
+    'half_character' => ["\xFF\xFE" . $wide('NAME') . "\x00\xD8", 0, 'icacls wrote half a character'],
+    'empty' => [$utf16(''), 0, 'icacls did not export exactly the requested folder'],
+    'wrong_target' => [$utf16("some-other-folder\r\nD:(A;;FA;;;SY)\r\n"), 0, 'icacls did not export exactly the requested folder'],
+    'many_targets' => [$utf16("NAME\r\nD:(A;;FA;;;SY)\r\nother\r\nD:(A;;FA;;;SY)\r\n"), 0, 'icacls did not export exactly the requested folder'],
+    'no_dacl' => [$utf16("NAME\r\nO:SY\r\n"), 0, 'icacls wrote an incomplete or unsupported access control list'],
+    'broken_ace' => [$utf16("NAME\r\nD:(A;;FA;;;SY\r\n"), 0, 'icacls wrote an incomplete or unsupported access control list'],
+    'broken_fields' => [$utf16("NAME\r\nD:(A;;FA;;;)\r\n"), 0, 'icacls wrote an incomplete or unsupported access rule'],
+    'unknown_ace' => [$utf16("NAME\r\nD:(ZA;;FA;;;SY)\r\n"), 0, 'icacls wrote an incomplete or unsupported access rule'],
+    'null_dacl' => [$utf16("NAME\r\nD:NO_ACCESS_CONTROL\r\n"), 0, 'icacls wrote an incomplete or unsupported access control list'],
+    'garbage' => [$utf16("NAME\r\nD:this is not a DACL\r\n"), 0, 'icacls wrote an incomplete or unsupported access control list'],
+];
+foreach ($failures as $failure => [$record, $status, $why]) {
+    $exporting($record, $status);
+    $found = Storage::windowsCheck($root);
+    $check($notPrivate($found) && str_contains((string) $found['how'], 'by Get-Acl (') && str_contains((string) $found['how'], ') or by icacls (' . $why . ')'), 'an export that is ' . $failure . ' is no answer, and never a yes: ' . $why, json_encode($found));
+}
+$leftover = glob(sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-acl-*') ?: [];
+$check(array_filter($leftover, static fn (string $path): bool => filemtime($path) >= time() - 60) === [], 'and each export is gone with its folder afterwards');
+Storage::$shell = null;
