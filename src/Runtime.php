@@ -2094,7 +2094,17 @@ final class Runtime
     {
         foreach ($names as $name) {
             if (is_string($name) && $name !== '') {
-                return 'Name the partners who may write in allow, as allow: ["' . $name . '"] over MCP, or --allow ' . $name . ' on the command line, and open the channel again.';
+                // As JSON writes it, and on the command line only a name no
+                // shell changes: a name with a space or a quote was given
+                // unquoted, and was not one argument or not JSON (a review of 14
+                // November 2026).
+                $line = match (true) {
+                    preg_match('/^[A-Za-z0-9._-]+$/D', $name) === 1 => '--allow ' . $name . ' on the command line',
+                    str_contains($name, ',') => 'on the command line --allow takes names apart at commas, so this one is named over MCP',
+                    default => '--allow on the command line with the name quoted as your shell quotes it',
+                };
+
+                return 'Name the partners who may write in allow, as allow: ' . json_encode([$name], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ' over MCP, or ' . $line . ', and open the channel again.';
             }
         }
 

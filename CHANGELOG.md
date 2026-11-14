@@ -20,7 +20,8 @@ not what moved in the source.
   refused here, before the service is asked, with a partner from the address
   book as the example, or how to add one first. The service's advice for such
   a gate, `allow: ["*"]`, is a list of keys, and here `allow` takes partner
-  names: the star was answered `unknown_partner`.
+  names: the star was answered `unknown_partner`. The example is written as
+  JSON, and as a command line only for a name no shell changes.
 
 ## 0.3.21 - 2026-11-13
 

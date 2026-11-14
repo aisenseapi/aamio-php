@@ -38,3 +38,13 @@ $check($pkCode === 'invalid_gate' && str_contains($pkSaid, 'allow: ["bob"] over 
 [$pkCode] = $pkAsk(['*']);
 $check($pkCode === 'unknown_partner', 'and the star the service would have given is no partner here');
 $pkRuntime->close();
+
+// A name with a space or a quote was put into the advice unquoted, and was not
+// one argument or not JSON (a review of 14 November 2026).
+$pkWhole = [];
+foreach (['Anne Hansen', 'Anne "A"', 'back\\slash', 'a,b', 'bob'] as $pkName) {
+    $pkSaid = Runtime::perKeyFix([$pkName]);
+    $pkListed = explode(' over MCP', explode('allow: ', $pkSaid, 2)[1] ?? '', 2)[0];
+    $pkWhole[] = json_decode($pkListed, true) === [$pkName] && ($pkName === 'bob' ? str_contains($pkSaid, '--allow bob on the command line') : !str_contains($pkSaid, '--allow ' . $pkName));
+}
+$check($pkWhole === [true, true, true, true, true], 'the advice keeps a name whole: JSON for MCP, and a command line only where no shell changes the name');
