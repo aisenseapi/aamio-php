@@ -223,3 +223,33 @@ $rcReader4->archivePolicy = ['mode' => 'keep', 'days' => null, 'max_mb' => 0.000
 $check(!is_file($rcHome4 . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl') || $rcWritten($rcHome4) === [[], 0], '... a prune in the same process takes it');
 $check($rcSide($rcReader4->read()) === [['first', true]] && is_file($rcHome4 . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl') && $rcWritten($rcHome4) === [[1], 1], '... and the message read again is written down again: the mark is the row that is there');
 $rcReader4->close();
+
+// The fourth release check: with tidying due and a ceiling under one row, the
+// read used the row an earlier process wrote and wrote the next, the tidying
+// took both, and each message said archived. Tidying runs before a read weighs
+// its first message, and before a row is written.
+$rcDue = static function (Runtime $runtime): void {
+    $runtime->archivePolicy = ['mode' => 'keep', 'days' => null, 'max_mb' => 128 / (1024 * 1024)];
+    (\Closure::bind(function (): void {
+        $this->prunedAt = 0.0;
+    }, $runtime, Runtime::class))();
+};
+[$rcHome5, $rcRows5] = $rcCrafted('pruned-due', ['first', 'second']);
+file_put_contents($rcHome5 . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl', $rcRows5[0] . "\n");
+$rcAgain5 = new Runtime($rcHome5, 'https://fake.test', ['rc'], true, $rcQuiet);
+$rcDue($rcAgain5);
+$check(strlen($rcRows5[0]) > 128 && $rcSide($rcAgain5->read()) === [['first', true], ['second', true]] && $rcWritten($rcHome5) === [[1, 2], 2], 'with tidying due and a ceiling under one row, each message read says archived of a row that is there: the tidying ran first', json_encode($rcWritten($rcHome5)));
+$check((\Closure::bind(fn (): float => $this->prunedAt, $rcAgain5, Runtime::class))() > 0.0, '... and it ran');
+$rcAgain5->close();
+// What a tidying that is due takes of what was there before, it takes; the
+// next read's own row stays.
+[$rcHome6] = $rcCrafted('pruned-between', ['first']);
+$rcAgain6 = new Runtime($rcHome6, 'https://fake.test', ['rc'], true, $rcQuiet);
+$check($rcSide($rcAgain6->read()) === [['first', true]] && $rcWritten($rcHome6) === [[1], 1], 'a first message read and written down');
+$rcW6 = $rcAgain6->channels['side']->w;
+$rcSigner6 = Keys::generate();
+$rcBody6 = Codec::json(['text' => 'second']);
+$fake->threads[$rcW6]['messages'][] = ['seq' => 2, 'at' => $fake->now + 2, 'type' => 'text', 'body' => $rcBody6, 'sha256' => hash('sha256', $rcBody6), 'from' => $rcSigner6->public, 'sig' => $rcSigner6->sign(Keys::threadSigningInput($rcW6, $rcBody6)), 'verified' => true, 'sealed' => false];
+$rcDue($rcAgain6);
+$check($rcSide($rcAgain6->read()) === [['second', true]] && $rcWritten($rcHome6) === [[2], 1], '... and with tidying due before the next read, the first goes with the tidying, which ran first, and the second is there', json_encode($rcWritten($rcHome6)));
+$rcAgain6->close();

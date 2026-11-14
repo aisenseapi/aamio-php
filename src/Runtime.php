@@ -225,6 +225,14 @@ final class Runtime
         $this->prune();
     }
 
+    /** Tidies the archive when an hour has passed since it was tidied last. */
+    private function pruneWhenDue(): void
+    {
+        if (microtime(true) - $this->prunedAt > 3600) {
+            $this->prune();
+        }
+    }
+
     private function prune(): void
     {
         if (!$this->archiveEnabled || !(($this->archivePolicy['days'] ?? null) || ($this->archivePolicy['max_mb'] ?? null))) {
@@ -813,6 +821,10 @@ final class Runtime
         if (!$this->archiveEnabled || $this->homeReleased) {
             return false;
         }
+        // Before the row, never after it: a ceiling under one row took the row
+        // just written, and the read said archived (the fourth release check of
+        // 14 November 2026). A read tidies before it weighs its first message.
+        $this->pruneWhenDue();
         $line = json_encode($record, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
         if ($line === false) {
             $line = json_encode($record, JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
@@ -827,9 +839,6 @@ final class Runtime
         // Under a name that is a file's name and nothing else: the label when
         // it can be one, and a name made of its hash when it cannot.
         Storage::appendPrivate($this->path('archive' . DIRECTORY_SEPARATOR . Storage::archiveName($label) . '.jsonl'), $line);
-        if (microtime(true) - $this->prunedAt > 3600) {
-            $this->prune();
-        }
 
         return true;
     }
@@ -3701,6 +3710,15 @@ final class Runtime
         $withheld = [];
         // The last message this read dealt with, handed over or passed by.
         $dealtWith = null;
+        // Tidying that is due runs before any message of this read is weighed
+        // for the archive, and never after one is written: what the read says
+        // of the archive is so as it returns. A ceiling under one row took the
+        // row a read had just written, and a row an earlier process wrote, and
+        // the read said archived of both (the fourth release check of 14
+        // November 2026).
+        if ($handed !== [] && $this->archiveEnabled && !$this->homeReleased) {
+            $this->pruneWhenDue();
+        }
         foreach ($handed as $message) {
             $entry = $this->readEntry($channel, $message);
             if (($entry['verified'] ?? false) === true && $this->leftTheBook($channel, is_string($entry['from_key'] ?? null) ? $entry['from_key'] : null)) {
