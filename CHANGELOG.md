@@ -59,10 +59,11 @@ not what moved in the source.
   is read again once a prune has replaced it: a row a prune had removed was
   still taken as there. What this process wrote at a read whose cursor was not
   written is looked for in the file again after a prune too, so `archived` is
-  the row that is there. Tidying that is due runs before a read weighs its
-  first message and before a row is written, never after: under a ceiling
-  smaller than one row, the tidying took the row the read had just written,
-  and the read still said `archived`.
+  the row that is there. Tidying that is due runs before a read begins, and
+  never within it: under a ceiling smaller than one row, the tidying took the
+  row a read had just written, also one written for an earlier channel of the
+  same read, and the read still said `archived`. The archive's own
+  description says when `max_mb` holds: each time it is tidied.
 
 ## 0.3.20 - 2026-11-13
 

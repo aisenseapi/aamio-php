@@ -116,6 +116,8 @@ final class Runtime
      */
     public bool $homeReleased = false;
     private float $prunedAt = 0.0;
+    /** How deep this process is in reads: one read for the archive is the outermost. */
+    private int $readDepth = 0;
     /** @var callable */
     public $log;
     /**
@@ -225,11 +227,37 @@ final class Runtime
         $this->prune();
     }
 
-    /** Tidies the archive when an hour has passed since it was tidied last. */
+    /**
+     * Tidies the archive when an hour has passed since it was tidied last,
+     * and never within a read: one read() over two channels tidied between
+     * them, took the first channel's row and still said archived of it (the
+     * fifth release check of 14 November 2026).
+     */
     private function pruneWhenDue(): void
     {
-        if (microtime(true) - $this->prunedAt > 3600) {
+        if ($this->readDepth === 0 && microtime(true) - $this->prunedAt > 3600) {
             $this->prune();
+        }
+    }
+
+    /**
+     * A read as its caller asked for it: it tidies first, when that is due,
+     * and nothing within it tidies. The channels it reads one by one, the
+     * reads within it and the rows it writes are one read for the archive, so
+     * what it says of each message is so when it returns.
+     *
+     * @param callable(): array $read
+     */
+    private function outerRead(callable $read): array
+    {
+        if ($this->readDepth === 0 && $this->archiveEnabled && !$this->homeReleased) {
+            $this->pruneWhenDue();
+        }
+        $this->readDepth++;
+        try {
+            return $read();
+        } finally {
+            $this->readDepth--;
         }
     }
 
@@ -823,7 +851,8 @@ final class Runtime
         }
         // Before the row, never after it: a ceiling under one row took the row
         // just written, and the read said archived (the fourth release check of
-        // 14 November 2026). A read tidies before it weighs its first message.
+        // 14 November 2026). Within a read, never: the outer read tidies before
+        // it begins.
         $this->pruneWhenDue();
         $line = json_encode($record, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
         if ($line === false) {
@@ -2429,6 +2458,12 @@ final class Runtime
      */
     public function boardPoll(int $wait = 0): array
     {
+        return $this->outerRead(fn (): array => $this->boardPollHeld($wait));
+    }
+
+    /** boardPoll, as one read for the archive. */
+    private function boardPollHeld(int $wait): array
+    {
         $collected = [];
         $waited = false;
         foreach (array_values($this->channels) as $channel) {
@@ -3523,8 +3558,17 @@ final class Runtime
      * them down, and the next read handed those messages over marked replay,
      * never having handed them over at all (the release check of 13 November
      * 2026).
+     *
+     * A read that holds this one, and the reads within it, are one read for
+     * the archive: see outerRead().
      */
     public function poll(Channel $channel, int $wait = 0, ?int $limit = null, ?int $maxBytes = null): array
+    {
+        return $this->outerRead(fn (): array => $this->pollHeld($channel, $wait, $limit, $maxBytes));
+    }
+
+    /** One poll, inside the read it belongs to. */
+    private function pollHeld(Channel $channel, int $wait, ?int $limit, ?int $maxBytes): array
     {
         $before = [$channel->after, $channel->createdAt, $channel->expireAt, $channel->instance, $channel->gone, $channel->seen, $channel->seenFrom, count($channel->received), $this->peers];
         try {
@@ -3710,15 +3754,11 @@ final class Runtime
         $withheld = [];
         // The last message this read dealt with, handed over or passed by.
         $dealtWith = null;
-        // Tidying that is due runs before any message of this read is weighed
-        // for the archive, and never after one is written: what the read says
-        // of the archive is so as it returns. A ceiling under one row took the
-        // row a read had just written, and a row an earlier process wrote, and
-        // the read said archived of both (the fourth release check of 14
-        // November 2026).
-        if ($handed !== [] && $this->archiveEnabled && !$this->homeReleased) {
-            $this->pruneWhenDue();
-        }
+        // The outer read tidied before it began, and nothing tidies until it
+        // returns: what it says of the archive is so as it returns. Tidied
+        // here, channel by channel, a ceiling under one row took the first
+        // channel's row when the hour passed before the second (the fifth
+        // release check of 14 November 2026).
         foreach ($handed as $message) {
             $entry = $this->readEntry($channel, $message);
             if (($entry['verified'] ?? false) === true && $this->leftTheBook($channel, is_string($entry['from_key'] ?? null) ? $entry['from_key'] : null)) {
@@ -4580,8 +4620,17 @@ final class Runtime
      * Until 30 September 2026 the first channel got the wait before the others
      * were asked, and a reply waiting on a private thread sat behind a quiet
      * inbox for the whole wait.
+     *
+     * The channels it reads one by one are one read for the archive: it is
+     * tidied before the first, and not again until this returns.
      */
     public function read(int $wait = 0, int $limit = 50, ?int $maxBytes = null): array
+    {
+        return $this->outerRead(fn (): array => $this->readHeld($wait, $limit, $maxBytes));
+    }
+
+    /** read, as one read for the archive. */
+    private function readHeld(int $wait, int $limit, ?int $maxBytes): array
     {
         $this->ensureInbox();
         $this->publishPresence();

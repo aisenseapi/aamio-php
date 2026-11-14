@@ -18,6 +18,7 @@ declare(strict_types=1);
 use Aamio\AddonProcess;
 use Aamio\Addons;
 use Aamio\Codec;
+use Aamio\Http;
 use Aamio\Keys;
 use Aamio\McpServer;
 use Aamio\Runtime;
@@ -253,3 +254,41 @@ $fake->threads[$rcW6]['messages'][] = ['seq' => 2, 'at' => $fake->now + 2, 'type
 $rcDue($rcAgain6);
 $check($rcSide($rcAgain6->read()) === [['second', true]] && $rcWritten($rcHome6) === [[2], 1], '... and with tidying due before the next read, the first goes with the tidying, which ran first, and the second is there', json_encode($rcWritten($rcHome6)));
 $rcAgain6->close();
+
+// The fifth release check: one read over two channels, the hour passing
+// between them. The second tidied and took the first channel's row, which its
+// message had been told was archived.
+[$rcHome7] = $rcCrafted('pruned-between-channels', ['on side']);
+$rcAgain7 = new Runtime($rcHome7, 'https://fake.test', ['rc'], true, $rcQuiet);
+$rcW7 = $rcAgain7->openChannel('other', 600)['w'];
+$rcSigner7 = Keys::generate();
+$rcBody7 = Codec::json(['text' => 'on other']);
+$fake->threads[$rcW7]['messages'][] = ['seq' => 1, 'at' => $fake->now + 1, 'type' => 'text', 'body' => $rcBody7, 'sha256' => hash('sha256', $rcBody7), 'from' => $rcSigner7->public, 'sig' => $rcSigner7->sign(Keys::threadSigningInput($rcW7, $rcBody7)), 'verified' => true, 'sealed' => false];
+$rcAgain7->archivePolicy = ['mode' => 'keep', 'days' => null, 'max_mb' => 128 / (1024 * 1024)];
+$rcRows7 = static function (string $home, string $label): array {
+    $path = $home . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . $label . '.jsonl';
+    $lines = is_file($path) ? array_values(array_filter(explode("\n", (string) file_get_contents($path)), static fn (string $line): bool => $line !== '')) : [];
+
+    return array_map(static fn (string $line): mixed => json_decode($line, true)['seq'] ?? null, $lines);
+};
+$rcPrunedAt7 = static fn (Runtime $runtime): float => (\Closure::bind(fn (): float => $this->prunedAt, $runtime, Runtime::class))();
+Http::$override = static function (string $method, string $url, ?string $body, array $headers, mixed ...$rest) use ($fake, $rcW7, $rcAgain7): array {
+    if ($method === 'GET' && str_contains($url, '/' . $rcW7)) {
+        (\Closure::bind(function (): void {
+            $this->prunedAt = 0.0;
+        }, $rcAgain7, Runtime::class))();
+    }
+
+    return $fake($method, $url, $body, $headers);
+};
+try {
+    $rcRead7 = $rcAgain7->read();
+} finally {
+    Http::$override = $fake;
+}
+$rcTexts7 = array_map(static fn (array $m): array => [$m['body']['text'] ?? null, $m['archived'] ?? null], $rcRead7);
+sort($rcTexts7);
+$check($rcTexts7 === [['on other', true], ['on side', true]] && [$rcRows7($rcHome7, 'side'), $rcRows7($rcHome7, 'other')] === [[1], [1]] && $rcPrunedAt7($rcAgain7) === 0.0, 'one read over two channels says archived of rows that are there when the hour passes between them: nothing tidies within the read', json_encode([$rcTexts7, $rcRows7($rcHome7, 'side'), $rcRows7($rcHome7, 'other')]));
+$rcAgain7->read();
+$check($rcPrunedAt7($rcAgain7) > 0.0, '... and the next read tidies');
+$rcAgain7->close();
