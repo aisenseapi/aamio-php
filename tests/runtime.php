@@ -949,6 +949,7 @@ require __DIR__ . '/read-budget-texts.inc.php';
 require __DIR__ . '/live-pace-check.inc.php';
 require __DIR__ . '/check-2026-11-12.inc.php';
 require __DIR__ . '/unfit-json.inc.php';
+require __DIR__ . '/release-check-2026-11-14.inc.php';
 $a->close();
 $b->close();
 Http::$override = null;

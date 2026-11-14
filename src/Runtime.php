@@ -20,6 +20,8 @@ namespace Aamio;
 final class Runtime
 {
     public const INBOX_TTL = 3600;
+    /** How far back from the end of a channel's archive a read looks for a delivery an earlier process wrote down and did not get past with its cursor. */
+    private const ARCHIVE_TAIL_BYTES = 16777216;
     public const BOARD_TTL = 1800;
     public const CHANNEL_TTL_MIN = 30;
     public const CHANNEL_TTL_MAX = 3600;
@@ -88,6 +90,12 @@ final class Runtime
     private array $scopesAside = [];
     /** @var array<string,string> write address => partner key */
     public array $peers;
+    /** Deliveries this process wrote to the archive at a read that has not written its cursor past them, by Codec::json([w, instance, seq]). */
+    private array $writtenDown = [];
+    /** What earlier processes wrote to each channel's archive, from the end of the file: Codec::json([w, instance, seq]) => sha256. */
+    private array $archiveBefore = [];
+    /** How often a delivery was handed over here with a row an earlier process had written, by Codec::json([w, instance, seq]): copies held here that wrote none. */
+    private array $rowsReused = [];
     /** @var array<string, Channel> */
     public array $channels = [];
     /** @var array<string, array> */
@@ -196,7 +204,7 @@ final class Runtime
             @unlink($path);
         }
         foreach (Storage::tighten($this->home) as $path) {
-            ($this->log)('made private: ' . $path . ' (an older version wrote it with the default mode)');
+            $this->logged('made private: ' . $path . ' (an older version wrote it with the default mode)');
         }
         if (!Storage::isWindows()) {
             // Mode bits cost nothing to read. On Windows it is the access list
@@ -238,7 +246,7 @@ final class Runtime
             return;
         }
         if ($gone['removed'] > 0) {
-            ($this->log)('archive: ' . $gone['removed'] . ' record(s) past their lifetime removed');
+            $this->logged('archive: ' . $gone['removed'] . ' record(s) past their lifetime removed');
         }
     }
 
@@ -377,7 +385,7 @@ final class Runtime
         if ($this->homeReleased) {
             // After close the home may be another process's. Writing here
             // would be writing over what that one holds.
-            ($this->log)($name . ' not written: this runtime is closed');
+            $this->logged($name . ' not written: this runtime is closed');
 
             return;
         }
@@ -723,6 +731,44 @@ final class Runtime
     }
 
     /** Writes one record, and says whether it wrote one: a folder that keeps nothing is not a failure, and not a write either. */
+    /**
+     * What earlier processes wrote to this channel's archive, from the end of
+     * the file, read once a process. The end is enough: what an earlier
+     * process wrote and did not get past with its cursor was written last,
+     * and a read takes at most a thread's megabyte of messages.
+     *
+     * @return array<string, ?string>
+     */
+    private function archivedBefore(string $label): array
+    {
+        if (isset($this->archiveBefore[$label])) {
+            return $this->archiveBefore[$label];
+        }
+        $found = [];
+        $handle = @fopen($this->path('archive' . DIRECTORY_SEPARATOR . Storage::archiveName($label) . '.jsonl'), 'rb');
+        if ($handle !== false) {
+            try {
+                $size = (int) (fstat($handle)['size'] ?? 0);
+                $start = max(0, $size - self::ARCHIVE_TAIL_BYTES);
+                fseek($handle, $start);
+                $lines = explode("\n", (string) stream_get_contents($handle));
+            } finally {
+                fclose($handle);
+            }
+            if ($start > 0) {
+                array_shift($lines);
+            }
+            foreach ($lines as $line) {
+                $row = json_decode($line, true);
+                if (is_array($row) && ($row['kind'] ?? null) === 'received' && is_string($row['w'] ?? null) && is_string($row['instance'] ?? null) && is_int($row['seq'] ?? null)) {
+                    $found[Codec::json([$row['w'], $row['instance'], $row['seq']])] = is_string($row['sha256'] ?? null) ? $row['sha256'] : null;
+                }
+            }
+        }
+
+        return $this->archiveBefore[$label] = $found;
+    }
+
     public function archive(string $label, array $record): bool
     {
         if (!$this->archiveEnabled || $this->homeReleased) {
@@ -1016,7 +1062,7 @@ final class Runtime
         // where an earlier version keeps it too, and is no typo to report.
         $unusable = array_filter($aside, static fn (mixed $entry): bool => !self::isRemovedShare($entry));
         if ($unusable !== []) {
-            ($this->log)(sprintf('scopes.json: %d entries are not scopes this runtime can use, and stay in the file as they are', count($unusable)));
+            $this->logged(sprintf('scopes.json: %d entries are not scopes this runtime can use, and stay in the file as they are', count($unusable)));
         }
 
         return [$usable, $aside];
@@ -1492,7 +1538,7 @@ final class Runtime
 
             return ['rotated' => false, 'inbox' => $old?->w, 'allow' => $this->allowNames($old?->allow ?? []), 'error' => $what];
         }
-        ($this->log)(sprintf('inbox %s until %d, %s%s', $fresh->w, $fresh->expireAt, $reason, $fresh->allow !== [] ? ' (allowlist ' . count($fresh->allow) . ' keys)' : ''));
+        $this->logged(sprintf('inbox %s until %d, %s%s', $fresh->w, $fresh->expireAt, $reason, $fresh->allow !== [] ? ' (allowlist ' . count($fresh->allow) . ' keys)' : ''));
         $outcome['presence'] = $this->publishPresence(true);
 
         return $outcome;
@@ -2084,7 +2130,7 @@ final class Runtime
             }
             throw new CodedRuntime('not_saved', 'the board inbox could not be written down (' . $error->getMessage() . '), so nothing was posted or sent: an answer would come where this home cannot read after a restart');
         }
-        ($this->log)(sprintf('board inbox %s until %d (any key, signed only)', $channel->w, $channel->expireAt));
+        $this->logged(sprintf('board inbox %s until %d (any key, signed only)', $channel->w, $channel->expireAt));
 
         return $channel;
     }
@@ -2268,7 +2314,7 @@ final class Runtime
         $channel = $this->ensureBoardInbox($remaining + self::ANSWER_MARGIN);
         $ownPost = ($post['key'] ?? null) === $this->keys->public;
         if ($channel->expireAt < (int) ($post['expire_at'] ?? 0)) {
-            ($this->log)(sprintf('your reply address expires %d s before the post does', (int) $post['expire_at'] - $channel->expireAt));
+            $this->logged(sprintf('your reply address expires %d s before the post does', (int) $post['expire_at'] - $channel->expireAt));
         }
         $this->peers[$post['w']] = $post['key'];
         $body = ['post' => $post['id'], 'reply_to' => $channel->w, 'from' => $this->keys->hashPrefix];
@@ -2429,6 +2475,13 @@ final class Runtime
                 if ($delivery !== null && ($entry['archived'] ?? null) !== false) {
                     $written[$delivery] = ($written[$delivery] ?? 0) + 1;
                 }
+            }
+        }
+        // A copy held here whose row an earlier process wrote wrote none: it is
+        // a later reading of that row (the release check of 14 November 2026).
+        foreach ($this->rowsReused as $delivery => $times) {
+            if (isset($written[$delivery])) {
+                $written[$delivery] = max(0, $written[$delivery] - $times);
             }
         }
         // A copy in memory without the instance, from a service that names
@@ -2755,7 +2808,7 @@ final class Runtime
             $this->archive('sent', $record);
         } catch (\Throwable $error) {
             $archiveError = $error->getMessage();
-            ($this->log)('archive sent ' . $entry['id'] . ': ' . $archiveError);
+            $this->logged('archive sent ' . $entry['id'] . ': ' . $archiveError);
         }
         if ($status !== 201) {
             throw new SendFailed($entry['status'], $entry['id'], $status, $result, null, $entry['trace_error'] ?? null, $archiveError);
@@ -3662,17 +3715,40 @@ final class Runtime
                 // address in the same second gives a message the same seq and the
                 // same time as one of the old thread, and board replies had
                 // nothing else to tell the two by (a review of 11 November 2026).
-                $row = $entry + ['kind' => 'received'];
-                if (is_string($channel->instance)) {
-                    $row['instance'] = $channel->instance;
+                // One row a delivery: one this process wrote at a read that did
+                // not get as far as its cursor, or an earlier process wrote and
+                // stopped before it, is used again when it holds the same
+                // message, and was written down a second time (the release check
+                // of 14 November 2026). A row without the thread's instance,
+                // from a version before it was kept, could be another delivery,
+                // so both are kept.
+                $delivery = is_string($channel->instance) ? Codec::json([$channel->w, $channel->instance, (int) $entry['seq']]) : null;
+                $already = $delivery !== null && isset($this->writtenDown[$delivery]);
+                if (!$already && $delivery !== null && $this->archiveEnabled && !$this->homeReleased) {
+                    $earlier = $this->archivedBefore($channel->label)[$delivery] ?? null;
+                    $already = $earlier !== null && $earlier === ($entry['sha256'] ?? null);
+                    if ($already) {
+                        $this->writtenDown[$delivery] = true;
+                        $this->rowsReused[$delivery] = ($this->rowsReused[$delivery] ?? 0) + 1;
+                    }
                 }
-                $wrote = $this->archive($channel->label, $row);
-                $entry['archived'] = $wrote;
+                if ($already) {
+                    $entry['archived'] = true;
+                } else {
+                    $row = $entry + ['kind' => 'received'];
+                    if (is_string($channel->instance)) {
+                        $row['instance'] = $channel->instance;
+                    }
+                    $wrote = $this->archive($channel->label, $row);
+                    $entry['archived'] = $wrote;
 
-                if (!$wrote) {
-                    // Nothing went wrong and nothing was written: this folder keeps
-                    // nothing decrypted. Said, so the caller does not go looking.
-                    $entry['archive_off'] = true;
+                    if (!$wrote) {
+                        // Nothing went wrong and nothing was written: this folder keeps
+                        // nothing decrypted. Said, so the caller does not go looking.
+                        $entry['archive_off'] = true;
+                    } elseif ($delivery !== null) {
+                        $this->writtenDown[$delivery] = true;
+                    }
                 }
             } catch (\Throwable $error) {
                 // Said in attention, not on the message: a message has to be the
@@ -3798,6 +3874,15 @@ final class Runtime
         } catch (\Throwable $error) {
             $channel->after = $was;
             $this->note($channel, 'unsaved', 'this machine could not write down what it had read: ' . $error->getMessage() . '. The cursor stays at ' . $was . '. Nothing was lost: what arrived was handed over, and anything whose place was not written down arrives again, marked as a replay while this process runs. Free some room or fix the permissions on the home folder, and check aamio doctor.');
+
+            return;
+        }
+        // What the cursor is now past is never read again here.
+        foreach (array_keys($this->writtenDown) as $delivery) {
+            $held = json_decode((string) $delivery, true);
+            if (is_array($held) && ($held[0] ?? null) === $channel->w && (int) ($held[2] ?? 0) <= $to) {
+                unset($this->writtenDown[$delivery]);
+            }
         }
     }
 
@@ -4191,7 +4276,7 @@ final class Runtime
         } catch (\Throwable) {
             // Never at the cost of the thing being traced, even here.
             try {
-                ($this->log)($line);
+                $this->logged($line);
             } catch (\Throwable) {
             }
         }
@@ -4377,6 +4462,20 @@ final class Runtime
         return $this->peers[$who] ?? null;
     }
 
+    /**
+     * The caller's logger, whose failure costs the log line and nothing else.
+     * A note made after the cursor was written down called a logger that
+     * failed, and the failure threw out of the read, which then handed over
+     * nothing of what it had passed (the release check of 14 November 2026).
+     */
+    public function logged(string $line): void
+    {
+        try {
+            ($this->log)($line);
+        } catch (\Throwable) {
+        }
+    }
+
     private function note(Channel $channel, string $state, string $what, ?array $seqs = null): void
     {
         $this->noteTrouble($channel->label, $state, $what, $channel->w, $seqs);
@@ -4394,7 +4493,7 @@ final class Runtime
             $note['what'] = $note['count'] . ' message(s) (seq ' . implode(', ', $note['seqs']) . '): ' . implode(' ', $note['details']);
         }
         $this->attention[$key] = $note;
-        ($this->log)($where . ': ' . $what);
+        $this->logged($where . ': ' . $what);
     }
 
     /** What the reads since the last call could not do, once, and then cleared. */

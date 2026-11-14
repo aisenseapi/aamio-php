@@ -292,8 +292,16 @@ if ($command !== 'addon') {
             return null;
         }
         try {
-            $value = json_decode((string) $opts[$name], true, 512, JSON_THROW_ON_ERROR);
+            // --data in the form it is sent in, objects as objects, so what is
+            // checked here before the home is what goes out: as arrays, a
+            // member name that starts with U+0000 passed here and stopped the
+            // command after the home was opened (the release check of 14
+            // November 2026).
+            $value = json_decode((string) $opts[$name], $name !== 'data', 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException $error) {
+            if ($error->getCode() === JSON_ERROR_INVALID_PROPERTY_NAME) {
+                fail('--' . $name . ' has a member name that starts with U+0000, which this PHP cannot hold in an object. Name it otherwise.', 2);
+            }
             if ($error->getCode() !== JSON_ERROR_DEPTH) {
                 fail($wrong, 2);
             }

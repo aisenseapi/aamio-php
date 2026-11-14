@@ -69,12 +69,13 @@ foreach (['a number that is not finite' => '{"text":"x","data":{"n":1e999}}', 'n
     $check(($unfitServer->dispatch('aamio_read', [])['structuredContent']['messages'] ?? null) === [], '... and the cursor is past all four');
 }
 
-// A channel that threw halfway through its messages kept the hashes of the ones
-// it had taken before it threw, the next channel's save wrote them down, and the
-// next read handed those messages over marked replay, never having handed them
-// over at all (the release check of 13 November 2026). Nothing in this read is
-// known to throw any more, so the logger does, at the note the second message
-// makes: it names an address the first one bound to another key.
+// A logger that fails costs the log line, never the read (the release check of
+// 14 November 2026). It fails here at the note the second message makes, which
+// names an address the first one bound to another key: it threw out of the
+// read, and a note made after the cursor was written down lost what that read
+// had passed. A read that throws for another reason leaves nothing of itself in
+// memory, as aamio-python's and the Node runtime's tests show; nothing in this
+// read is known to throw once the logger cannot.
 $halfThrows = false;
 $halfHome = $root . DIRECTORY_SEPARATOR . 'unfit-half';
 mkdir($halfHome, 0700, true);
@@ -92,11 +93,11 @@ foreach ([[$unfitWriter, 'first on the side'], [$unfitReader, 'second on the sid
 $halfServer = new McpServer($halfReader);
 $halfThrows = true;
 $halfFirst = $halfServer->dispatch('aamio_read', [])['structuredContent'] ?? [];
-$check(($halfFirst['messages'] ?? null) === [] && array_filter($halfFirst['attention'] ?? [], static fn (array $note): bool => ($note['channel'] ?? null) === 'side' && ($note['state'] ?? null) === 'unread') !== [], 'a channel that throws on its second message hands nothing of it over and says the channel could not be read', json_encode($halfFirst));
+$check(array_map(static fn (array $m): array => [$m['body']['text'] ?? null, $m['replay'] ?? null], $halfFirst['messages'] ?? []) === [['first on the side', false], ['second on the side', false]]
+    && array_filter($halfFirst['attention'] ?? [], static fn (array $note): bool => ($note['state'] ?? null) === 'unread') === []
+    && array_filter($halfFirst['attention'] ?? [], static fn (array $note): bool => ($note['state'] ?? null) === 'binding_conflict') !== [], 'a logger that fails at a note costs the log line, never the read: both are handed over, and the note is in attention', json_encode($halfFirst));
 $halfThrows = false;
-// The inbox is read first and written down, with whatever the side holds in memory.
-$halfAgain = $halfServer->dispatch('aamio_read', [])['structuredContent']['messages'] ?? [];
-$check(array_map(static fn (array $m): array => [$m['body']['text'] ?? null, $m['replay'] ?? null], $halfAgain) === [['first on the side', false], ['second on the side', false]], '... and the next read hands both over, neither marked a copy: neither was handed over before', json_encode($halfAgain));
+$check(($halfServer->dispatch('aamio_read', [])['structuredContent']['messages'] ?? null) === [], '... and nothing comes twice');
 $halfReader->close();
 
 // Over MCP, as the serving loop hands a call over: the line read twice.

@@ -796,6 +796,19 @@ final class McpServer
         ];
     }
 
+    /** Whether a request id can be answered as it came: a string, or a whole number a double holds exactly. */
+    private static function idFits(mixed $id): bool
+    {
+        if (is_string($id)) {
+            return true;
+        }
+        if (is_int($id)) {
+            return $id >= -9007199254740991 && $id <= 9007199254740991;
+        }
+
+        return is_float($id) && is_finite($id) && floor($id) === $id && abs($id) <= 9007199254740991.0;
+    }
+
     public function handle(mixed $message, mixed $sent = null): ?array
     {
         if (is_array($message) && !array_is_list($message) && !array_key_exists('method', $message) && array_key_exists('id', $message) && (array_key_exists('result', $message) || array_key_exists('error', $message))) {
@@ -803,6 +816,13 @@ final class McpServer
             // the call was cancelled under. Nothing to answer, and an error sent
             // back would be a reply to the client's own reply.
             return null;
+        }
+        if (is_array($message) && array_key_exists('id', $message) && !self::idFits($message['id'])) {
+            // An id is a string or a whole number a double holds exactly, as in
+            // the Node runtime. 1e999 decoded to INF and was copied into the
+            // answer, which could then not be written (the release check of 14
+            // November 2026).
+            return ['jsonrpc' => '2.0', 'id' => null, 'error' => ['code' => -32600, 'message' => 'Invalid request id']];
         }
         if (!is_array($message) || array_is_list($message) || ($message['jsonrpc'] ?? null) !== '2.0' || !is_string($message['method'] ?? null)) {
             return ['jsonrpc' => '2.0', 'id' => is_array($message) ? ($message['id'] ?? null) : null, 'error' => ['code' => -32600, 'message' => 'Invalid Request']];
@@ -893,8 +913,17 @@ final class McpServer
                     }
                 }
                 $arguments = $given instanceof \stdClass ? self::plain($given) : $given;
-                // data goes on as it was sent, keys and all: as arrays, {"0": "a"} went out as ["a"].
-                if ($given instanceof \stdClass && property_exists($given, 'data')) {
+                if ($given instanceof \stdClass && $listed === null) {
+                    // An add-on's tool gets every argument as it was sent,
+                    // objects as objects and lists as lists: as arrays, an empty
+                    // object went to the add-on as an empty list (the release
+                    // check of 14 November 2026).
+                    $arguments = [];
+                    foreach (get_object_vars($given) as $field => $value) {
+                        $arguments[$field] = Codec::jsonValue($value);
+                    }
+                } elseif ($given instanceof \stdClass && property_exists($given, 'data')) {
+                    // data goes on as it was sent, keys and all: as arrays, {"0": "a"} went out as ["a"].
                     $arguments['data'] = Codec::jsonValue($given->data);
                 }
                 foreach ($listed['inputSchema']['properties'] ?? [] as $field => $want) {
@@ -935,7 +964,7 @@ final class McpServer
             return $this->handle($message, $sent);
         } catch (\Throwable $error) {
             $kind = (new \ReflectionClass($error))->getShortName();
-            ($this->runtime->log)($kind . ': ' . $error->getMessage());
+            $this->runtime->logged($kind . ': ' . $error->getMessage());
             if (!is_array($message) || !array_key_exists('id', $message)) {
                 return null;
             }
@@ -1055,9 +1084,9 @@ final class McpServer
         try {
             $this->runtime->ensureInbox();
         } catch (\RuntimeException $error) {
-            ($this->runtime->log)('the inbox could not be opened yet: ' . $error->getMessage() . '. A call that needs the inbox tries again, and says so.');
+            $this->runtime->logged('the inbox could not be opened yet: ' . $error->getMessage() . '. A call that needs the inbox tries again, and says so.');
         }
-        ($this->runtime->log)('serving on stdio, inbox ' . ($this->runtime->whoami()['inbox'] ?? '?'));
+        $this->runtime->logged('serving on stdio, inbox ' . ($this->runtime->whoami()['inbox'] ?? '?'));
         $this->in = $in;
         $this->out = $out;
         while (($line = $this->nextLine()) !== false) {

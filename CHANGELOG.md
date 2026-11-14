@@ -32,6 +32,25 @@ not what moved in the source.
   the messages it had taken, the next channel's save wrote them down, and the
   next read handed those messages over marked `replay`, though they had never
   been handed over.
+- A logger that fails costs the log line, never the read: a note made after
+  the cursor was written down threw out of the read, which then handed over
+  nothing of what it had passed.
+- Over MCP a request id that is not a string or a whole number a double holds
+  exactly, such as `1e999`, is refused with `-32600` and id null, as in the
+  Node runtime. `1e999` was copied into an answer that could not be written.
+- An add-on's tool gets every argument as it was sent, objects as objects and
+  lists as lists. Read as arrays, an empty object went to the add-on as an
+  empty list.
+- `--data` is checked before the home as it is sent, objects as objects: a
+  member name that starts with U+0000 passed the check and stopped the
+  command after the home was opened.
+- A delivery is written to the archive once. One read again after a read that
+  failed, or after a cursor that could not be written, uses the row that is
+  there, in the next process too when the row is among the last 16 MiB of its
+  channel's archive and holds the same message. A row written without the
+  thread's instance, by a version before it was kept, is not taken for it, so
+  such a delivery can stand there twice. Board replies lists a row used again
+  as it was first written down.
 
 ## 0.3.20 - 2026-11-13
 
