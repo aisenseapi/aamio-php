@@ -34,7 +34,7 @@ $pkAsk = static function (?array $allow) use ($pkRuntime): array {
 $check($pkCode === 'invalid_gate' && str_contains($pkSaid, 'aamio partner add NAME KEY') && !str_contains($pkSaid, '*') && count($fake->threads) === $pkThreads, 'per_key without allow is answered here, with how to add a partner first, and the service is not asked', $pkSaid);
 $pkRuntime->partnerAdd('bob', Keys::generate()->public);
 [$pkCode, $pkSaid] = $pkAsk([]);
-$check($pkCode === 'invalid_gate' && str_contains($pkSaid, 'allow: ["bob"] over MCP, or --allow bob on the command line'), 'and with a partner, the advice names one from the address book', $pkSaid);
+$check($pkCode === 'invalid_gate' && str_contains($pkSaid, 'allow: ["bob"] over MCP, or --allow=bob on the command line'), 'and with a partner, the advice names one from the address book', $pkSaid);
 [$pkCode] = $pkAsk(['*']);
 $check($pkCode === 'unknown_partner', 'and the star the service would have given is no partner here');
 $pkRuntime->close();
@@ -45,6 +45,17 @@ $pkWhole = [];
 foreach (['Anne Hansen', 'Anne "A"', 'back\\slash', 'a,b', 'bob'] as $pkName) {
     $pkSaid = Runtime::perKeyFix([$pkName]);
     $pkListed = explode(' over MCP', explode('allow: ', $pkSaid, 2)[1] ?? '', 2)[0];
-    $pkWhole[] = json_decode($pkListed, true) === [$pkName] && ($pkName === 'bob' ? str_contains($pkSaid, '--allow bob on the command line') : !str_contains($pkSaid, '--allow ' . $pkName));
+    $pkWhole[] = json_decode($pkListed, true) === [$pkName] && ($pkName === 'bob' ? str_contains($pkSaid, '--allow=bob on the command line') : !str_contains($pkSaid, '--allow ' . $pkName) && !str_contains($pkSaid, '--allow=' . $pkName));
 }
 $check($pkWhole === [true, true, true, true, true], 'the advice keeps a name whole: JSON for MCP, and a command line only where no shell changes the name');
+
+// A name that starts with a hyphen was read as an option: --allow --bob
+// answered "--allow needs a value" (a review of 14 November 2026). As
+// --allow=NAME the parser takes it whole, and the partner is looked up.
+$pkParsed = [];
+$pkCliHome = $root . DIRECTORY_SEPARATOR . 'per-key-cli';
+foreach (['-anne', '--bob', '--home', 'bob'] as $pkName) {
+    [, $pkOut, $pkErr] = $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $pkCliHome, '--host', 'http://127.0.0.1:9', 'channel', 'open', 'deal', '--allow=' . $pkName, '--gate', '{"require": {"per_key": 5}}']));
+    $pkParsed[$pkName] = str_contains(Runtime::perKeyFix([$pkName]), '--allow=' . $pkName . ' on the command line') && (json_decode((string) $pkOut, true) ?? []) === ['error' => 'unknown partner: ' . $pkName, 'error_code' => 'unknown_partner'] ? 'ok' : $pkOut . $pkErr;
+}
+$check($pkParsed === ['-anne' => 'ok', '--bob' => 'ok', '--home' => 'ok', 'bob' => 'ok'], 'and the command line in the advice is one the parser takes, a name that starts with a hyphen too', json_encode($pkParsed));

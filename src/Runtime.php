@@ -2099,7 +2099,8 @@ final class Runtime
                 // unquoted, and was not one argument or not JSON (a review of 14
                 // November 2026).
                 $line = match (true) {
-                    preg_match('/^[A-Za-z0-9._-]+$/D', $name) === 1 => '--allow ' . $name . ' on the command line',
+                    // And as --allow=NAME: a name that starts with a hyphen was read as an option, so it goes as --allow=NAME, which every parser takes whole (a review of 14 November 2026).
+                    preg_match('/^[A-Za-z0-9._-]+$/D', $name) === 1 => '--allow=' . $name . ' on the command line',
                     str_contains($name, ',') => 'on the command line --allow takes names apart at commas, so this one is named over MCP',
                     default => '--allow on the command line with the name quoted as your shell quotes it',
                 };
