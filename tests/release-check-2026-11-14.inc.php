@@ -134,3 +134,77 @@ echo json_encode(["result" => ["kept" => true]]);
     Addons::useInstalled([]);
     Addons::reset();
 })();
+
+// The second release check of 14 November 2026. Every answer's id can be
+// written, a refusal's included, and a whole number written 1.0 is the id 1,
+// as the Node runtime reads it.
+$rcIn = fopen('php://memory', 'r+');
+$rcOut = fopen('php://memory', 'r+');
+fwrite($rcIn, '{"jsonrpc":"2.0","id":1e999,"method":"tools/call","params":{"name":"aamio_presence_lookup","arguments":{"\u0000x":1}}}' . "\n" . '{"jsonrpc":"2.0","id":1.0,"method":"ping"}' . "\n" . '{"jsonrpc":"2.0","id":"1","method":"ping"}' . "\n");
+rewind($rcIn);
+(new McpServer(new Runtime($root . DIRECTORY_SEPARATOR . 'rc-1114-serve', 'http://127.0.0.1:9', null, false, $rcQuiet)))->serve($rcIn, $rcOut);
+rewind($rcOut);
+$rcLines = array_values(array_filter(explode("\n", (string) stream_get_contents($rcOut)), static fn (string $line): bool => trim($line) !== ''));
+$rcIds = array_map(static fn (string $line): mixed => array_key_exists('id', (array) json_decode($line, true)) ? json_decode($line, true)['id'] : 'unreadable', $rcLines);
+$check(count($rcLines) === 3 && $rcIds === [null, 1, '1'], 'a refusal answers an id no reader can hold with null, 1.0 is the id 1, and "1" stays a string', json_encode($rcLines));
+
+// The rows used again are the ones the archive's reader counts, and the end of
+// the file is read again when a prune has replaced the file. A line that is not
+// JSON a reader takes was passed by here before as well, and is held here as in
+// the other two runtimes.
+$rcCrafted = static function (string $name, array $texts) use ($root, $fake, $rcQuiet): array {
+    $home = $root . DIRECTORY_SEPARATOR . 'rc-1114-' . $name;
+    mkdir($home, 0700, true);
+    $reader = new Runtime($home, 'https://fake.test', ['rc'], true, $rcQuiet);
+    $reader->ensureInbox();
+    $w = $reader->openChannel('side', 600)['w'];
+    $reader->close();
+    $signer = Keys::generate();
+    $rows = [];
+    foreach ($texts as $at => $text) {
+        $body = Codec::json(['text' => $text]);
+        $seq = $at + 1;
+        $fake->threads[$w]['messages'][] = ['seq' => $seq, 'at' => $fake->now + $seq, 'type' => 'text', 'body' => $body, 'sha256' => hash('sha256', $body), 'from' => $signer->public, 'sig' => $signer->sign(Keys::threadSigningInput($w, $body)), 'verified' => true, 'sealed' => false];
+        $rows[] = Codec::json(['kind' => 'received', 'channel' => 'side', 'w' => $w, 'instance' => $fake->threads[$w]['instance'], 'seq' => $seq, 'sha256' => hash('sha256', $body), 'body' => ['text' => $text]]);
+    }
+
+    return [$home, $rows];
+};
+$rcWritten = static function (string $home): array {
+    $lines = array_values(array_filter(explode("\n", (string) file_get_contents($home . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl')), static fn (string $line): bool => $line !== ''));
+    $seqs = [];
+    foreach ($lines as $number => $line) {
+        $row = json_decode($number === 0 && str_starts_with($line, "\xEF\xBB\xBF") ? substr($line, 3) : $line, true);
+        if (is_array($row) && ($row['kind'] ?? null) === 'received') {
+            $seqs[] = $row['seq'];
+        }
+    }
+    sort($seqs);
+
+    return [$seqs, count($lines)];
+};
+$rcSide = static fn (array $read): array => array_map(static fn (array $m): array => [$m['body']['text'] ?? null, $m['archived'] ?? null], array_values(array_filter($read, static fn (array $m): bool => ($m['channel'] ?? null) === 'side')));
+foreach (['a byte order mark' => [['first', 'second'], [1, 2], 2], 'a line that is not JSON a reader takes' => [['first', 'second'], [1, 2], 3], 'a line that starts where the end starts' => [['first', 'second'], [1, 1, 2], 3]] as $rcCase => [$rcTexts, $rcSeqs, $rcCount]) {
+    [$rcHome2, $rcRows] = $rcCrafted(substr(md5($rcCase), 0, 8), $rcTexts);
+    if ($rcCase === 'a line that is not JSON a reader takes') {
+        $rcRows[0] = str_replace('"first"', "\"fir\xFFst\"", $rcRows[0]);
+    }
+    file_put_contents($rcHome2 . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl', ($rcCase === 'a byte order mark' ? "\xEF\xBB\xBF" : '') . $rcRows[0] . "\n" . $rcRows[1] . "\n");
+    $rcAgain2 = new Runtime($rcHome2, 'https://fake.test', ['rc'], true, $rcQuiet);
+    if ($rcCase === 'a line that starts where the end starts') {
+        $rcAgain2->archiveTailBytes = strlen($rcRows[1]) + 1;
+    }
+    $check($rcSide($rcAgain2->read()) === [['first', true], ['second', true]] && $rcWritten($rcHome2) === [$rcSeqs, $rcCount], 'a row used again is one the archive reader counts: ' . $rcCase, json_encode($rcWritten($rcHome2)));
+    $rcAgain2->close();
+}
+[$rcHome3, $rcRows3] = $rcCrafted('pruned', ['first']);
+$rcPath3 = $rcHome3 . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl';
+file_put_contents($rcPath3, $rcRows3[0] . "\n");
+$rcAgain3 = new Runtime($rcHome3, 'https://fake.test', ['rc'], true, $rcQuiet);
+$check($rcSide($rcAgain3->read()) === [['first', true]] && $rcWritten($rcHome3) === [[1], 1], 'the row an earlier process wrote is used');
+// A prune writes the file again beside itself and renames it over: here, without the row.
+file_put_contents($rcPath3 . '.tmp', '');
+rename($rcPath3 . '.tmp', $rcPath3);
+$rcAgain3->channels['side']->after = 0;
+$check($rcSide($rcAgain3->read()) === [['first', true]] && $rcWritten($rcHome3) === [[1], 1], '... and after a prune removed it, it is written again: the archive has what the message says', json_encode($rcWritten($rcHome3)));
+$rcAgain3->close();

@@ -20,8 +20,6 @@ namespace Aamio;
 final class Runtime
 {
     public const INBOX_TTL = 3600;
-    /** How far back from the end of a channel's archive a read looks for a delivery an earlier process wrote down and did not get past with its cursor. */
-    private const ARCHIVE_TAIL_BYTES = 16777216;
     public const BOARD_TTL = 1800;
     public const CHANNEL_TTL_MIN = 30;
     public const CHANNEL_TTL_MAX = 3600;
@@ -92,8 +90,10 @@ final class Runtime
     public array $peers;
     /** Deliveries this process wrote to the archive at a read that has not written its cursor past them, by Codec::json([w, instance, seq]). */
     private array $writtenDown = [];
-    /** What earlier processes wrote to each channel's archive, from the end of the file: Codec::json([w, instance, seq]) => sha256. */
+    /** What earlier processes wrote to each channel's archive, from the end of the file: [rows by Codec::json([w, instance, seq]) => sha256, the file's device and inode, its size]. */
     private array $archiveBefore = [];
+    /** How far back from the end of a channel's archive a read looks for a delivery an earlier process wrote down and did not get past with its cursor. */
+    public int $archiveTailBytes = 16777216;
     /** How often a delivery was handed over here with a row an earlier process had written, by Codec::json([w, instance, seq]): copies held here that wrote none. */
     private array $rowsReused = [];
     /** @var array<string, Channel> */
@@ -233,6 +233,8 @@ final class Runtime
         $this->prunedAt = microtime(true);
         try {
             $gone = Storage::prune($this->home, $this->archivePolicy);
+            // What the end of each file held may be gone with it.
+            $this->archiveBefore = [];
         } catch (\Throwable $error) {
             // The archive keeps growing, in plain text, and the policy meant to
             // bound it did not run.
@@ -733,30 +735,53 @@ final class Runtime
     /** Writes one record, and says whether it wrote one: a folder that keeps nothing is not a failure, and not a write either. */
     /**
      * What earlier processes wrote to this channel's archive, from the end of
-     * the file, read once a process. The end is enough: what an earlier
-     * process wrote and did not get past with its cursor was written last,
-     * and a read takes at most a thread's megabyte of messages.
+     * the file. The end is enough for what an earlier process wrote and did
+     * not get past with its cursor, which was written last: a read takes at
+     * most a thread's megabyte of messages. A row further back is not found,
+     * and that delivery is written down again. The rows are the ones the
+     * archive's own reader counts, by its rules: past a byte order mark at the
+     * start of the file, JSON. The first line of the end counts when it starts
+     * where a line starts, and is passed by when it is the tail of a line cut
+     * by where the end begins.
+     *
+     * Read again when the file is not the one that was read: replaced, as a
+     * prune replaces it, or shorter. A row a prune had removed was still taken
+     * as there, and the message said archived: true with no row behind it (the
+     * release check of 14 November 2026).
      *
      * @return array<string, ?string>
      */
     private function archivedBefore(string $label): array
     {
-        if (isset($this->archiveBefore[$label])) {
-            return $this->archiveBefore[$label];
+        $path = $this->path('archive' . DIRECTORY_SEPARATOR . Storage::archiveName($label) . '.jsonl');
+        clearstatcache(true, $path);
+        $stat = @stat($path);
+        $version = $stat === false ? null : [$stat['dev'], $stat['ino']];
+        $held = $this->archiveBefore[$label] ?? null;
+        if ($held !== null && $held[1] === $version && ($stat === false || $stat['size'] >= $held[2])) {
+            return $held[0];
         }
         $found = [];
-        $handle = @fopen($this->path('archive' . DIRECTORY_SEPARATOR . Storage::archiveName($label) . '.jsonl'), 'rb');
+        $size = 0;
+        $handle = $stat === false ? false : @fopen($path, 'rb');
         if ($handle !== false) {
             try {
                 $size = (int) (fstat($handle)['size'] ?? 0);
-                $start = max(0, $size - self::ARCHIVE_TAIL_BYTES);
-                fseek($handle, $start);
-                $lines = explode("\n", (string) stream_get_contents($handle));
+                $start = max(0, $size - $this->archiveTailBytes);
+                // The byte before the end says whether its first line is whole.
+                fseek($handle, max(0, $start - 1));
+                $data = (string) stream_get_contents($handle);
             } finally {
                 fclose($handle);
             }
             if ($start > 0) {
-                array_shift($lines);
+                $whole = substr($data, 0, 1) === "\n";
+                $lines = explode("\n", substr($data, 1));
+                if (!$whole) {
+                    array_shift($lines);
+                }
+            } else {
+                $lines = explode("\n", str_starts_with($data, "\xEF\xBB\xBF") ? substr($data, 3) : $data);
             }
             foreach ($lines as $line) {
                 $row = json_decode($line, true);
@@ -765,8 +790,9 @@ final class Runtime
                 }
             }
         }
+        $this->archiveBefore[$label] = [$found, $version, $size];
 
-        return $this->archiveBefore[$label] = $found;
+        return $found;
     }
 
     public function archive(string $label, array $record): bool

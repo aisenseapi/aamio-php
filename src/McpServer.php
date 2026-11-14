@@ -796,6 +796,23 @@ final class McpServer
         ];
     }
 
+    /**
+     * The id an answer carries: the request's when it can be answered as it
+     * came, a whole number written 1.0 as 1, as the Node runtime reads it, and
+     * null for any other. A string stays a string. Every answer takes its id
+     * from here, the refusals included, and so does a cancellation, which
+     * compared 1 with 1.0 and found no call (the release check of 14 November
+     * 2026).
+     */
+    private static function answerId(mixed $id): mixed
+    {
+        if (!self::idFits($id)) {
+            return null;
+        }
+
+        return is_float($id) ? (int) $id : $id;
+    }
+
     /** Whether a request id can be answered as it came: a string, or a whole number a double holds exactly. */
     private static function idFits(mixed $id): bool
     {
@@ -832,7 +849,7 @@ final class McpServer
         if (!array_key_exists('id', $message) || str_starts_with($method, 'notifications/')) {
             return null;
         }
-        $id = $message['id'];
+        $id = self::answerId($message['id']);
         // A request that names a revision this server does not know is refused
         // before anything is done, as the hosted service refuses it: the shape
         // such a client wants is unknown, and the older shape was a guess. What
@@ -999,7 +1016,7 @@ final class McpServer
             return false;
         }
         foreach ($this->cancelled as $index => $id) {
-            if ($id === $message['id']) {
+            if ($id === self::answerId($message['id'])) {
                 array_splice($this->cancelled, $index, 1);
 
                 return true;
@@ -1033,10 +1050,10 @@ final class McpServer
                 }
                 continue;
             }
-            if (!array_key_exists('method', $message) && ($message['id'] ?? null) === $id) {
+            if (!array_key_exists('method', $message) && self::answerId($message['id'] ?? null) === $id) {
                 return $message;
             }
-            $cancelled = ($message['method'] ?? null) === 'notifications/cancelled' && is_array($message['params'] ?? null) ? ($message['params']['requestId'] ?? null) : null;
+            $cancelled = ($message['method'] ?? null) === 'notifications/cancelled' && is_array($message['params'] ?? null) ? self::answerId($message['params']['requestId'] ?? null) : null;
             if ($cancelled !== null && $cancelled === $waiting) {
                 $this->send(['jsonrpc' => '2.0', 'method' => 'notifications/cancelled', 'params' => ['requestId' => $id, 'reason' => 'the call it was asked for was cancelled']]);
 
@@ -1113,7 +1130,7 @@ final class McpServer
                         if (is_array($one) && !array_is_list($one) && isset($one['method']) && !array_key_exists('id', $one)) {
                             continue;
                         }
-                        $refusals[] = ['jsonrpc' => '2.0', 'id' => is_array($one) ? ($one['id'] ?? null) : null, 'error' => ['code' => -32600, 'message' => 'This request holds a member name that starts with U+0000, which this server cannot read as it was sent. Rename it or leave it out.']];
+                        $refusals[] = ['jsonrpc' => '2.0', 'id' => self::answerId(is_array($one) ? ($one['id'] ?? null) : null), 'error' => ['code' => -32600, 'message' => 'This request holds a member name that starts with U+0000, which this server cannot read as it was sent. Rename it or leave it out.']];
                     }
                     if ($refusals !== []) {
                         $this->send($listed ? $refusals : $refusals[0]);

@@ -38,19 +38,25 @@ not what moved in the source.
 - Over MCP a request id that is not a string or a whole number a double holds
   exactly, such as `1e999`, is refused with `-32600` and id null, as in the
   Node runtime. `1e999` was copied into an answer that could not be written.
+  The refusal of a line with a member name that starts with U+0000 takes its
+  id the same way, and a whole number written `1.0` is the id `1`, also when
+  a call is cancelled by it.
 - An add-on's tool gets every argument as it was sent, objects as objects and
   lists as lists. Read as arrays, an empty object went to the add-on as an
   empty list.
-- `--data` is checked before the home as it is sent, objects as objects: a
-  member name that starts with U+0000 passed the check and stopped the
-  command after the home was opened.
+- `--data` is decoded once, before the home, objects as objects, and that is
+  what is sent: a member name that starts with U+0000 passed the check and
+  stopped the command after the home was opened.
 - A delivery is written to the archive once. One read again after a read that
   failed, or after a cursor that could not be written, uses the row that is
   there, in the next process too when the row is among the last 16 MiB of its
   channel's archive and holds the same message. A row written without the
   thread's instance, by a version before it was kept, is not taken for it, so
   such a delivery can stand there twice. Board replies lists a row used again
-  as it was first written down.
+  as it was first written down. The rows used again are the ones the archive's
+  reader counts, past a byte order mark and in UTF-8, and the end of the file
+  is read again once a prune has replaced it: a row a prune had removed was
+  still taken as there.
 
 ## 0.3.20 - 2026-11-13
 

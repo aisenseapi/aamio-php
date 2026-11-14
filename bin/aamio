@@ -204,6 +204,9 @@ if ($command === 'addon') {
 // was no number was taken as 0 (a check of 13 November 2026). A partner's
 // name or key and send --re are the command's answer instead, as JSON with 1,
 // as in the other two, and no home is made for them either.
+// --data as it was checked before the home, which is what is sent: decoded
+// once, objects as objects (the release check of 14 November 2026).
+$checkedData = null;
 if ($command !== 'addon') {
     $commands = [
         // The words it takes, how many of the last may be left out, its options, its switches.
@@ -373,7 +376,7 @@ if ($command !== 'addon') {
             break;
         case 'send':
             $answer(static fn () => Runtime::checkRe($opts['re'] ?? null));
-            $json('data', $noData);
+            $checkedData = $json('data', $noData);
             break;
         case 'trace':
             $whole('limit', 1, 50);
@@ -415,7 +418,7 @@ if ($command !== 'addon') {
             $scopeName('scope');
             break;
         case 'board answer':
-            $json('data', $noData);
+            $checkedData = $json('data', $noData);
             $scopeName('scope');
             break;
         case 'board replies':
@@ -584,7 +587,7 @@ try {
         case 'send':
             // As it was given, objects as objects: as arrays, {"0": "a"} went
             // out as ["a"], and a value that was not an array not at all.
-            $data = isset($opts['data']) ? Codec::jsonValue(json_decode((string) $opts['data'], false, 512, JSON_THROW_ON_ERROR)) : null;
+            $data = isset($opts['data']) ? Codec::jsonValue($checkedData) : null;
             out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), $data, null, isset($opts['re']) ? (string) $opts['re'] : null));
             break;
         case 'trace':
@@ -658,7 +661,7 @@ try {
                     out($runtime->boardTags());
                     break;
                 case 'answer':
-                    $answerData = isset($opts['data']) ? Codec::jsonValue(json_decode((string) $opts['data'], false, 512, JSON_THROW_ON_ERROR)) : null;
+                    $answerData = isset($opts['data']) ? Codec::jsonValue($checkedData) : null;
                     out($runtime->boardAnswer((string) ($args[2] ?? fail('board answer POST TEXT')), (string) ($args[3] ?? fail('board answer POST TEXT')), $answerData, isset($opts['scope']) ? (string) $opts['scope'] : null));
                     break;
                 case 'replies':
