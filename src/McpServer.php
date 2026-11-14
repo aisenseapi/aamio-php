@@ -810,7 +810,9 @@ final class McpServer
             return null;
         }
 
-        return is_float($id) ? (int) $id : $id;
+        // A whole number this PHP's int holds is given as one; past it, on a
+        // PHP whose int is 32 bits, it stays the number it was.
+        return is_float($id) && $id >= PHP_INT_MIN && $id <= PHP_INT_MAX ? (int) $id : $id;
     }
 
     /** Whether a request id can be answered as it came: a string, or a whole number a double holds exactly. */

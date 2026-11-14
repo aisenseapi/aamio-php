@@ -88,7 +88,7 @@ final class Runtime
     private array $scopesAside = [];
     /** @var array<string,string> write address => partner key */
     public array $peers;
-    /** Deliveries this process wrote to the archive at a read that has not written its cursor past them, by Codec::json([w, instance, seq]). */
+    /** Deliveries this process wrote to the archive at a read that has not written its cursor past them, by Codec::json([w, instance, seq]): the archive file each went to. */
     private array $writtenDown = [];
     /** What earlier processes wrote to each channel's archive, from the end of the file: [rows by Codec::json([w, instance, seq]) => sha256, the file's device and inode, its size]. */
     private array $archiveBefore = [];
@@ -233,8 +233,11 @@ final class Runtime
         $this->prunedAt = microtime(true);
         try {
             $gone = Storage::prune($this->home, $this->archivePolicy);
-            // What the end of each file held may be gone with it.
+            // What the end of each file held may be gone with it, and with it a
+            // row this process wrote at a read whose cursor was not written:
+            // the next read looks in the file again.
             $this->archiveBefore = [];
+            $this->writtenDown = [];
         } catch (\Throwable $error) {
             // The archive keeps growing, in plain text, and the policy meant to
             // bound it did not run.
@@ -760,6 +763,16 @@ final class Runtime
         $held = $this->archiveBefore[$label] ?? null;
         if ($held !== null && $held[1] === $version && ($stat === false || $stat['size'] >= $held[2])) {
             return $held[0];
+        }
+        if ($held !== null) {
+            // Another file now, or a shorter one: what this process wrote to it
+            // at a read that did not get past its cursor is looked for in it again.
+            $name = Storage::archiveName($label);
+            foreach ($this->writtenDown as $delivery => $at) {
+                if ($at === $name) {
+                    unset($this->writtenDown[$delivery]);
+                }
+            }
         }
         $found = [];
         $size = 0;
@@ -3749,12 +3762,16 @@ final class Runtime
                 // from a version before it was kept, could be another delivery,
                 // so both are kept.
                 $delivery = is_string($channel->instance) ? Codec::json([$channel->w, $channel->instance, (int) $entry['seq']]) : null;
+                // The file first: one that is another now, or shorter, makes
+                // this process forget what it wrote to it, and that is looked
+                // for in it again (the third release check of 14 November 2026).
+                $before = $delivery !== null && $this->archiveEnabled && !$this->homeReleased ? $this->archivedBefore($channel->label) : [];
                 $already = $delivery !== null && isset($this->writtenDown[$delivery]);
                 if (!$already && $delivery !== null && $this->archiveEnabled && !$this->homeReleased) {
-                    $earlier = $this->archivedBefore($channel->label)[$delivery] ?? null;
+                    $earlier = $before[$delivery] ?? null;
                     $already = $earlier !== null && $earlier === ($entry['sha256'] ?? null);
                     if ($already) {
-                        $this->writtenDown[$delivery] = true;
+                        $this->writtenDown[$delivery] = Storage::archiveName($channel->label);
                         $this->rowsReused[$delivery] = ($this->rowsReused[$delivery] ?? 0) + 1;
                     }
                 }
@@ -3773,7 +3790,7 @@ final class Runtime
                         // nothing decrypted. Said, so the caller does not go looking.
                         $entry['archive_off'] = true;
                     } elseif ($delivery !== null) {
-                        $this->writtenDown[$delivery] = true;
+                        $this->writtenDown[$delivery] = Storage::archiveName($channel->label);
                     }
                 }
             } catch (\Throwable $error) {

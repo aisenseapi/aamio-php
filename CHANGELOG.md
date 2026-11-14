@@ -40,7 +40,8 @@ not what moved in the source.
   Node runtime. `1e999` was copied into an answer that could not be written.
   The refusal of a line with a member name that starts with U+0000 takes its
   id the same way, and a whole number written `1.0` is the id `1`, also when
-  a call is cancelled by it.
+  a call is cancelled by it. One past what a 32-bit PHP's int holds stays the
+  number it was.
 - An add-on's tool gets every argument as it was sent, objects as objects and
   lists as lists. Read as arrays, an empty object went to the add-on as an
   empty list.
@@ -56,7 +57,9 @@ not what moved in the source.
   as it was first written down. The rows used again are the ones the archive's
   reader counts, past a byte order mark and in UTF-8, and the end of the file
   is read again once a prune has replaced it: a row a prune had removed was
-  still taken as there.
+  still taken as there. What this process wrote at a read whose cursor was not
+  written is looked for in the file again after a prune too, so `archived` is
+  the row that is there.
 
 ## 0.3.20 - 2026-11-13
 

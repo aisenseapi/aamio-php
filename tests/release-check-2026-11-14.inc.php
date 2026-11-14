@@ -208,3 +208,18 @@ rename($rcPath3 . '.tmp', $rcPath3);
 $rcAgain3->channels['side']->after = 0;
 $check($rcSide($rcAgain3->read()) === [['first', true]] && $rcWritten($rcHome3) === [[1], 1], '... and after a prune removed it, it is written again: the archive has what the message says', json_encode($rcWritten($rcHome3)));
 $rcAgain3->close();
+
+// The third release check: in one process, a row written down, its cursor not
+// written, the row pruned, and the message read again. The mark is the row
+// that is there.
+[$rcHome4] = $rcCrafted('pruned-in-process', ['first']);
+$rcReader4 = new Runtime($rcHome4, 'https://fake.test', ['rc'], true, $rcQuiet);
+$rcBlocked4 = $rcHome4 . DIRECTORY_SEPARATOR . 'state.json.tmp';
+mkdir($rcBlocked4);
+$check($rcSide($rcReader4->read()) === [['first', true]] && $rcWritten($rcHome4) === [[1], 1], 'a row written down at a read whose cursor could not be written');
+rmdir($rcBlocked4);
+$rcReader4->archivePolicy = ['mode' => 'keep', 'days' => null, 'max_mb' => 0.000000001];
+(\Closure::bind(fn () => $this->prune(), $rcReader4, Runtime::class))();
+$check(!is_file($rcHome4 . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl') || $rcWritten($rcHome4) === [[], 0], '... a prune in the same process takes it');
+$check($rcSide($rcReader4->read()) === [['first', true]] && is_file($rcHome4 . DIRECTORY_SEPARATOR . 'archive' . DIRECTORY_SEPARATOR . 'side.jsonl') && $rcWritten($rcHome4) === [[1], 1], '... and the message read again is written down again: the mark is the row that is there');
+$rcReader4->close();
