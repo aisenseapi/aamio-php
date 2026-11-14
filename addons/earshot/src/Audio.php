@@ -57,23 +57,10 @@ final class Audio
         ];
     }
 
-    /** The full path of a program on PATH, or null. */
+    /** The full path of a program, from the folders PATH names by a full path and never the working directory, or null. */
     public static function which(string $name): ?string
     {
-        $extensions = DIRECTORY_SEPARATOR === '\\' ? array_merge([''], explode(';', (string) (getenv('PATHEXT') ?: '.EXE;.BAT;.CMD'))) : [''];
-        foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $folder) {
-            if ($folder === '') {
-                continue;
-            }
-            foreach ($extensions as $extension) {
-                $candidate = rtrim($folder, '/\\') . DIRECTORY_SEPARATOR . $name . strtolower($extension);
-                if (is_file($candidate) && (DIRECTORY_SEPARATOR === '\\' || is_executable($candidate))) {
-                    return $candidate;
-                }
-            }
-        }
-
-        return null;
+        return ProgramPath::find($name, self::platform());
     }
 
     /**
@@ -81,8 +68,9 @@ final class Audio
      *
      * @param list<string> $command
      */
-    public static function run(array $command, int $seconds): ?string
+    public static function run(array $command, int $seconds, ?string $label = null): ?string
     {
+        $label ??= $command[0];
         $null = DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null';
         $errFile = (string) tempnam(sys_get_temp_dir(), 'aamio-earshot-');
         $pipes = [];
@@ -90,7 +78,7 @@ final class Audio
         if (!is_resource($process)) {
             @unlink($errFile);
 
-            return $command[0] . ' could not be started';
+            return $label . ' could not be started';
         }
         $until = microtime(true) + $seconds;
         $status = proc_get_status($process);
@@ -103,7 +91,7 @@ final class Audio
             proc_close($process);
             @unlink($errFile);
 
-            return $command[0] . ' did not finish within ' . $seconds . ' seconds';
+            return $label . ' did not finish within ' . $seconds . ' seconds';
         }
         proc_close($process);
         $err = (string) @file_get_contents($errFile, false, null, 0, 65536);
@@ -111,7 +99,7 @@ final class Audio
         if ($status['exitcode'] !== 0) {
             $lines = array_values(array_filter(array_map('trim', explode("\n", $err)), static fn (string $line): bool => $line !== ''));
 
-            return $command[0] . ' stopped with code ' . $status['exitcode'] . ': ' . ($lines !== [] ? substr($lines[count($lines) - 1], 0, 200) : 'no reason given');
+            return $label . ' stopped with code ' . $status['exitcode'] . ': ' . ($lines !== [] ? substr($lines[count($lines) - 1], 0, 200) : 'no reason given');
         }
 
         return null;
@@ -124,8 +112,10 @@ final class Audio
         $run ??= [self::class, 'run'];
         $failed = [];
         foreach (self::players($path, $platform ?? self::platform()) as $command) {
-            if ($which($command[0]) !== null) {
-                $why = $run($command, 60);
+            // What starts is the full path the lookup gave, never the bare name.
+            $found = $which($command[0]);
+            if ($found !== null) {
+                $why = $run(array_merge([$found], array_slice($command, 1)), 60, $command[0]);
                 if ($why === null) {
                     return $command[0];
                 }
@@ -145,8 +135,9 @@ final class Audio
         $run ??= [self::class, 'run'];
         $failed = [];
         foreach (self::recorders($seconds, $path, $platform ?? self::platform()) as $command) {
-            if ($which($command[0]) !== null) {
-                $why = $run($command, $seconds + 15);
+            $found = $which($command[0]);
+            if ($found !== null) {
+                $why = $run(array_merge([$found], array_slice($command, 1)), $seconds + 15, $command[0]);
                 if ($why === null) {
                     return $command[0];
                 }

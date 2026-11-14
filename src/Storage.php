@@ -379,12 +379,13 @@ final class Storage
      * path is not the one asked: Git Bash puts its own whoami.exe first. As
      * aamio-python and the Node runtime ask them (a check of 13 November 2026).
      */
-    private static function systemTool(string ...$parts): string
+    public static function systemTool(string ...$parts): string
     {
         $root = getenv('SystemRoot') ?: (getenv('windir') ?: 'C:\\Windows');
-        $path = $root . '\\System32\\' . implode('\\', $parts);
 
-        return is_file($path) ? $path : $parts[count($parts) - 1];
+        // Never the bare name, which Windows looks for in the working directory
+        // first: where System32 has no such tool, starting it fails, as it should.
+        return $root . '\\System32\\' . implode('\\', $parts);
     }
 
     /** @return array{0: string, 1: string[]} the current user's SID, and one line per access rule */

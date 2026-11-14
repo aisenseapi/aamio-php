@@ -324,6 +324,11 @@ if (trim($able) !== 'yes') {
     foreach ([
         ['<!doctype html><title>Sign in</title>', 'a body that is not JSON'],
         ['', 'an empty body'],
+        // JSON null and a JSON string are answers in JSON, and were said as an
+        // empty body and as no JSON (a review of 13 November 2026).
+        ['null', "JSON that is not aamio's health answer"],
+        ['""', "JSON that is not aamio's health answer"],
+        ['"ok"', "JSON that is not aamio's health answer"],
         ['[]', "JSON that is not aamio's health answer"],
         ['{"status": "ok"}', "JSON that is not aamio's health answer"],
         ['{"status": "ok", "service": "aamio", "version": "0.0.0-test"}', null],

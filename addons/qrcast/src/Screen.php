@@ -27,8 +27,14 @@ final class Screen
     {
         $platform ??= Programs::platform();
         $run ??= [Programs::class, 'run'];
+        // Each opener starts by the full path the lookup gave, never by its bare
+        // name, which Windows looked for in the working directory first (a
+        // security review of 13 November 2026).
+        $find = $which ?? static fn (string $name): ?string => ProgramPath::find($name, $platform, $environ);
+        $missing = static fn (string $name): Unreachable => new Unreachable('no_viewer', 'Nothing here opens a picture: ' . $name . ' is not in any folder PATH names. Write the code to a file with --out (out over MCP) and show it another way.');
         if ($platform === 'win32') {
-            [$code, , $err] = $run(['cmd', '/c', 'start', '', $path], 15);
+            $cmd = $find('cmd') ?? throw $missing('cmd');
+            [$code, , $err] = $run([$cmd, '/c', 'start', '', $path], 15);
             if ($code !== 0) {
                 throw new Unreachable('viewer_failed', 'Windows could not open the picture: ' . Programs::lastLine($err) . '. Write the code to a file with --out (out over MCP) and show it another way.');
             }
@@ -36,7 +42,8 @@ final class Screen
             return 'windows';
         }
         if ($platform === 'darwin') {
-            [$code, , $err] = $run(['open', $path], 15);
+            $open = $find('open') ?? throw $missing('open');
+            [$code, , $err] = $run([$open, $path], 15);
             if ($code !== 0) {
                 throw new Unreachable('viewer_failed', 'open could not open the picture: ' . Programs::lastLine($err) . '. Write the code to a file with --out (out over MCP) and show it another way.');
             }
@@ -47,10 +54,13 @@ final class Screen
         if ($env('DISPLAY') === '' && $env('WAYLAND_DISPLAY') === '') {
             throw new Unreachable('no_screen', 'This machine has no screen the add-on can reach: neither DISPLAY nor WAYLAND_DISPLAY is set. Write the code to a file with --out (out over MCP) and show it where it can be seen.');
         }
-        if (($which ?? [Programs::class, 'which'])('xdg-open') === null) {
+        $xdg = $find('xdg-open');
+        if ($xdg === null) {
             throw new Unreachable('no_viewer', 'Nothing here opens a picture: xdg-open is missing. Install xdg-utils, or write the code to a file with --out (out over MCP) and show it another way.');
         }
-        [$code, , $err] = $run(['sh', '-c', 'xdg-open "$1" >/dev/null 2>&1 &', 'sh', $path], 15);
+        $sh = $find('sh') ?? throw $missing('sh');
+        // Both by their full paths, and the path of the picture an argument, never part of the script.
+        [$code, , $err] = $run([$sh, '-c', '"$1" "$2" >/dev/null 2>&1 &', 'sh', $xdg, $path], 15);
         if ($code !== 0) {
             throw new Unreachable('viewer_failed', 'xdg-open could not be started: ' . Programs::lastLine($err) . '. Write the code to a file with --out (out over MCP) and show it another way.');
         }

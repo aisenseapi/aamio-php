@@ -4,6 +4,15 @@ aisenseapi/aamio-qrcast, the add-on. Dates are the day the version was committed
 it is tagged on release, and the two are the same day. Every entry says what
 changed for somebody using it.
 
+## 0.1.3 - 2026-11-14
+
+- zbarimg, ffmpeg and the openers of a picture start by their full path:
+  `cmd` from the folder Windows keeps it in, and `open`, `sh` and `xdg-open`
+  from the folders `PATH` names by a full path, never the working directory.
+  `cmd`, `open` and `sh` started by the bare name, which Windows looks for in
+  the working directory first. winget's link folder is looked in only through
+  a `LOCALAPPDATA` that is a full path.
+
 ## 0.1.2 - 2026-11-12
 
 - An unknown call is said as the editions for Python and Node say it: a name

@@ -425,9 +425,9 @@ echo "earshot: the process\n";
         return null;
     };
     $only = static fn (string ...$names): callable => static fn (string $name): ?string => in_array($name, $names, true) ? '/usr/bin/' . $name : null;
-    $check(Audio::play('/tmp/card.wav', $only('aplay', 'ffplay'), $run, 'linux') === 'aplay' && $ran === [['aplay', '-q', '/tmp/card.wav']], 'a player is the first the system has');
+    $check(Audio::play('/tmp/card.wav', $only('aplay', 'ffplay'), $run, 'linux') === 'aplay' && $ran === [['/usr/bin/aplay', '-q', '/tmp/card.wav']], 'a player is the first the system has, started by the full path the lookup gave');
     $ran = [];
-    $check(Audio::play('/tmp/card.wav', $only('afplay'), $run, 'darwin') === 'afplay' && $ran === [['afplay', '/tmp/card.wav']], 'afplay on macOS');
+    $check(Audio::play('/tmp/card.wav', $only('afplay'), $run, 'darwin') === 'afplay' && $ran === [['/usr/bin/afplay', '/tmp/card.wav']], 'afplay on macOS');
     $ran = [];
     $check(Audio::play("C:\\Temp\\it's.wav", $only('powershell'), $run, 'win32') === 'powershell' && $ran[0][4] === "(New-Object Media.SoundPlayer 'C:\\Temp\\it''s.wav').PlaySync()", 'PowerShell\'s sound player on Windows, with the path quoted');
     $error = $caught(static fn () => Audio::play('/tmp/card.wav', $only(), $run, 'linux'));
@@ -435,11 +435,58 @@ echo "earshot: the process\n";
     $error = $caught(static fn () => Audio::play('/tmp/card.wav', $only('aplay'), static fn (array $command, int $seconds): string => 'aplay stopped with code 1: Device or resource busy', 'linux'));
     $check($error instanceof Unreachable && $error->reason === 'player_failed' && str_contains($error->fix, 'Device or resource busy'), 'and a player that fails says why');
     $ran = [];
-    $check(Audio::record(7, '/tmp/heard.wav', $only('arecord'), $run, 'linux') === 'arecord' && $ran === [['arecord', '-q', '-f', 'S16_LE', '-r', '48000', '-c', '1', '-d', '7', '/tmp/heard.wav']], 'arecord records mono 16-bit at 48 kHz on Linux');
+    $check(Audio::record(7, '/tmp/heard.wav', $only('arecord'), $run, 'linux') === 'arecord' && $ran === [['/usr/bin/arecord', '-q', '-f', 'S16_LE', '-r', '48000', '-c', '1', '-d', '7', '/tmp/heard.wav']], 'arecord records mono 16-bit at 48 kHz on Linux');
     $check(array_slice(Audio::recorders(7, 'x.wav', 'win32')[0], 0, 5) === ['sox', '-q', '-t', 'waveaudio', 'default'], 'sox reads the default device on Windows');
     $error = $caught(static fn () => Audio::record(7, '/tmp/heard.wav', $only(), $run, 'linux'));
     $check($error instanceof Unreachable && $error->reason === 'no_recorder' && str_contains($error->fix, 'decode FILE'), 'no recorder says what to install, or to read a file');
     $check(Audio::which('surely-no-such-program-here') === null, 'which finds nothing that is not there');
+
+    // A program by its full path from PATH, never the one in the working
+    // directory (a security review of 13 November 2026), and what starts is the
+    // path the lookup gave, where a check of the lookup was followed by a start
+    // by the bare name (a review of 14 November).
+    $files = ['C:\\Program Files\\sox\\sox.exe' => true, 'C:\\work\\sox.exe' => true, 'D:\\work b\\sox.exe' => true, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' => true, 'C:\\work\\powershell.exe' => true];
+    $isProgram = static fn (string $path): bool => isset($files[$path]);
+    $sox = 'C:\\Program Files\\sox\\sox.exe';
+    $ps = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    $found = [];
+    $wanted = [];
+    foreach (['C:\\work', 'D:\\work b'] as $cwd) {
+        foreach (['.;C:\\Program Files\\sox', ';C:\\Program Files\\sox', $cwd . ';C:\\Program Files\\sox', strtoupper($cwd) . '\\;C:\\Program Files\\sox', 'sox;C:sox;\\sox;C:\\Program Files\\sox', '"C:\\Program Files\\sox"'] as $path) {
+            $found[] = \Aamio\Earshot\ProgramPath::find('sox', 'win32', ['PATH' => $path], $cwd, $isProgram);
+            $wanted[] = $sox;
+        }
+        $found[] = \Aamio\Earshot\ProgramPath::find('sox', 'win32', ['PATH' => '.;' . $cwd], $cwd, $isProgram);
+        $found[] = \Aamio\Earshot\ProgramPath::find('powershell', 'win32', ['PATH' => $cwd, 'SystemRoot' => 'C:\\Windows'], $cwd, $isProgram);
+        array_push($wanted, null, $ps);
+    }
+    $check($found === $wanted, 'a program is found by its full path from PATH, never in the working directory however PATH names it, and powershell where Windows keeps it: ' . json_encode($found));
+    $unix = ['/home/u/work/rec' => true, '/usr/bin/rec' => true, 'bin/rec' => true];
+    $check(\Aamio\Earshot\ProgramPath::find('rec', 'linux', ['PATH' => '::.:bin:/home/u/work:/usr/bin'], '/home/u/work', static fn (string $path): bool => isset($unix[$path])) === '/usr/bin/rec', 'and elsewhere the same, from the root');
+    // On this machine, with files that are never started.
+    $tools = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-earshot-tools-' . bin2hex(random_bytes(4));
+    $toolName = PHP_OS_FAMILY === 'Windows' ? 'probe-tool.exe' : 'probe-tool';
+    $realFound = [];
+    foreach (['Program Files', 'work-a', 'work b'] as $toolFolder) {
+        @mkdir($tools . DIRECTORY_SEPARATOR . $toolFolder, 0700, true);
+        file_put_contents($tools . DIRECTORY_SEPARATOR . $toolFolder . DIRECTORY_SEPARATOR . $toolName, '');
+        chmod($tools . DIRECTORY_SEPARATOR . $toolFolder . DIRECTORY_SEPARATOR . $toolName, 0755);
+    }
+    foreach (['work-a', 'work b'] as $toolFolder) {
+        $work = $tools . DIRECTORY_SEPARATOR . $toolFolder;
+        $hit = \Aamio\Earshot\ProgramPath::find('probe-tool', Audio::platform(), ['PATH' => implode(PATH_SEPARATOR, ['.', '', $work, $tools . DIRECTORY_SEPARATOR . 'Program Files'])], $work);
+        $realFound[] = $hit !== null && realpath($hit) === realpath($tools . DIRECTORY_SEPARATOR . 'Program Files' . DIRECTORY_SEPARATOR . $toolName);
+    }
+    foreach (['Program Files', 'work-a', 'work b'] as $toolFolder) {
+        @unlink($tools . DIRECTORY_SEPARATOR . $toolFolder . DIRECTORY_SEPARATOR . $toolName);
+        @rmdir($tools . DIRECTORY_SEPARATOR . $toolFolder);
+    }
+    @rmdir($tools);
+    $check($realFound === [true, true], 'and on this machine, from two working directories each holding a program of the same name, the installed one, in a folder with a space');
+    $ran = [];
+    $check(Audio::record(3, 'C:\\heard.wav', static fn (string $name): ?string => $name === 'sox' ? $sox : null, $run, 'win32') === 'sox' && ($ran[0][0] ?? null) === $sox && array_slice($ran[0], 1, 4) === ['-q', '-t', 'waveaudio', 'default'], 'sox starts by the full path the lookup gave');
+    $error = $caught(static fn () => Audio::record(3, 'C:\\heard.wav', static fn (string $name): ?string => null, $run, 'win32'));
+    $check($error instanceof Unreachable && $error->reason === 'no_recorder' && str_contains($error->fix, 'winget install ChrisBagwell.SoX') && count($ran) === 1, 'and a program that is not there is said, and nothing starts');
 
     // The real package, through the core.
     putenv('AAMIO_ADDONS=' . dirname(__DIR__));

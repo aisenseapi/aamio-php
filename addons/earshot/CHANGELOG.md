@@ -4,6 +4,15 @@ aisenseapi/aamio-earshot, the add-on, called aisenseapi/aamio-sound up to 0.2.0.
 committed; it is tagged on release, and the two are the same day. Every entry
 says what changed for somebody using it.
 
+## 0.3.4 - 2026-11-14
+
+- Every program starts by its full path, from the folders `PATH` names by a
+  full path and never from the working directory, however `PATH` names it:
+  PowerShell from the folder Windows keeps it in, a recorder or a player, and
+  on Windows only an `.exe`. A lookup that found the installed program was
+  followed by a start by the bare name, which Windows looks for in the working
+  directory first, so a `sox.exe` there ran in place of the installed one.
+
 ## 0.3.3 - 2026-11-12
 
 - An unknown call is said as the editions for Python and Node say it: a name

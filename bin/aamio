@@ -528,8 +528,8 @@ try {
             $body = $health['body'];
             $unlike = match (true) {
                 $health['status'] !== 200 => null,
-                $body === null || $body === '' => 'an empty body',
-                is_string($body) => 'a body that is not JSON',
+                ($health['json'] ?? false) === false && ($body === null || $body === '') => 'an empty body',
+                ($health['json'] ?? false) === false => 'a body that is not JSON',
                 !is_array($body) || ($body['service'] ?? null) !== 'aamio' || ($body['status'] ?? null) !== 'ok' => "JSON that is not aamio's health answer",
                 default => null,
             };

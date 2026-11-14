@@ -431,9 +431,11 @@ final class Client
     /** Whether the service answers at all, and which version and commit it is. */
     public function health(): array
     {
-        [$status, $answer] = Http::call('GET', $this->url('/health'), null, [], $this->timeout);
+        $answer = Http::call('GET', $this->url('/health'), null, [], $this->timeout);
 
-        return ['status' => $status, 'body' => $answer];
+        // json says whether the text was JSON: null and "" in JSON are answers,
+        // and were said as an empty body (a review of 13 November 2026).
+        return ['status' => $answer[0], 'body' => $answer[1], 'json' => $answer[3] ?? !($answer[1] === null || is_string($answer[1]))];
     }
 
     /**

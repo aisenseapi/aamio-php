@@ -529,7 +529,7 @@ if ($short === "spill") { echo str_repeat("x", 5000); exit(0); }
 if ($short === "grumble") { fwrite(STDERR, str_repeat("y", 5000)); echo json_encode(["result" => ["pong" => true]]); exit(0); }
 if ($short === "mutter") { fwrite(STDERR, str_repeat("y", 500)); echo json_encode(["result" => ["pong" => true]]); exit(0); }
 $env = static fn (string $key) => getenv($key) === false ? null : getenv($key);
-echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "arguments" => $request["arguments"], "subject" => $request["subject"], "own_key" => $request["own_key"], "state_dir" => $request["state_dir"], "home_env" => $env("AAMIO_HOME"), "addon_env" => $env("AAMIO_ADDON"), "secret_env" => $env("AAMIO_TEST_SECRET"), "passthru_env" => $env("AAMIO_TEST_PASSTHRU"), "path_env" => getenv("PATH") !== false]]);
+echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "arguments" => $request["arguments"], "subject" => $request["subject"], "own_key" => $request["own_key"], "state_dir" => $request["state_dir"], "home_env" => $env("AAMIO_HOME"), "addon_env" => $env("AAMIO_ADDON"), "secret_env" => $env("AAMIO_TEST_SECRET"), "passthru_env" => $env("AAMIO_TEST_PASSTHRU"), "path_env" => getenv("PATH") !== false, "no_current_directory" => $env("NoDefaultCurrentDirectoryInExePath")]]);
 ');
 
         return ['package' => $package, 'version' => $version, 'path' => $path];
@@ -684,6 +684,12 @@ if (!class_exists(InstalledVersions::class, false)) {
     $got = Addons::dispatch($runtime, 'aamio_addon_demoenv_ping', [], null)['structuredContent'] ?? [];
     $runtime->close();
     $check(($got['passthru_env'] ?? null) === 'yes please' && array_key_exists('secret_env', $got) && $got['secret_env'] === null, 'what the manifest declares comes through; the rest of the user\'s environment does not');
+    // On Windows the process is told not to look in the working directory for a
+    // program it starts by a bare name, set last whatever case it came in (a
+    // security review of 13 November 2026).
+    $check(PHP_OS_FAMILY !== 'Windows' || ($got['no_current_directory'] ?? null) === '1', 'on Windows the add-on\'s process gets NoDefaultCurrentDirectoryInExePath=1');
+    $check(AddonProcess::childEnvironment(['PATH' => 'x', 'nodefaultcurrentdirectoryinexepath' => '0'], true) === ['PATH' => 'x', 'NoDefaultCurrentDirectoryInExePath' => '1']
+        && AddonProcess::childEnvironment(['PATH' => 'x'], false) === ['PATH' => 'x'], 'and the rule replaces a value of any case, and is for Windows only');
     putenv('AAMIO_TEST_PASSTHRU');
     $threw = $refused(static fn () => Addons::enable('demobad'));
     $check($threw !== null && str_contains($threw, 'AAMIO_HOME') && str_contains($threw, 'no add-on gets'), 'a manifest may not ask for the home');

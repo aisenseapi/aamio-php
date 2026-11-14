@@ -12,7 +12,7 @@ namespace Aamio;
  */
 final class Http
 {
-    public const VERSION = '0.3.21';
+    public const VERSION = '0.3.22';
     public const USER_AGENT = 'aamio-php/' . self::VERSION;
 
     /**
@@ -85,7 +85,10 @@ final class Http
         }
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
         $decoded = json_decode((string) $text, true);
+        $json = json_last_error() === JSON_ERROR_NONE;
 
-        return [$status, json_last_error() === JSON_ERROR_NONE ? $decoded : (string) $text, $responseHeaders];
+        // The fourth says whether the text was JSON, so that null and "" in JSON
+        // are told from nothing at all (a review of 13 November 2026).
+        return [$status, $json ? $decoded : (string) $text, $responseHeaders, $json];
     }
 }

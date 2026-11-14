@@ -26,7 +26,9 @@ use Aamio\McpServer;
 
 $gateAdvice = ['require' => ['pow' => ['bits' => 20], 'per_key' => 5]];
 
-$gated = $a->openChannel('gated-room', 600, null, $gateAdvice);
+// With a partner in allow: per_key without allow is refused, by the service
+// and, from 0.3.22, here before it is asked (tests/per-key.inc.php).
+$gated = $a->openChannel('gated-room', 600, ['Bea'], $gateAdvice);
 $check(($fake->threads[$gated['w']]['gate'] ?? null) === $gateAdvice, 'a channel opened with a gate reaches the service with it', json_encode($fake->threads[$gated['w']]['gate'] ?? null));
 $check(($gated['gate'] ?? 'missing') === $gateAdvice, 'and the answer says which gate the channel was opened with');
 
@@ -59,7 +61,7 @@ foreach (json_decode((string) file_get_contents(__DIR__ . '/../src/mcp-tools.jso
 $check(isset($gateTool['inputSchema']['properties']['gate']), 'the local open tool takes a gate, as the hosted one does');
 $check(str_contains(strtolower((string) ($gateTool['description'] ?? '')), 'gate'), 'and says so where a model reads it');
 
-$gateMcp = (new McpServer($a))->dispatch('aamio_open_channel', ['label' => 'mcp-gated', 'ttl' => 600, 'gate' => $gateAdvice]);
+$gateMcp = (new McpServer($a))->dispatch('aamio_open_channel', ['label' => 'mcp-gated', 'ttl' => 600, 'allow' => ['Bea'], 'gate' => $gateAdvice]);
 $check(($gateMcp['isError'] ?? true) === false && ($fake->threads[$gateMcp['structuredContent']['w']]['gate'] ?? null) === $gateAdvice, 'and passes it through to the service', json_encode($gateMcp['structuredContent'] ?? null));
 
 $gateBad = (new McpServer($a))->dispatch('aamio_open_channel', ['label' => 'mcp-bad', 'ttl' => 600, 'gate' => 'require']);

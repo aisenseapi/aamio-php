@@ -70,8 +70,36 @@ final class AddonProcess
         'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY',
     ];
 
+    /** Set for the process on Windows, so that a program it starts by a bare name is not looked for in the working directory. */
+    public const NO_CURRENT_DIRECTORY = 'NoDefaultCurrentDirectoryInExePath';
+
     /** @var array<string, array{at_once: int, started: list<float>}> */
     private static array $limits = [];
+
+    /**
+     * The environment a process of an add-on gets, made safe last, after what its
+     * manifest declared: on Windows it is told not to look in the working
+     * directory for a program it starts by a bare name, however the name was
+     * written (a security review of 13 November 2026). The add-ons start theirs
+     * by a full path as well; this is for whatever else the process starts.
+     *
+     * @param array<array-key, mixed> $environment
+     * @return array<array-key, mixed>
+     */
+    public static function childEnvironment(array $environment, bool $windows): array
+    {
+        if (!$windows) {
+            return $environment;
+        }
+        foreach (array_keys($environment) as $key) {
+            if (strtoupper((string) $key) === strtoupper(self::NO_CURRENT_DIRECTORY)) {
+                unset($environment[$key]);
+            }
+        }
+        $environment[self::NO_CURRENT_DIRECTORY] = '1';
+
+        return $environment;
+    }
 
     // ------------------------------------------------------------------ manifest
 
@@ -467,6 +495,7 @@ final class AddonProcess
                 $environment[$key] = $value;
             }
         }
+        $environment = self::childEnvironment($environment, PHP_OS_FAMILY === 'Windows');
         $pipes = [];
         $process = @proc_open([PHP_BINARY, $script], [0 => ['file', $files['in'], 'r'], 1 => ['file', $files['out'], 'w'], 2 => ['file', $files['err'], 'w']], $pipes, null, $environment);
         if (!is_resource($process)) {

@@ -404,13 +404,21 @@ echo "qrcast: the process\n";
             return [$code, '', $code === 0 ? '' : 'could not'];
         };
     };
-    $check(Screen::show('C:\\Temp\\card.png', 'win32', [], null, $run(0)) === 'windows' && $ran[0] === ['cmd', '/c', 'start', '', 'C:\\Temp\\card.png'], 'Windows opens it with start, the title left empty');
-    $check(Screen::show('/tmp/card.png', 'darwin', [], null, $run(0)) === 'open' && $ran[1] === ['open', '/tmp/card.png'], 'macOS with open');
-    $check(Screen::show('/tmp/card.png', 'linux', ['WAYLAND_DISPLAY' => 'wayland-0'], static fn (string $name): ?string => '/usr/bin/xdg-open', $run(0)) === 'xdg-open' && $ran[2] === ['sh', '-c', 'xdg-open "$1" >/dev/null 2>&1 &', 'sh', '/tmp/card.png'], 'Linux with xdg-open in the background, the path as an argument and never in the script');
-    $error = $caught(static fn () => Screen::show('/tmp/card.png', 'linux', [], static fn (string $name): ?string => '/usr/bin/xdg-open', $run(0)));
+    // Each opener by the full path the lookup gave (a security review of 13 November 2026).
+    $openers = static fn (string $name): ?string => ['cmd' => 'C:\\Windows\\System32\\cmd.exe', 'open' => '/usr/bin/open', 'sh' => '/bin/sh', 'xdg-open' => '/usr/bin/xdg-open'][$name] ?? null;
+    $check(Screen::show('C:\\Temp\\card.png', 'win32', [], $openers, $run(0)) === 'windows' && $ran[0] === ['C:\\Windows\\System32\\cmd.exe', '/c', 'start', '', 'C:\\Temp\\card.png'], 'Windows opens it with start, through cmd by its full path, the title left empty');
+    $check(Screen::show('/tmp/card.png', 'darwin', [], $openers, $run(0)) === 'open' && $ran[1] === ['/usr/bin/open', '/tmp/card.png'], 'macOS with open, by its full path');
+    $check(Screen::show('/tmp/card.png', 'linux', ['WAYLAND_DISPLAY' => 'wayland-0'], $openers, $run(0)) === 'xdg-open' && $ran[2] === ['/bin/sh', '-c', '"$1" "$2" >/dev/null 2>&1 &', 'sh', '/usr/bin/xdg-open', '/tmp/card.png'], 'Linux with xdg-open in the background, sh and xdg-open by their full paths, the path an argument and never in the script');
+    $error = $caught(static fn () => Screen::show('/tmp/card.png', 'linux', [], $openers, $run(0)));
     $error2 = $caught(static fn () => Screen::show('/tmp/card.png', 'linux', ['DISPLAY' => ':0'], static fn (string $name): ?string => null, $run(0)));
-    $error3 = $caught(static fn () => Screen::show('C:\\card.png', 'win32', [], null, $run(1)));
+    $error3 = $caught(static fn () => Screen::show('C:\\card.png', 'win32', [], $openers, $run(1)));
     $check($error instanceof Unreachable && $error->reason === 'no_screen' && $error2 instanceof Unreachable && $error2->reason === 'no_viewer' && $error3 instanceof Unreachable && $error3->reason === 'viewer_failed', 'no display, no viewer and a viewer that fails are each said');
+    $before = count($ran);
+    $error4 = $caught(static fn () => Screen::show('C:\\card.png', 'win32', [], static fn (string $name): ?string => null, $run(0)));
+    $error5 = $caught(static fn () => Screen::show('/tmp/card.png', 'darwin', [], static fn (string $name): ?string => null, $run(0)));
+    $check($error4 instanceof Unreachable && $error4->reason === 'no_viewer' && $error5 instanceof Unreachable && $error5->reason === 'no_viewer' && count($ran) === $before, 'an opener that is not found is said, and nothing starts');
+    $check(\Aamio\Qrcast\ProgramPath::find('cmd', 'win32', ['PATH' => '.;C:\\work', 'SYSTEMROOT' => 'C:\\Windows'], 'C:\\work', static fn (string $path): bool => in_array($path, ['C:\\work\\cmd.exe', 'C:\\Windows\\System32\\cmd.exe'], true)) === 'C:\\Windows\\System32\\cmd.exe'
+        && \Aamio\Qrcast\ProgramPath::find('ffmpeg', 'win32', ['PATH' => '.;C:\\work;C:\\Tools\\ffmpeg\\bin'], 'C:\\work', static fn (string $path): bool => in_array($path, ['C:\\work\\ffmpeg.exe', 'C:\\Tools\\ffmpeg\\bin\\ffmpeg.exe'], true)) === 'C:\\Tools\\ffmpeg\\bin\\ffmpeg.exe', 'and the lookup QRCast uses takes cmd from the folder Windows keeps it in, and ffmpeg from PATH, never the working directory');
 
     // zbarimg, faked.
     $zbar = static fn (int $code, string $out = '', string $err = ''): callable => static fn (array $command, int $seconds): array => [$code, $out, $err];

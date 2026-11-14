@@ -607,7 +607,9 @@ final class Runtime
             // A filtered tasklist uses a localized sentence for no matches.
             // Read a complete CSV list instead, requiring our own PID as a
             // positive control before absence can mean that the owner is gone.
-            return self::windowsPidAlive($pid, self::processStatusCommand(['tasklist.exe', '/FO', 'CSV', '/NH']));
+            // By its place in System32: by the bare name it was looked for in the
+            // working directory first (a security review of 13 November 2026).
+            return self::windowsPidAlive($pid, self::processStatusCommand([Storage::systemTool('tasklist.exe'), '/FO', 'CSV', '/NH']));
         }
 
         return null;
@@ -1805,6 +1807,9 @@ final class Runtime
             $handover = [$replyTo, $key];
         }
 
+        if ($keys === [] && is_array($gate) && is_array($gate['require'] ?? null) && array_key_exists('per_key', $gate['require'])) {
+            throw new CodedInvalidArgument('invalid_gate', self::PER_KEY_WHY . '. ' . self::perKeyFix(array_column($this->partners, 'name')));
+        }
         $opened = $this->client->open($ttl, $keys !== [] ? $keys : null, $gate);
         if ($opened['status'] !== 201) {
             throw new CodedRuntime('channel_unavailable', 'could not open channel: ' . $opened['status'] . ' ' . json_encode($opened['body']));
@@ -2074,6 +2079,28 @@ final class Runtime
      * changes. A gate that quietly went nowhere leaves the inbox open for its whole
      * life without the conditions its owner meant it to have.
      */
+    public const PER_KEY_WHY = "a gate that requires per_key needs allow: messages are counted per signing key, and a channel without allow also takes writes nobody signed, which per_key cannot count";
+
+    /**
+     * What to do about per_key without allow, with a name from the address book
+     * where there is one. The service's advice for such a gate is allow ["*"], a
+     * list of keys. Here allow takes partner names, and "*" was looked up as one
+     * and answered unknown_partner (a review of 13 November 2026). As aamio-python
+     * and the Node runtime say it.
+     *
+     * @param list<mixed> $names
+     */
+    public static function perKeyFix(array $names): string
+    {
+        foreach ($names as $name) {
+            if (is_string($name) && $name !== '') {
+                return 'Name the partners who may write in allow, as allow: ["' . $name . '"] over MCP, or --allow ' . $name . ' on the command line, and open the channel again.';
+            }
+        }
+
+        return 'Add the partners who may write to the address book first, with aamio partner add NAME KEY (aamio_partner_add over MCP), and name them in allow.';
+    }
+
     public const GATE_SHAPE = 'A gate is an object with "require", "advise" or both, as in {"require": {"pow": {"bits": 20}, "per_key": 5}}. require refuses a write that does not meet it; advise lets the write in and reports on it.';
 
     public static function checkGate(mixed $gate): array

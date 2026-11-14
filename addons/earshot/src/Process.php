@@ -31,7 +31,7 @@ final class Process
 {
     public const CONTRACT = 2;
     public const NAME = 'earshot';
-    public const VERSION = '0.3.3';
+    public const VERSION = '0.3.4';
     public const TOOL = 'aamio_addon_earshot_';
     public const EXIT_CODES = ['card' => 0, 'played' => 0, 'written' => 0, 'heard' => 0, 'nothing_heard' => 3, 'not_understood' => 3, 'expired' => 3, 'invalid' => 2, 'unreachable' => 5];
     public const REPEAT_MAX = 3;

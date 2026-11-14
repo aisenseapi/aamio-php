@@ -16,23 +16,10 @@ final class Programs
         };
     }
 
-    /** The full path of a program on PATH, or null. */
+    /** The full path of a program, from the folders PATH names by a full path and never the working directory, or null. */
     public static function which(string $name): ?string
     {
-        $extensions = DIRECTORY_SEPARATOR === '\\' ? array_merge([''], explode(';', (string) (getenv('PATHEXT') ?: '.EXE;.BAT;.CMD'))) : [''];
-        foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $folder) {
-            if ($folder === '') {
-                continue;
-            }
-            foreach ($extensions as $extension) {
-                $candidate = rtrim($folder, '/\\') . DIRECTORY_SEPARATOR . $name . strtolower($extension);
-                if (is_file($candidate) && (DIRECTORY_SEPARATOR === '\\' || is_executable($candidate))) {
-                    return $candidate;
-                }
-            }
-        }
-
-        return null;
+        return ProgramPath::find($name, self::platform());
     }
 
     /**
@@ -53,7 +40,7 @@ final class Programs
             @unlink($outFile);
             @unlink($errFile);
 
-            return [-1, '', $command[0] . ' could not be started'];
+            return [-1, '', basename($command[0]) . ' could not be started'];
         }
         $until = microtime(true) + $seconds;
         $status = proc_get_status($process);

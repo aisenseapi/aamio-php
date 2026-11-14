@@ -49,7 +49,8 @@ final class Camera
             return $found;
         }
         $base = $environ === null ? (getenv('LOCALAPPDATA') ?: null) : ($environ['LOCALAPPDATA'] ?? null);
-        if (($platform ?? Programs::platform()) === 'win32' && is_string($base) && $base !== '') {
+        // A LOCALAPPDATA that is no full path would be the working directory.
+        if (($platform ?? Programs::platform()) === 'win32' && is_string($base) && $base !== '' && ProgramPath::isAbsolute($base, DIRECTORY_SEPARATOR === '\\' ? 'win32' : 'linux')) {
             $link = $base . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, ['Microsoft', 'WinGet', 'Links', 'ffmpeg.exe']);
             if (is_file($link)) {
                 return $link;
