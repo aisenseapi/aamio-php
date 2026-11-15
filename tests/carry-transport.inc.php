@@ -192,6 +192,33 @@ $check($code === 'transport_protocol', 'a ready that does not add up stops the t
 $check(TransportProcess::environment(['AAMIO_HOME', 'SIM_PORT'], ['PATH' => '/bin', 'AAMIO_HOME' => '/h', 'SIM_PORT' => '4000', 'TOKEN' => 't'])
     === ['PATH' => '/bin', 'SIM_PORT' => '4000', 'AAMIO_ADDON' => '3'], 'the environment never says where the home is');
 
+// A message whose tries run out without a receipt is unknown to the Carrier, never confirmed.
+$clock = clone $fakeClock;
+$profile = CarryState::profile('sealed');
+$stateA = new CarryState($carryA);
+$stateB = new CarryState($carryB);
+$now = 1794700000;
+[$session, $ask] = $stateA->ask($carryB->publicRaw(), $profile, $clock());
+[, $challenge] = $stateB->deliver($ask, [$carryA->publicRaw()], $profile, $clock(), $now);
+[, $opened] = $stateA->deliver($challenge, [$carryB->publicRaw()], $profile, $clock(), $now);
+$taken = $stateB->deliver($opened, [$carryA->publicRaw()], $profile, $clock(), $now)[0];
+// The loopback gives every frame back to A, which it is not sealed to: no receipt can come.
+$loop = $startFake('loopback', $clock);
+try {
+    $carrier = new Carrier($stateA, $loop, $profile, [$carryB->publicRaw()], $clock, static fn (): int => $now, 1.0, 5.0, 3);
+    $key = $carrier->send($carryB->publicRaw(), $session, 'hei');
+    $first = [$carrier->outcome($key), $carrier->confirmed($key)];
+    $until = microtime(true) + 20;
+    while ($carrier->outcome($key) === 'waiting' && microtime(true) < $until) {
+        $clock->now += 0.5;
+        $carrier->pump(0.05);
+    }
+    $check($taken === 'accepted' && $first === ['waiting', false] && $carrier->outcome($key) === 'unknown' && !$carrier->confirmed($key)
+        && $carrier->refused !== [] && $carrier->inbox === [], 'a message whose tries run out without a receipt is unknown, never confirmed');
+} finally {
+    $loop->stop();
+}
+
 // Two homes over the simulated radio, in this one process.
 $simRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-carry-sim-' . bin2hex(random_bytes(4));
 $freePort = static function (): int {

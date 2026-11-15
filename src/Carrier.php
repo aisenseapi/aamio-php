@@ -14,13 +14,16 @@ namespace Aamio;
  *
  * A message is sent again with the same bytes until its receipt comes; it is
  * never sealed again or moved to another session, so a copy is known as one.
- * The challenge and the open are sent again with the same bytes through the
+ * It is confirmed only when its receipt comes: when the tries run out without
+ * one, its outcome is unknown, since it may still have arrived, and it is never
+ * reported as confirmed. The challenge and the open are sent again with the same bytes through the
  * challenge window, since on a medium that loses frames one try is not enough;
  * an ask no challenge answers is asked again with a new session.
  */
 final class Carrier
 {
     public const UNVERIFIED_PER_SECOND = 20;
+    public const OUTCOMES_KEPT = 10000;
 
     private CarryReassembly $reassembly;
     private int $frameLimit;
@@ -34,6 +37,8 @@ final class Carrier
     public array $inbox = [];
     /** @var list<string> */
     public array $refused = [];
+    /** @var array<string, string> envelope id => confirmed or unknown, the newest OUTCOMES_KEPT */
+    public array $outcomes = [];
     private float $budget = self::UNVERIFIED_PER_SECOND;
     private float $budgetAt;
     private int $counter = 0;
@@ -109,9 +114,32 @@ final class Carrier
         return $this->await($envelope, $this->addresses[bin2hex($partnerPk)] ?? null, 'message', $partnerPk, $session, $this->state->counterOf($partnerPk, $session));
     }
 
+    /** True only when the receipt came; never for a message whose tries ran out without one. */
     public function confirmed(string $key): bool
     {
-        return !isset($this->waiting[$key]);
+        return ($this->outcomes[$key] ?? null) === 'confirmed';
+    }
+
+    /**
+     * waiting while it is sent again, confirmed when its receipt came, and unknown when
+     * the tries ran out without one (it may still have arrived) or the id is no longer remembered.
+     */
+    public function outcome(string $key): string
+    {
+        if (isset($this->waiting[$key])) {
+            return 'waiting';
+        }
+
+        return $this->outcomes[$key] ?? 'unknown';
+    }
+
+    private function finish(string $key, string $outcome): void
+    {
+        unset($this->waiting[$key]);
+        $this->outcomes[$key] = $outcome;
+        while (count($this->outcomes) > self::OUTCOMES_KEPT) {
+            unset($this->outcomes[array_key_first($this->outcomes)]);
+        }
     }
 
     /** Read what the transport said, deliver what is whole, resend what waits, and give frames within the room. */
@@ -179,7 +207,7 @@ final class Carrier
                 $counter = unpack('N', substr($got['content'], 9, 4))[1];
                 foreach ($this->waiting as $key => $entry) {
                     if (self::pair($entry['pk'], $entry['session']) === $pair && ($entry['kind'] === 'open' || $entry['counter'] === $counter)) {
-                        unset($this->waiting[$key]);
+                        $this->finish($key, 'confirmed');
                     }
                 }
 
@@ -197,7 +225,7 @@ final class Carrier
     {
         foreach ($this->waiting as $key => $entry) {
             if (self::pair($entry['pk'], $entry['session']) === $pair && $entry['kind'] === $kind) {
-                unset($this->waiting[$key]);
+                $this->finish($key, 'confirmed');
             }
         }
     }
@@ -211,7 +239,7 @@ final class Carrier
             }
             if ($entry['tries'] >= $entry['most']) {
                 // The outcome stays unknown; nothing is wrapped again or sent as a new message on its own.
-                unset($this->waiting[$key]);
+                $this->finish($key, 'unknown');
                 continue;
             }
             $this->waiting[$key]['tries']++;
