@@ -5,8 +5,8 @@ declare(strict_types=1);
 /*
  * One party of a carrier exchange over the simulated radio, for the tests across
  * runtimes. The same peer as tests/carry_peer.py in aamio-python, with the same
- * JSON file as its one argument, the same tasks (exchange, resave and replay)
- * and the same lines out, so any two runtimes can be paired.
+ * JSON file as its one argument, the same tasks (exchange, resave, deliver and
+ * pending) and the same lines out, so any two runtimes can be paired.
  */
 
 require __DIR__ . '/bootstrap.php';
@@ -31,14 +31,18 @@ if ($task === 'resave') {
     $say(['resaved' => true]);
     exit(0);
 }
-if ($task === 'replay') {
+if ($task === 'deliver') {
     $state = new CarryState($keys, $config['state']);
     try {
         [$result, $reply] = $state->deliver(hex2bin($config['envelope']), [$partner], CarryState::profile($config['mode']), 0.0, $config['now']);
     } catch (CarryRefused $refused) {
         [$result, $reply] = [$refused->carryCode, null];
     }
-    $say(['replayed' => $result, 'receipt' => $reply !== null]);
+    $say(['result' => $result, 'receipt' => $reply !== null, 'challenges' => $state->durable['challenges']]);
+    exit(0);
+}
+if ($task === 'pending') {
+    $say(['pending' => array_column((new CarryState($keys, $config['state']))->pending(), 4)]);
     exit(0);
 }
 
@@ -78,18 +82,18 @@ try {
                 $stage = 'opening';
             } elseif ($stage === 'opening' && $opened !== null) {
                 $sent = $carrier->send($partner, $opened, $config['text']);
-                $envelope = $carrier->waiting[$sent]['envelope'];
+                $envelope = $carrier->messages[$sent]['envelope'];
                 $stage = 'sending';
-            } elseif ($stage === 'sending' && $carrier->confirmed($sent) && $carrier->inbox !== []) {
+            } elseif ($stage === 'sending' && $carrier->confirmed($sent) && $carrier->inbox() !== []) {
                 $stage = 'settling';
             }
         } else {
-            if ($stage === 'start' && $carrier->inbox !== []) {
+            if ($stage === 'start' && $carrier->inbox() !== []) {
                 $carrier->open($partner);
                 $stage = 'opening';
             } elseif ($stage === 'opening' && $opened !== null) {
                 $sent = $carrier->send($partner, $opened, $config['text']);
-                $envelope = $carrier->waiting[$sent]['envelope'];
+                $envelope = $carrier->messages[$sent]['envelope'];
                 $stage = 'sending';
             } elseif ($stage === 'sending' && $carrier->confirmed($sent)) {
                 $stage = 'settling';
@@ -102,10 +106,10 @@ try {
     }
     if ($exit === 0) {
         $fromPartner = true;
-        foreach ($carrier->inbox as $entry) {
+        foreach ($carrier->inbox() as $entry) {
             $fromPartner = $fromPartner && $entry[0] === $partner;
         }
-        $say(['stopped' => true, 'received' => array_column($carrier->inbox, 3), 'from_partner' => $fromPartner,
+        $say(['stopped' => true, 'received' => array_column($carrier->inbox(), 3), 'from_partner' => $fromPartner,
             'sent' => $envelope === null ? null : bin2hex($envelope), 'refused' => (object) array_count_values($carrier->refused)]);
     }
 } finally {
