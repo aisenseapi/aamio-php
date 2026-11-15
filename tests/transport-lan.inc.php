@@ -91,11 +91,20 @@ try {
 }
 
 [$heldPort, $heldPeer] = $lanFreePorts(2);
-// On Windows a UDP port PHP binds can be bound again by another process, whatever so_reuseaddr says, so a transport
-// there cannot see that another holds its port: the README says so, and this part is passed over there.
-$holder = PHP_OS_FAMILY === 'Windows' ? null : stream_socket_server('udp://127.0.0.1:' . $heldPort, $errno, $errstr, STREAM_SERVER_BIND, stream_context_create(['socket' => ['so_reuseaddr' => false]]));
+// PHP sets SO_REUSEADDR on every socket it binds, so the port is held here by a program that does not, as the other
+// runtimes' transports do not: a Python of its own. On Windows SO_REUSEADDR lets the transport bind the port all the
+// same, so there a transport cannot see that another holds its port: the README says so, and this part is passed over.
+$holder = null;
+$holderPipes = [];
+if (PHP_OS_FAMILY !== 'Windows' && isset($python) && $python !== null) {
+    $holder = proc_open(array_merge($python, ['-c', 'import socket, sys; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", int(sys.argv[1]))); print("held", flush=True); sys.stdin.read()', (string) $heldPort]),
+        [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $holderPipes);
+    if (!is_resource($holder) || trim((string) fgets($holderPipes[1])) !== 'held') {
+        $holder = null;
+    }
+}
 if ($holder === null) {
-    echo "  skip  a port another program holds: on Windows PHP cannot hold a UDP port alone, so the transport cannot see it\n";
+    echo "  skip  a port another program holds: on Windows PHP cannot hold a UDP port alone, or no Python here to hold one\n";
 }
 $held = $holder === null ? null : $lanProcess($heldPort, $heldPeer);
 try {
@@ -106,14 +115,15 @@ try {
     $down = $lanWaitFor($held, static fn (TransportProcess $p, array $seen): bool => array_filter($seen, static fn (array $e): bool => $e[0] === 'status' && $e[1] === 'down') !== []);
     $reason = $down === null ? '' : (string) (array_values(array_filter($down, static fn (array $e): bool => $e[0] === 'status'))[0][2] ?? '');
     $check($down !== null && $held->room() <= 0 && str_contains($reason, 'could not be opened'), 'a port another program holds is said as down, with no room', $reason);
-    fclose($holder);
+    fclose($holderPipes[0]);
+    proc_close($holder);
     $holder = null;
     $up = $lanWaitFor($held, static fn (TransportProcess $p): bool => $p->room() > 0);
     $check($up !== null && array_filter($up, static fn (array $e): bool => $e[0] === 'status' && $e[1] === 'up') !== [], 'and once it opens, up and room');
 } catch (\LogicException) {
 } finally {
     if ($holder !== null) {
-        fclose($holder);
+        proc_terminate($holder);
     }
     $held?->stop();
 }

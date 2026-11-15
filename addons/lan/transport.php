@@ -149,8 +149,10 @@ $pending = '';
 $now = static fn (): float => hrtime(true) / 1e9;
 
 $open = static function () use (&$socket, &$saidDown, &$nextTry, &$sendsRead, $bind, $port, $now): void {
-    // PHP sets SO_REUSEADDR unless told not to, and on Windows two processes can then hold one UDP port, each getting
-    // some of what comes: a message a partner sent would reach the other one and be refused there, with nothing said.
+    // PHP sets SO_REUSEADDR on the sockets it binds, so another program that does the same, and on Windows any other
+    // program, can hold this port too, each getting some of what comes: a message a partner sent would reach the other
+    // one and be refused there, with nothing said. so_reuseaddr false asks PHP not to, where it knows the option; the
+    // README says to give each aamio on one machine its own port.
     $context = stream_context_create(['socket' => ['so_broadcast' => true, 'so_reuseaddr' => false]]);
     $errno = 0;
     $errstr = '';

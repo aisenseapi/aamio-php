@@ -41,15 +41,22 @@ and to the peers; after that the core answers the address a verified envelope
 came from. Where broadcast does not reach, as on a guest network that keeps
 devices apart, name the other machine in `AAMIO_LAN_PEERS`.
 
+## One port, one transport
+
+PHP sets `SO_REUSEADDR` on every socket it binds. Another program that does the
+same, another PHP transport among them, can then bind the same UDP port, and on
+Windows any other program can. Each then gets some of what comes, and the
+transport cannot see it. Give each aamio on one machine its own
+`AAMIO_LAN_PORT`. A port held by a program that does not reuse addresses, as
+the transports of aamio-python and aamio-js do not, is said as down until it
+is free, except on Windows.
+
 ## Windows
 
 A PHP process on Windows cannot wait on its standard input together with the
 network, so there the transport runs as two processes of `transport.php`: one
 reads what the core writes and passes it on over a socket on 127.0.0.1, and the
-other does the work. And PHP on Windows cannot hold a UDP port alone: another
-program can bind the same port, and each then gets some of what comes. Give
-each aamio on one machine its own `AAMIO_LAN_PORT`; the transport cannot see
-that another holds its port there, as it does elsewhere.
+other does the work.
 
 ## On the wire
 
