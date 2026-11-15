@@ -17,6 +17,12 @@ namespace Aamio;
  * party asked. Everything else is written to the home before anything is
  * answered, and a write that fails is carry_storage_failed with no receipt.
  * Nothing that guards against a replay is deleted before A6.9 allows it.
+ *
+ * The kept state has the same shape in every runtime, since another runtime
+ * may take the home over: four maps (incoming, stored, outgoing, outbox),
+ * written as JSON objects also when they are empty, one list (used) and three
+ * numbers. A file of any other shape is refused whole as carry_state_unreadable,
+ * rather than read in part and written back without what could not be read.
  */
 final class CarryState
 {
@@ -32,6 +38,8 @@ final class CarryState
     public const MAX_WAITING = 64;
     public const MAX_OPEN_PER_PARTNER = 16;
     private const STATE_VERSION = 1;
+    /** The four maps of the kept state, and what each holds: a record, or a hash in hex. */
+    private const MAPS = ['incoming' => 'record', 'outgoing' => 'record', 'stored' => 'hash', 'outbox' => 'hash'];
 
     public static int $maxRecords = 100000;
     public static int $maxRecordsPerPartner = 10000;
@@ -100,21 +108,61 @@ final class CarryState
         }
         $text = @file_get_contents($this->path);
         $value = is_string($text) ? json_decode($text, true) : null;
-        if (!is_array($value) || ($value['version'] ?? null) !== self::STATE_VERSION) {
-            // Starting from nothing would forget which messages were taken, and a copy of one could then be taken again.
+        if (!self::readable($value)) {
+            // Starting from nothing would forget which messages were taken, and a copy of one could then be taken
+            // again; reading only part of it would write the rest away at the next save.
             throw new CarryRefused('carry_state_unreadable', $this->path . ' could not be read, so nothing is taken until it is repaired or moved away');
-        }
-        foreach (['incoming', 'stored', 'outgoing', 'outbox'] as $group) {
-            $value[$group] = (array) $value[$group];
         }
 
         return $value;
     }
 
+    /**
+     * The shape every runtime writes (the class comment). PHP reads {} and [] alike, so an empty map is either;
+     * a map with entries is never a list, since its keys are hex with colons.
+     */
+    private static function readable(mixed $value): bool
+    {
+        $whole = static fn (mixed $number, bool $nullable = false): bool => ($nullable && $number === null) || (is_int($number) && $number >= 0);
+        if (!is_array($value) || ($value['version'] ?? null) !== self::STATE_VERSION || !array_key_exists('floor', $value)
+            || !$whole($value['floor'], true) || !$whole($value['challenges'] ?? null)) {
+            return false;
+        }
+        $used = $value['used'] ?? null;
+        if (!is_array($used) || !array_is_list($used) || count(array_filter($used, 'is_string')) !== count($used)) {
+            return false;
+        }
+        foreach (self::MAPS as $name => $kind) {
+            $group = $value[$name] ?? null;
+            if (!is_array($group) || ($group !== [] && array_is_list($group))) {
+                return false;
+            }
+            foreach ($group as $item) {
+                if ($kind === 'record' ? !is_array($item) || $item === [] || array_is_list($item) : !is_string($item)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /** The kept state as JSON writes it: the maps as objects also when empty, so the other runtimes read them as maps. */
+    private function forJson(): array
+    {
+        $out = $this->durable;
+        foreach (array_keys(self::MAPS) as $name) {
+            $out[$name] = (object) $out[$name];
+        }
+
+        return $out;
+    }
+
     private function save(): void
     {
-        $this->durable['used'] = array_keys($this->used);
-        sort($this->durable['used']);
+        $this->durable['used'] = array_map('strval', array_keys($this->used));
+        // As text, as the other runtimes sort it: a regular sort compares ids of only digits as numbers.
+        sort($this->durable['used'], SORT_STRING);
         if ($this->path === null) {
             return;
         }
@@ -129,7 +177,7 @@ final class CarryState
             if ($handle === false) {
                 throw new CarryRefused('carry_storage_failed', $this->path . ' could not be written');
             }
-            $written = @fwrite($handle, json_encode($this->durable, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+            $written = @fwrite($handle, json_encode($this->forJson(), JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
             Storage::sync($handle);
             fclose($handle);
         } finally {
