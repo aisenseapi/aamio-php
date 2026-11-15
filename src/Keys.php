@@ -55,12 +55,58 @@ final class Keys
         return substr($this->signSecret, 0, SODIUM_CRYPTO_SIGN_SEEDBYTES);
     }
 
+    /** The 32 raw bytes of the public key. */
+    public function publicRaw(): string
+    {
+        return Codec::unb64url($this->public);
+    }
+
     // ------------------------------------------------------------- signing --
 
     /** A detached signature over the exact string, base64url. */
     public function sign(string $input): string
     {
         return Codec::b64url(sodium_crypto_sign_detached($input, $this->signSecret));
+    }
+
+    /** A detached signature over the exact bytes, raw: 64 bytes, for the carrier envelope. */
+    public function signRaw(string $input): string
+    {
+        return sodium_crypto_sign_detached($input, $this->signSecret);
+    }
+
+    // ---------------------------------------------- the carrier envelope --
+
+    /** The public half of the X25519 pair, raw. */
+    public function curvePublicRaw(): string
+    {
+        return sodium_crypto_scalarmult_base($this->curveSecret);
+    }
+
+    /**
+     * X25519 of this key's secret with a public key. A key of small order gives
+     * 32 zero bytes, which libsodium refuses to compute; that refusal is given
+     * back as the zeros, so a reader refuses the same whichever library it has.
+     */
+    public function sharedWith(string $publicX): string
+    {
+        try {
+            return sodium_crypto_scalarmult($this->curveSecret, $publicX);
+        } catch (\SodiumException) {
+            return str_repeat("\0", 32);
+        }
+    }
+
+    /** A box sealed to this key from the X25519 key $from, opened, or null. The secret never leaves this class. */
+    public function openFrom(string $ciphertext, string $nonce, string $from): ?string
+    {
+        try {
+            $plain = sodium_crypto_box_open($ciphertext, $nonce, sodium_crypto_box_keypair_from_secretkey_and_publickey($this->curveSecret, $from));
+        } catch (\SodiumException) {
+            return null;
+        }
+
+        return $plain === false ? null : $plain;
     }
 
     /**
