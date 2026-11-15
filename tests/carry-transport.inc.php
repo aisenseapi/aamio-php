@@ -23,13 +23,14 @@ use Aamio\TransportFailed;
 use Aamio\TransportProcess;
 
 $pythonRepo = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'aamio-python';
-$python = getenv('AAMIO_TEST_PYTHON') ?: null;
+// AAMIO_TEST_PYTHON is JSON, the program and its options, as the other tests of the clients read it.
+$python = getenv('AAMIO_TEST_PYTHON') ? (array) json_decode((string) getenv('AAMIO_TEST_PYTHON'), true) : null;
 if ($python === null) {
     foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $folder) {
         foreach (PHP_OS_FAMILY === 'Windows' ? ['python.exe'] : ['python3', 'python'] as $name) {
             $candidate = rtrim($folder, '\\/') . DIRECTORY_SEPARATOR . $name;
             if ($folder !== '' && is_file($candidate) && !str_contains(strtolower($candidate), 'windowsapps')) {
-                $python = $candidate;
+                $python = [$candidate];
                 break 2;
             }
         }
@@ -59,7 +60,7 @@ $fakeClock = new class () {
 $startFake = static function (string $mode, ?callable $clock = null) use ($python, $pythonRepo, $baseEnv): TransportProcess {
     $env = TransportProcess::environment([], $baseEnv);
     $env['FAKE_TRANSPORT_MODE'] = $mode;
-    $process = new TransportProcess('fake', '0.1.0', [$python, '-u', $pythonRepo . '/tests/fake_transport.py'], sys_get_temp_dir(), $env, $clock);
+    $process = new TransportProcess('fake', '0.1.0', [...$python, '-u', $pythonRepo . '/tests/fake_transport.py'], sys_get_temp_dir(), $env, $clock);
     $process->start('0.0.0-test', 'php', sys_get_temp_dir());
 
     return $process;
@@ -157,7 +158,7 @@ try {
 foreach (['bad_describe' => 'transport_bad_describe', 'long_line' => 'transport_protocol'] as $mode => $code) {
     $env = TransportProcess::environment([], $baseEnv);
     $env['FAKE_TRANSPORT_MODE'] = $mode;
-    $broken = new TransportProcess('fake', '0.1.0', [$python, '-u', $pythonRepo . '/tests/fake_transport.py'], sys_get_temp_dir(), $env);
+    $broken = new TransportProcess('fake', '0.1.0', [...$python, '-u', $pythonRepo . '/tests/fake_transport.py'], sys_get_temp_dir(), $env);
     $got = null;
     try {
         $broken->start('0.0.0-test', 'php', sys_get_temp_dir());
@@ -208,7 +209,7 @@ foreach ([['readable', []], ['readable', ['AAMIO_SIM_LOSS' => '0.2', 'AAMIO_SIM_
     try {
         foreach ([[$portA, $portB], [$portB, $portA]] as [$own, $peer]) {
             $env = TransportProcess::environment([], $baseEnv) + ['PYTHONPATH' => $pythonRepo . '/addons/sim-radio/src', 'AAMIO_SIM_PORT' => (string) $own, 'AAMIO_SIM_PEERS' => (string) $peer] + $medium;
-            $radio = new TransportProcess('sim-radio', '0.1.0', [$python, '-u', '-m', 'aamio_sim_radio.transport'], sys_get_temp_dir(), $env);
+            $radio = new TransportProcess('sim-radio', '0.1.0', [...$python, '-u', '-m', 'aamio_sim_radio.transport'], sys_get_temp_dir(), $env);
             $radio->start('0.0.0-test', 'php', sys_get_temp_dir());
             $radios[] = $radio;
         }
