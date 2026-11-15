@@ -8,7 +8,8 @@ namespace Aamio;
  * One transport at work: frames in and out, envelopes delivered, receipts awaited.
  *
  * A Carrier joins a running TransportProcess to the home's CarryState for the
- * partners bound to that transport, under one security profile. What comes in
+ * partners bound to that transport, under one security profile or one per
+ * partner (B5). What comes in
  * is put together from its frames and given to the state, which decides; what
  * the state answers goes back to the address it came from.
  *
@@ -35,13 +36,20 @@ final class Carrier
 
     private CarryReassembly $reassembly;
     private int $frameLimit;
+    /** @var list<array{0: list<string>, 1: ?string, 2: ?string, 3: list<string>}> [frames, to, mark or null, ids given so far], in order */
     private array $queue = [];
+    /** @var array<string, list<list<string>>> mark => the frame ids of each try that was given to the transport whole */
+    private array $given = [];
+    /** @var array<string, true> marks one try of which the transport said it handed over whole (B6 1) */
+    private array $handed = [];
+    /** @var \Closure(string): array the profile for a partner's key */
+    private \Closure $profileOf;
     /** @var array<string, array{envelope: string, pk: string, session: string, next: float}> mark => sent, its receipt not come */
     public array $messages = [];
     /** @var array<string, array> challenges and opens sent again through the window */
     private array $control = [];
     private array $asks = [];
-    /** @var array<string, array{0: string, 1: string}> pair => [partner pk, session] */
+    /** @var array<string, array{0: string, 1: string, 2: float}> pair => [partner pk, session, when its challenge came], in that order */
     public array $answered = [];
     private array $addresses = [];
     /** @var list<string> */
@@ -54,9 +62,11 @@ final class Carrier
     /** @var callable(): int */
     private $wall;
 
-    public function __construct(private CarryState $state, private TransportProcess $process, private array $profile, private array $known,
+    /** @param array|\Closure(string): array $profile one profile for every partner, or a function from a partner's key to its own */
+    public function __construct(private CarryState $state, private TransportProcess $process, array|\Closure $profile, public array $known,
         ?callable $clock = null, ?callable $wall = null, private float $retrySeconds = 2.0, private float $askRetrySeconds = 5.0, private int $tries = CarryState::TRIES_DEFAULT)
     {
+        $this->profileOf = $profile instanceof \Closure ? $profile : static fn (string $pk): array => $profile;
         $this->clock = $clock ?? static fn (): float => hrtime(true) / 1e9;
         $this->wall = $wall ?? static fn (): int => time();
         $this->reassembly = new CarryReassembly($this->clock);
@@ -76,9 +86,9 @@ final class Carrier
         return bin2hex($pk) . ':' . bin2hex($session);
     }
 
-    private function queue(string $envelope, ?string $to): void
+    private function queue(string $envelope, ?string $to, ?string $key = null): void
     {
-        $this->queue[] = [Carry::split($envelope, $this->frameLimit), $to];
+        $this->queue[] = [Carry::split($envelope, $this->frameLimit), $to, $key, []];
     }
 
     private function control(string $envelope, ?string $to, string $kind, string $pk, string $session, int $most): void
@@ -89,15 +99,15 @@ final class Carrier
         $this->queue($envelope, $to);
     }
 
-    private function windowTries(): int
+    private function windowTries(string $pk): int
     {
-        return max(1, (int) ($this->profile['challenge_window'] / $this->retrySeconds));
+        return max(1, (int) (($this->profileOf)($pk)['challenge_window'] / $this->retrySeconds));
     }
 
     /** Ask the partner for a session of this party's: the challenge and the open follow in pump. */
     public function open(string $partnerPk): string
     {
-        [$session, $envelope] = $this->state->ask($partnerPk, $this->profile, ($this->clock)());
+        [$session, $envelope] = $this->state->ask($partnerPk, ($this->profileOf)($partnerPk), ($this->clock)());
         $this->asks[self::pair($partnerPk, $session)] = ['pk' => $partnerPk, 'session' => $session, 'next' => ($this->clock)() + $this->askRetrySeconds, 'tries' => 1];
         $this->queue($envelope, $this->addresses[bin2hex($partnerPk)] ?? null);
 
@@ -117,15 +127,53 @@ final class Carrier
         return $found;
     }
 
+    /** The newest session of this party's with the partner whose challenge came less than $seconds ago, or null. */
+    public function usableSession(string $partnerPk, float $seconds): ?string
+    {
+        $found = null;
+        $now = ($this->clock)();
+        foreach ($this->answered as [$pk, $session, $at]) {
+            if ($pk === $partnerPk && $now - $at < $seconds) {
+                $found = $session;
+            }
+        }
+
+        return $found;
+    }
+
     /** A message in an open session, sent again with the same bytes until its receipt comes: its mark. */
     public function send(string $partnerPk, string $session, string $content, int $deadline = 0): string
     {
-        $envelope = $this->state->send($partnerPk, $session, $content, $this->profile, $deadline, null, $this->tries);
+        $envelope = $this->state->send($partnerPk, $session, $content, ($this->profileOf)($partnerPk), $deadline, null, $this->tries);
         $key = CarryState::mark($partnerPk, $session, $this->state->counterOf($partnerPk, $session));
         $this->messages[$key] = ['envelope' => $envelope, 'pk' => $partnerPk, 'session' => $session, 'next' => ($this->clock)() + $this->retrySeconds];
-        $this->queue($envelope, $this->addresses[bin2hex($partnerPk)] ?? null);
+        $this->queue($envelope, $this->addresses[bin2hex($partnerPk)] ?? null, $key);
 
         return $key;
+    }
+
+    /** B6 1: the transport said sent for every frame of one try at the message, in this process. Nothing about receipt. */
+    public function handedOver(string $key): bool
+    {
+        if (isset($this->handed[$key])) {
+            return true;
+        }
+        foreach ($this->given[$key] ?? [] as $ids) {
+            if ($ids !== [] && array_filter($ids, fn (string $id): bool => $this->process->status($id) !== 'sent') === []) {
+                $this->handed[$key] = true;
+                unset($this->given[$key]);
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** Whether frames wait here for the transport, or wait at the transport for an answer. */
+    public function busy(): bool
+    {
+        return $this->queue !== [] || $this->process->waiting() > 0;
     }
 
     /** True only when the receipt came; never for a message whose tries ran out without one. */
@@ -196,7 +244,7 @@ final class Carrier
         }
         $this->budget--;
         try {
-            [$result, $reply, $got] = $this->state->deliver($envelope, $this->known, $this->profile, $now, ($this->wall)());
+            [$result, $reply, $got] = $this->state->deliver($envelope, $this->known, $this->profileOf, $now, ($this->wall)());
         } catch (CarryRefused $refused) {
             // Refusals stay here (A7): logged and counted, never answered over the medium.
             $this->refused[] = $refused->carryCode;
@@ -210,10 +258,10 @@ final class Carrier
         switch ($got['kind']) {
             case Carry::CHALLENGE:
                 unset($this->asks[$pair]);
-                $this->answered[$pair] ??= [$got['sender'], $got['session']];
+                $this->answered[$pair] ??= [$got['sender'], $got['session'], $now];
                 // The open is sent again with the same bytes through the challenge window, until the first receipt in the
                 // session shows it came: on a medium that loses frames, one try is not enough.
-                $this->control($reply, $source, 'open', $got['sender'], $got['session'], $this->windowTries());
+                $this->control($reply, $source, 'open', $got['sender'], $got['session'], $this->windowTries($got['sender']));
 
                 return;
             case Carry::OPEN:
@@ -221,7 +269,7 @@ final class Carrier
 
                 return;
             case Carry::ASK:
-                $this->control($reply, $source, 'challenge', $got['sender'], $got['session'], $this->windowTries());
+                $this->control($reply, $source, 'challenge', $got['sender'], $got['session'], $this->windowTries($got['sender']));
 
                 return;
             case Carry::RECEIPT:
@@ -257,7 +305,7 @@ final class Carrier
                 continue;
             }
             $this->messages[$key]['next'] = $now + $this->retrySeconds;
-            $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? null);
+            $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? null, (string) $key);
         }
         foreach ($this->control as $key => $entry) {
             if ($now < $entry['next']) {
@@ -277,7 +325,7 @@ final class Carrier
             }
             unset($this->asks[$pair]);
             if ($entry['tries'] < $this->tries) {
-                [$session, $envelope] = $this->state->ask($entry['pk'], $this->profile, $now);
+                [$session, $envelope] = $this->state->ask($entry['pk'], ($this->profileOf)($entry['pk']), $now);
                 $this->asks[self::pair($entry['pk'], $session)] = ['pk' => $entry['pk'], 'session' => $session, 'next' => $now + $this->askRetrySeconds, 'tries' => $entry['tries'] + 1];
                 $this->queue($envelope, $this->addresses[bin2hex($entry['pk'])] ?? null);
             }
@@ -288,12 +336,17 @@ final class Carrier
     {
         while ($this->queue !== [] && $this->process->room() > 0) {
             $frame = array_shift($this->queue[0][0]);
-            if ($this->process->send($frame, $this->queue[0][1]) === null) {
+            $id = $this->process->send($frame, $this->queue[0][1]);
+            if ($id === null) {
                 array_unshift($this->queue[0][0], $frame);
                 break;
             }
+            $this->queue[0][3][] = $id;
             if ($this->queue[0][0] === []) {
-                array_shift($this->queue);
+                [, , $key, $ids] = array_shift($this->queue);
+                if ($key !== null && !isset($this->handed[$key])) {
+                    $this->given[$key][] = $ids;
+                }
             }
         }
         // The host measures how long frames wait for room (B3.2), so it is told whether any do.

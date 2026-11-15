@@ -36,6 +36,8 @@ final class TransportProcess
     public const HANG_ROOM_SECONDS = 60;
     public const WRITE_QUEUE = 1024;
     public const WRITE_PIECE = 8192;
+    /** A frame that settled is kept this long past its deadline, for a late answer and for status, and then forgotten. */
+    public const FORGET_SECONDS = 600;
 
     /** @var resource|null */
     private $process = null;
@@ -43,6 +45,8 @@ final class TransportProcess
     private string $buffer = '';
     private string $errors = '';
     public ?array $properties = null;
+    /** The medium describe named. */
+    public ?string $medium = null;
     public int $written = 0;
     public int $credit = 0;
     public int $sendsRead = 0;
@@ -129,7 +133,8 @@ final class TransportProcess
 
     // -------------------------------------------------------- the process --
 
-    public function start(string $aamioVersion, string $runtime, string $stateDir): array
+    /** hello, and the describe that answers it. With $probe the transport is asked to take nothing of its medium in use (B3). */
+    public function start(string $aamioVersion, string $runtime, string $stateDir, bool $probe = false): array
     {
         $process = @proc_open($this->command, [0 => ['socket'], 1 => ['socket'], 2 => ['socket']], $pipes, $this->cwd, $this->env);
         if (!is_resource($process)) {
@@ -140,7 +145,11 @@ final class TransportProcess
         stream_set_blocking($this->pipes[0], false);
         stream_set_blocking($this->pipes[1], false);
         stream_set_blocking($this->pipes[2], false);
-        $this->write(['t' => 'hello', 'aamio_addon' => 3, 'aamio' => ['version' => $aamioVersion, 'runtime' => $runtime], 'state_dir' => $stateDir]);
+        $hello = ['t' => 'hello', 'aamio_addon' => 3, 'aamio' => ['version' => $aamioVersion, 'runtime' => $runtime], 'state_dir' => $stateDir];
+        if ($probe) {
+            $hello['probe'] = true;
+        }
+        $this->write($hello);
         $until = ($this->clock)() + self::DESCRIBE_SECONDS;
         while ($this->properties === null) {
             if (($this->clock)() >= $until) {
@@ -300,15 +309,29 @@ final class TransportProcess
         return $id;
     }
 
+    /** What is known of a frame: waiting, sent, not_sent or unknown, and forgotten once it settled long ago. */
     public function status(string $id): string
     {
-        return $this->frames[$id]['status'];
+        return $this->frames[$id]['status'] ?? 'forgotten';
+    }
+
+    /** How many frames wait for an answer from the transport. */
+    public function waiting(): int
+    {
+        return count(array_filter($this->frames, static fn (array $entry): bool => $entry['status'] === 'waiting'));
     }
 
     /** B3.2: frames past their deadline become unknown and are cancelled; a transport without progress is hung. */
     public function checkTime(): void
     {
         $now = ($this->clock)();
+        // A frame that settled is kept for a while for a late answer and for status, and then forgotten, so a transport
+        // that runs for days does not carry every frame it was ever given.
+        foreach ($this->frames as $id => $entry) {
+            if ($entry['status'] !== 'waiting' && $now - $entry['deadline'] > self::FORGET_SECONDS) {
+                unset($this->frames[$id]);
+            }
+        }
         foreach ($this->frames as $id => $entry) {
             if ($entry['status'] === 'waiting' && $now > $entry['deadline']) {
                 $this->timeoutsInARow++;
@@ -419,6 +442,7 @@ final class TransportProcess
                     } catch (TransportFailed $failure) {
                         $this->fail($failure);
                     }
+                    $this->medium = is_string($message['medium'] ?? null) ? $message['medium'] : null;
                 }
 
                 return [];

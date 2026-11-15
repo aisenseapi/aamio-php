@@ -57,7 +57,7 @@ final class CarryState
     private const TOP = ['challenges', 'floor', 'incoming', 'outbox', 'outgoing', 'stored', 'used', 'version'];
     private const INCOMING = ['challenged', 'closed', 'closed_at', 'deadline', 'highest', 'lifetime', 'nonce', 'opened'];
     private const OUTGOING = ['answered', 'closed', 'closed_at', 'counter', 'deadline', 'nonce'];
-    private const STORED = ['content', 'sha256'];
+    private const STORED = ['at', 'content', 'sealed', 'sha256'];
     private const OUTBOX = ['envelope', 'most', 'receipt', 'sha256', 'tries'];
     private const MAPS = ['incoming', 'stored', 'outgoing', 'outbox'];
 
@@ -208,7 +208,8 @@ final class CarryState
     private static function storedOk(mixed $entry): bool
     {
         return self::fields($entry, self::STORED) && self::hex($entry['sha256'], 32)
-            && ($entry['content'] === null || self::hex($entry['content'], null, Carry::MAX_CONTENT));
+            && ($entry['content'] === null || self::hex($entry['content'], null, Carry::MAX_CONTENT))
+            && is_bool($entry['sealed']) && self::int($entry['at'], 0, self::SAFE);
     }
 
     private static function outboxOk(mixed $entry): bool
@@ -573,6 +574,18 @@ final class CarryState
         return $out;
     }
 
+    /**
+     * What is kept of a message taken in: sha256, whether it came sealed, and when (the time floor's clock), or null.
+     *
+     * @return ?array{sha256: string, sealed: bool, at: int}
+     */
+    public function kept(string $key): ?array
+    {
+        $entry = $this->durable['stored'][$key] ?? null;
+
+        return $entry === null ? null : ['sha256' => $entry['sha256'], 'sealed' => $entry['sealed'], 'at' => $entry['at']];
+    }
+
     /** The program has kept the message itself or is done with it: the content goes, the mark stays until A6.9. */
     public function handedOver(string $key): void
     {
@@ -595,9 +608,11 @@ final class CarryState
     /**
      * An envelope that came over a transport: [result, what goes back or null, what was read], or CarryRefused.
      *
+     * $profile is a profile, or a function from the sender's key to its profile, asked once the sender is known.
+     *
      * @return array{0: string, 1: ?string, 2: array}
      */
-    public function deliver(string $envelope, array $known, array $profile, float $mono, int $now, ?string $rnd = null, ?string $sealRnd = null): array
+    public function deliver(string $envelope, array $known, array|\Closure $profile, float $mono, int $now, ?string $rnd = null, ?string $sealRnd = null): array
     {
         $this->check();
         try {
@@ -640,10 +655,13 @@ final class CarryState
         }
     }
 
-    private function take(string $envelope, array $known, array $profile, float $mono, int $now, ?string $rnd, ?string $sealRnd): array
+    private function take(string $envelope, array $known, array|\Closure $profile, float $mono, int $now, ?string $rnd, ?string $sealRnd): array
     {
         $t = $this->tick($now);
         $got = Carry::read($envelope, $this->keys, $known, fn (string $pk, string $session): ?string => $this->bindingFor($pk, $session));
+        if ($profile instanceof \Closure) {
+            $profile = $profile($got['sender']);
+        }
         if ($got['mode'] !== ($profile['mode'] === 'sealed' ? Carry::SEALED : Carry::READABLE)) {
             throw new CarryRefused('carry_mode_refused');
         }
@@ -855,7 +873,8 @@ final class CarryState
         if ($new) {
             $this->used[$pair] = true;
         }
-        $this->durable['stored'][$key] = ['sha256' => $digest, 'content' => bin2hex($got['content'])];
+        // How it came and when, kept with it: what read says of it does not depend on a profile that may change meanwhile.
+        $this->durable['stored'][$key] = ['sha256' => $digest, 'content' => bin2hex($got['content']), 'sealed' => $got['mode'] === Carry::SEALED, 'at' => $t];
         $this->save();
 
         return ['accepted', $receipt(), $got];
