@@ -73,6 +73,10 @@ final class McpServer
     private int $asked = 0;
     /** @var list<mixed> Ids of calls cancelled during a wait, until the backlog is served. */
     private array $cancelled = [];
+    /** Whether transports run beside this server, pumped while it waits for the next line. */
+    private bool $transporting = false;
+    /** @var resource|null the process that reads standard input on Windows and passes it on, while transports run */
+    private $relay = null;
     /** @var array<string, array> The core's tools by name, as mcp-tools.json has them, to check a call's arguments against. */
     private array $core = [];
 
@@ -1007,8 +1011,34 @@ final class McpServer
         // Everything that came in while a question waited has been served, so
         // the cancellations it brought have nothing left to stop.
         $this->cancelled = [];
+        $this->waitForInput();
 
         return fgets($this->in);
+    }
+
+    /**
+     * While transports run, the next line is waited for in short waits with a round of the transports between them:
+     * nothing runs in the background here, and a partner's ask that came meanwhile is answered without a call. Where
+     * standard input cannot be waited on that way, that is said once, and the transports run while a call is served.
+     */
+    private function waitForInput(): void
+    {
+        while ($this->transporting) {
+            $read = [$this->in];
+            $write = null;
+            $except = null;
+            $ready = @stream_select($read, $write, $except, 0, 20000);
+            if ($ready === false) {
+                $this->transporting = false;
+                $this->runtime->logged('standard input cannot be waited on here, so the transports run only while a call is served');
+
+                return;
+            }
+            if ($ready > 0) {
+                return;
+            }
+            $this->runtime->pumpTransports(0.03);
+        }
     }
 
     /** Whether $message is a call cancelled while a question waited. One that is, is not served. */
@@ -1108,6 +1138,11 @@ final class McpServer
         $this->runtime->logged('serving on stdio, inbox ' . ($this->runtime->whoami()['inbox'] ?? '?'));
         $this->in = $in;
         $this->out = $out;
+        // The owner runs the transports bound to partners for as long as it serves (B2).
+        $this->transporting = $this->runtime->startTransports();
+        if ($this->transporting && PHP_OS_FAMILY === 'Windows' && $in === STDIN) {
+            $this->relayInput();
+        }
         while (($line = $this->nextLine()) !== false) {
             $line = trim($line);
             if ($line === '') {
@@ -1164,6 +1199,51 @@ final class McpServer
             }
             $this->send($reply);
         }
+        if ($this->relay !== null) {
+            proc_close($this->relay);
+            $this->relay = null;
+        }
         $this->runtime->close();
+    }
+
+    /**
+     * On Windows a process cannot wait on its standard input: stream_select never wakes for it. With transports running,
+     * a process of its own reads standard input in blocking reads and passes it on over a socket on 127.0.0.1, which only
+     * a process given its token is let through, and this server waits on that socket instead, as addons/lan/transport.php
+     * does. Where that cannot be set up, it is said, and the transports run while a call is served.
+     */
+    private function relayInput(): void
+    {
+        $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        if ($server === false) {
+            $this->runtime->logged('standard input cannot be passed on here (' . $errstr . '), so the transports run only while a call is served');
+
+            return;
+        }
+        $token = bin2hex(random_bytes(16));
+        $code = '$c = @stream_socket_client("tcp://" . $argv[1], $n, $s, 10); if ($c === false) { exit(1); } fwrite($c, $argv[2] . "\n");'
+            . ' while (($l = fgets(STDIN)) !== false) { if (@fwrite($c, $l) === false) { break; } } fclose($c);';
+        $relay = @proc_open([PHP_BINARY, '-r', $code, (string) stream_socket_get_name($server, false), $token], [0 => STDIN, 1 => ['file', 'NUL', 'w'], 2 => STDERR], $pipes);
+        $conn = false;
+        $until = hrtime(true) / 1e9 + 10;
+        while (is_resource($relay) && $conn === false && hrtime(true) / 1e9 < $until) {
+            $candidate = @stream_socket_accept($server, max(0.1, $until - hrtime(true) / 1e9));
+            if ($candidate !== false && trim((string) fgets($candidate)) === $token) {
+                $conn = $candidate;
+            } elseif ($candidate !== false) {
+                fclose($candidate);
+            }
+        }
+        fclose($server);
+        if ($conn === false) {
+            if (is_resource($relay)) {
+                proc_terminate($relay);
+            }
+            $this->runtime->logged('standard input could not be passed on here, so the transports run only while a call is served');
+
+            return;
+        }
+        $this->relay = $relay;
+        $this->in = $conn;
     }
 }

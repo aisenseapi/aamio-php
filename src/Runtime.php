@@ -1005,6 +1005,13 @@ final class Runtime
         $partners = array_values(array_filter($this->partners, static fn (array $p): bool => $p['name'] !== $known['name']));
         $this->saveJson('partners.json', $partners);
         $this->partners = $partners;
+        // The bindings go with the partner. A transport takes nothing from a key
+        // that is not in the book whatever the file says, so one left behind,
+        // as by another runtime that removed the partner, opens nothing.
+        try {
+            $this->transportService()->config->unbind($known['key']);
+        } catch (\RuntimeException) {
+        }
 
         return $this->inboxAfterChange('partner ' . $known['name'] . ' was removed', ['partner' => $known['name'], 'known' => true]);
     }
@@ -2822,6 +2829,11 @@ final class Runtime
     public function send(string $to, ?string $text = null, mixed $data = null, ?string $replyTo = null, ?string $answers = null): array
     {
         self::checkRe($answers);
+        // A partner bound to a transport goes over it, and never over HTTPS instead.
+        $bound = $this->boundPartner($to);
+        if ($bound !== null) {
+            return $this->sendCarried($bound, $text, $data, $answers);
+        }
         [$w, $key, $partner] = $this->recipient($to);
 
         return $this->sendSealed($w, $key, $partner, $text, $data, $replyTo, null, $answers);
@@ -4670,9 +4682,34 @@ final class Runtime
     /** read, as one read for the archive. */
     private function readHeld(int $wait, int $limit, ?int $maxBytes): array
     {
-        $this->ensureInbox();
-        $this->publishPresence();
+        // What came over a transport is read too, and while this waits the
+        // transports run (B2). With a transport the inbox is one way among
+        // others, so an inbox that cannot be reached is said, and the rest read.
+        $carried = $this->carriedService();
         $collected = [];
+        $online = true;
+        if ($carried !== null) {
+            if ($wait > 0) {
+                $carried->start();
+            }
+            $ready = $this->carriedReady($this->carriedEntries($carried));
+            foreach (array_slice($ready, 0, $limit) as $entry) {
+                $collected[] = $entry;
+            }
+            if (count($ready) > $limit) {
+                $this->noteTrouble('read', 'more_carried', (count($ready) - $limit) . ' more that came over a transport wait for the next read, in the order they came.');
+            }
+            try {
+                $this->ensureInbox();
+                $this->publishPresence();
+            } catch (\RuntimeException $error) {
+                $online = false;
+                $this->noteTrouble('inbox', 'unreachable', 'the inbox could not be reached: ' . rtrim($error->getMessage(), '.') . '. What came over a transport is read all the same; nothing on the service was.');
+            }
+        } else {
+            $this->ensureInbox();
+            $this->publishPresence();
+        }
         $leftWaiting = 0;
         $heldBack = [];
         $heldHere = [];
@@ -4723,7 +4760,7 @@ final class Runtime
 
         $answered = [];
         // A muted inbox too: it is read until it expires, for the partners still in the book.
-        foreach (array_values($this->channels) as $channel) {
+        foreach ($online ? array_values($this->channels) : [] as $channel) {
             // A channel that answered 410 or nothing at all never gets the
             // wait: it used to eat it, so a read with wait 25 came back at once
             // and the inbox was only ever asked with wait 0. A gone one does:
@@ -4737,7 +4774,35 @@ final class Runtime
         // Only when nothing was waiting anywhere does the read wait, and only
         // the first channel can end the wait early. What reached the others
         // meanwhile comes with this answer, at the end of the wait.
-        if ($collected === [] && $wait > 0 && $answered !== []) {
+        if ($collected === [] && $wait > 0 && $carried !== null) {
+            // The inbox is asked in short waits, so what comes over a transport meanwhile is taken between them.
+            $until = hrtime(true) / 1e9 + $wait;
+            while ($collected === []) {
+                $left = $until - hrtime(true) / 1e9;
+                if ($left <= 0) {
+                    break;
+                }
+                $piece = max(1, min(self::CARRIED_SLICE, (int) $left));
+                $state = $answered !== [] ? $ask($answered[0], $piece, $notAskedAfter) : null;
+                if ($state !== 'ok' && $state !== 'gone') {
+                    $carried->wait(static fn (): bool => $carried->carry()->pending() !== [], hrtime(true) / 1e9 + min($left, $piece));
+                } else {
+                    $carried->pump(0.0);
+                }
+                $taken = [];
+                foreach ($collected as $entry) {
+                    if (isset($entry['mark'])) {
+                        $taken[$entry['mark']] = true;
+                    }
+                }
+                foreach (array_slice($this->carriedReady($this->carriedEntries($carried, $taken)), 0, max(0, $limit - count($collected))) as $entry) {
+                    $collected[] = $entry;
+                }
+            }
+            foreach (array_slice($answered, 1) as $channel) {
+                $ask($channel, 0, $notAskedAfter);
+            }
+        } elseif ($collected === [] && $wait > 0 && $answered !== []) {
             $ask($answered[0], $wait, $notAskedAfter);
             foreach (array_slice($answered, 1) as $channel) {
                 $ask($channel, 0, $notAskedAfter);
@@ -4774,8 +4839,231 @@ final class Runtime
         if ($said !== []) {
             $this->noteTrouble('read', 'more', implode(' ', array_merge([$said[0]], array_map('ucfirst', array_slice($said, 1)))));
         }
+        $this->carriedHandedOver($collected);
 
         return $collected;
+    }
+
+    // ------------------------------------------------------- transports --
+    //
+    // A partner bound to a transport (aamio transport bind) is reached over it,
+    // and over nothing else: Transports has the profiles and the bindings, and
+    // TransportService runs them. Only the owner of the home runs a transport
+    // (B2), and a runtime is the owner while it lives: serve starts them, and a
+    // send or a read that waits starts them for as long as it runs. Nothing runs
+    // in the background here, so whoever waits pumps.
+
+    /** How long a read on the command line waits on the inbox at a time while transports run beside it: what came over one is taken between. */
+    public const CARRIED_SLICE = 2;
+    private const CARRIED_NOTES = [
+        'confirmed' => "The partner's aamio took it in over %via and said so with a receipt.",
+        'handed_over' => 'Every frame went out over %via, and no receipt came within %wait seconds. It is sent again with the same bytes while an aamio owns this home, and aamio transport list says how it ends.',
+        'queued' => 'It waits in the outbox for room on %via, and goes while an aamio owns this home. aamio transport list says how it ends.',
+        'unknown' => 'No receipt came over %via and its tries are used, so it may or may not have arrived. It is not sent again.',
+    ];
+
+    private ?TransportService $transports = null;
+
+    /** The transports of this home, made at first use. */
+    public function transportService(): ?TransportService
+    {
+        return $this->transports ??= new TransportService($this);
+    }
+
+    /**
+     * What a read shows of content that came over a transport: the body over HTTPS has the same fields, text or data, re
+     * and seen, and the same reading of what is not JSON or not UTF-8. [body, meta].
+     */
+    public static function contentOf(string $plaintext, bool $encrypted): array
+    {
+        if (preg_match('//u', $plaintext) !== 1) {
+            return [['text' => null], ['signed' => true, 'encrypted' => $encrypted, 'format' => 'unreadable', 'error' => 'NotUtf8']];
+        }
+        [$isJson, $parsed] = self::bodyJson($plaintext);
+        if (!$isJson) {
+            return [['text' => $plaintext], ['signed' => true, 'encrypted' => $encrypted, 'format' => 'text']];
+        }
+        if (is_array($parsed) && !array_is_list($parsed)) {
+            [$content, $extra] = self::canonical($parsed);
+
+            return [self::dataAsWritten($content, $plaintext), ['signed' => true, 'encrypted' => $encrypted, 'format' => 'json'] + $extra];
+        }
+
+        return [['text' => $plaintext], ['signed' => true, 'encrypted' => $encrypted, 'format' => 'json']];
+    }
+
+    /**
+     * The partner $to names when a transport is bound to it, or null. A write address is a thread at the service, and
+     * goes there as before. transport_config_unreadable when the bindings cannot be read: which partners go over a
+     * transport is not known then, so nothing is sent.
+     */
+    private function boundPartner(string $to): ?array
+    {
+        if (Address::isW($to)) {
+            return null;
+        }
+        $partner = Codec::isKey($to) ? $this->partnerByKey($to) : $this->partnerByName($to);
+        if ($partner === null) {
+            return null;
+        }
+
+        return $this->transportService()->config->routes($partner['key']) !== [] ? $partner : null;
+    }
+
+    /** A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier. */
+    private function sendCarried(array $partner, ?string $text, mixed $data, ?string $answers): array
+    {
+        $body = ['from' => $this->keys->hashPrefix];
+        if ($text !== null) {
+            $body['text'] = $text;
+        }
+        if ($data !== null) {
+            $body['data'] = $data;
+        }
+        $body += $this->conversation($partner['key'], $answers);
+        $content = Codec::json($body);
+        $budget = $this->client->workBudget;
+        $wait = $budget === null ? Transports::$waitDefault : max(1, min(Transports::$waitDefault, (int) $budget));
+        $result = $this->transportService()->send(Codec::unb64url($partner['key']), $content, $wait);
+        $sent = ['to' => $partner['name']] + $result;
+        $sent['note'] = strtr(self::CARRIED_NOTES[$result['status']], ['%via' => $result['via'], '%wait' => (string) $wait]);
+        try {
+            $this->archive('sent', ['kind' => 'sent', 'at' => time(), 'to' => $partner['name'], 'via' => $result['via'], 'profile' => $result['profile'],
+                'mark' => $result['mark'], 'status' => $result['status'], 'body' => $body]);
+        } catch (\Throwable $error) {
+            $sent['archive_error'] = $error->getMessage();
+            $this->logged('archive sent ' . $result['mark'] . ': ' . $error->getMessage());
+        }
+
+        return $sent;
+    }
+
+    /** For serve: the transports bound to partners, started. Whether any run. */
+    public function startTransports(): bool
+    {
+        try {
+            $service = $this->transportService();
+            if ($service->bound()) {
+                $service->start();
+
+                return $service->isRunning();
+            }
+        } catch (\Throwable $error) {
+            $this->noteTrouble('transports', 'not_started', 'the transports could not be started: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage() . '. Nothing goes over them in this process, and partners bound to them are not sent to.');
+        }
+
+        return false;
+    }
+
+    /** One round of the transports, for a caller that waits on something else: serve between its lines. */
+    public function pumpTransports(float $timeout = 0.05): void
+    {
+        if ($this->transports !== null && $this->transports->running !== []) {
+            $this->transports->pump($timeout);
+        }
+    }
+
+    /** What the carriers have queued goes out for a moment, and then the transports stop (B2). */
+    private function stopTransports(): void
+    {
+        if ($this->transports === null) {
+            return;
+        }
+        try {
+            $this->transports->drain();
+        } finally {
+            $this->transports->stop();
+        }
+    }
+
+    /** The transport service when a partner is bound to a transport, else null; a binding file that cannot be read is said. */
+    private function carriedService(): ?TransportService
+    {
+        $service = $this->transportService();
+        try {
+            return $service->bound() ? $service : null;
+        } catch (\RuntimeException $error) {
+            $this->noteTrouble('transports', 'unreadable', $error->getMessage() . '. What came over a transport waits in the home until then.');
+
+            return null;
+        }
+    }
+
+    /** @param array<string, true> $skip */
+    private function carriedEntries(TransportService $service, array $skip = []): array
+    {
+        $entries = [];
+        foreach ($service->entries($skip) as $entry) {
+            $entry['archived'] = false;
+            if (!$this->archiveEnabled) {
+                $entry['archive_off'] = true;
+            }
+            $entries[] = $entry;
+        }
+
+        return $entries;
+    }
+
+    /** What may be handed over: a message from a key that has left the address book is not, and that is said. */
+    private function carriedReady(array $entries): array
+    {
+        $ready = [];
+        foreach ($entries as $entry) {
+            if ($this->partnerByKey($entry['from_key']) === null) {
+                $this->carriedWithheld($entry);
+            } else {
+                $ready[] = $entry;
+            }
+        }
+
+        return $ready;
+    }
+
+    private function carriedWithheld(array $entry): void
+    {
+        $archived = $this->archiveCarried($entry);
+        try {
+            $this->transportService()->taken([$entry['mark']]);
+        } catch (\Throwable $error) {
+            $this->logged('transports: ' . $entry['mark'] . ' could not be marked as dealt with: ' . $error->getMessage());
+        }
+        $this->noteTrouble($entry['channel'], 'removed_key', 'A message came over ' . $entry['channel'] . ' from a key that has since left the address book. It is not handed over' . ($archived ? '; the archive has it' : '') . '.');
+    }
+
+    /** The row of a message that came over a transport, as read writes one for a message over HTTPS: true when it was written. */
+    private function archiveCarried(array $entry): bool
+    {
+        if (!$this->archiveEnabled) {
+            return false;
+        }
+        try {
+            return $this->archive('transport-' . $entry['channel'], ['kind' => 'received'] + $entry);
+        } catch (\Throwable $error) {
+            $this->noteTrouble($entry['channel'], 'archive_failed', 'a message that came over ' . $entry['channel'] . ' was handed over and could not be written to the archive: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage() . '. The archive does not have it.');
+
+            return false;
+        }
+    }
+
+    /** What a read hands over that came over a transport: written to the archive, and then taken out of the carrier state. */
+    private function carriedHandedOver(array &$collected): void
+    {
+        $marks = [];
+        foreach ($collected as $at => $entry) {
+            if (!isset($entry['mark'])) {
+                continue;
+            }
+            $collected[$at]['archived'] = $this->archiveCarried($entry);
+            $marks[] = $entry['mark'];
+        }
+        if ($marks === []) {
+            return;
+        }
+        try {
+            $this->transportService()->taken($marks);
+        } catch (\Throwable $error) {
+            $this->noteTrouble('transports', 'not_taken', count($marks) . ' message(s) that came over a transport were handed over and could not be marked as taken: ' . $error->getMessage() . '. They may come again, with the same mark.');
+        }
     }
 
     // ------------------------------------------------------------ receipt --
@@ -4946,6 +5234,9 @@ final class Runtime
 
     public function close(): void
     {
+        if ($this->ownsHome) {
+            $this->stopTransports();
+        }
         // Only what this runtime took. Closed a second time, after another
         // runtime in this process had taken the home, it deleted that one's
         // pid file: the two share a pid, so the pid could not tell them apart

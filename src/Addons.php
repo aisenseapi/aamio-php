@@ -390,6 +390,7 @@ final class Addons
             $names = self::enabled($home);
             $contract = 1;
             $probed = false;
+            $transport = null;
             if (!in_array(strtolower($package), array_map('strtolower', $names), true)) {
                 [$loaded] = self::load((string) getenv('AAMIO_ADDONS'), array_merge($names, [$package]));
                 foreach ($loaded as $addon) {
@@ -399,6 +400,15 @@ final class Addons
                         AddonProcess::probe($addon);
                         $contract = 2;
                         $probed = true;
+                    }
+                    if ($addon instanceof AddonTransport && $addon->package !== null && strtolower($addon->package) === strtolower($package)) {
+                        if (!$addon->runsHere()) {
+                            throw new \RuntimeException('the transport ' . $addon->name . ' runs on ' . implode(', ', $addon->platforms) . ', and this is ' . AddonTransport::platform() . '. Nothing was recorded.');
+                        }
+                        // Before anything is recorded: it starts, describes itself as its manifest says, and stops (contract 3, B2).
+                        Transports::probe($addon, self::home($home));
+                        $contract = 3;
+                        $transport = $addon;
                     }
                 }
                 self::writeEnabled($home, array_merge($names, [$package]));
@@ -413,7 +423,16 @@ final class Addons
             self::unlock($lock);
         }
         $answer = self::describe($home);
-        if ($contract === 2) {
+        if ($contract === 3 && $transport === null) {
+            foreach (self::loaded($home) as $addon) {
+                if ($addon instanceof AddonTransport && $addon->package !== null && strtolower($addon->package) === strtolower($package)) {
+                    $transport = $addon;
+                }
+            }
+        }
+        if ($contract === 3 && $transport !== null) {
+            $answer['note'] = $transport->enableNote($package, Transports::workingFolder(self::home($home), $transport->name, false)) . ' ' . self::RESTART;
+        } elseif ($contract === 2) {
             $environment = [];
             foreach ($answer['addons'] as $row) {
                 if (($row['package'] ?? null) !== null && strtolower($row['package']) === strtolower($package)) {
@@ -465,12 +484,22 @@ final class Addons
 
     private static function running(Addon $addon): array
     {
-        $said = ['version' => $addon->version(), 'contract' => $addon instanceof AddonManifest ? 2 : 1, 'class' => get_class($addon), 'commands' => array_keys($addon->commands()), 'mcp_tools' => array_column($addon->tools(), 'name')];
-        if ($addon instanceof AddonManifest && $addon->environment !== []) {
+        $contract = $addon instanceof AddonManifest ? 2 : ($addon instanceof AddonTransport ? 3 : 1);
+        $said = ['version' => $addon->version(), 'contract' => $contract, 'class' => get_class($addon), 'commands' => array_keys($addon->commands()), 'mcp_tools' => array_column($addon->tools(), 'name')];
+        if (($addon instanceof AddonManifest || $addon instanceof AddonTransport) && $addon->environment !== []) {
             $said['environment'] = $addon->environment;
+        }
+        if ($addon instanceof AddonTransport) {
+            $said += self::transportFields($addon);
         }
 
         return $said;
+    }
+
+    /** What a transport says of itself in its manifest, shown before it is enabled: the medium, where it runs and what it uses. */
+    private static function transportFields(AddonTransport $transport): array
+    {
+        return ['medium' => $transport->medium, 'platforms' => $transport->platforms, 'permissions' => $transport->permissions];
     }
 
     /**
@@ -500,10 +529,13 @@ final class Addons
             // manifest for a contract this aamio does not know is this row's error.
             try {
                 $manifest = AddonProcess::readManifest($row['dir'], $row['package'], 'aamio addon disable ' . $row['package']);
-                $entry['contract'] = $manifest !== null ? 2 : 1;
+                $entry['contract'] = $manifest === null ? 1 : $manifest::CONTRACT;
                 if ($manifest !== null && $manifest->environment !== []) {
                     // Said before the add-on is enabled: which variables it asks for, by name.
                     $entry['environment'] = $manifest->environment;
+                }
+                if ($manifest instanceof AddonTransport) {
+                    $entry += self::transportFields($manifest);
                 }
             } catch (\RuntimeException $failure) {
                 $entry['error'] = $failure->getMessage();

@@ -1,0 +1,24 @@
+{
+  "name": "aisenseapi/aamio-lan",
+  "description": "aamio over the local network: a transport under contract 3 that sends each frame as one UDP datagram, to an address or to everyone on the network, so two machines exchange aamio messages directly, also when aamio.at cannot be reached. Used through aamio transport bind PARTNER lan.",
+  "type": "aamio-addon",
+  "license": "MIT",
+  "homepage": "https://aamio.at/docs/addons",
+  "keywords": ["aamio", "agents", "transport", "lan", "udp"],
+  "authors": [
+    {"name": "AI SENSE AS", "homepage": "https://aisense.no/"}
+  ],
+  "support": {
+    "docs": "https://aamio.at/docs/addons",
+    "source": "https://github.com/aisenseapi/aamio-php",
+    "email": "abuse@aisense.no"
+  },
+  "require": {
+    "php": ">=8.1",
+    "aisenseapi/aamio": ">=0.3.23"
+  },
+  "extra": {
+    "aamio-addon": {"name": "lan", "contract": 3}
+  },
+  "minimum-stability": "stable"
+}

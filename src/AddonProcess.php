@@ -30,7 +30,7 @@ namespace Aamio;
 final class AddonProcess
 {
     public const MANIFEST_FILE = 'aamio-addon.json';
-    public const KNOWN_CONTRACTS = [1, 2];
+    public const KNOWN_CONTRACTS = [1, 2, 3];
     public const DEADLINE_DEFAULT = 30;
     public const DEADLINE_MAX = 120;
     public const PROBE_DEADLINE = 20;
@@ -109,7 +109,7 @@ final class AddonProcess
      * extra.aamio-addon.contract; 2 without a manifest, or a number this aamio does
      * not know, is refused with the reason.
      */
-    public static function readManifest(string $dir, ?string $package, string $fix): ?AddonManifest
+    public static function readManifest(string $dir, ?string $package, string $fix): AddonManifest|AddonTransport|null
     {
         $dir = rtrim($dir, '/\\');
         $path = $dir . DIRECTORY_SEPARATOR . self::MANIFEST_FILE;
@@ -117,7 +117,7 @@ final class AddonProcess
         $label = $package ?? $dir;
         if (!is_file($path)) {
             if ($declared !== null && $declared !== 1) {
-                throw new \RuntimeException('the add-on ' . $label . ' says it is written for contract ' . json_encode($declared) . ' of aamio\'s add-ons and carries no ' . self::MANIFEST_FILE . ', which contract 2 and later have. This aamio knows ' . implode(' and ', self::KNOWN_CONTRACTS) . '. Reinstall it, or ' . $fix . ' to go on without it.');
+                throw new \RuntimeException('the add-on ' . $label . ' says it is written for contract ' . json_encode($declared) . ' of aamio\'s add-ons and carries no ' . self::MANIFEST_FILE . ', which contract 2 and later have. This aamio knows ' . self::knownContracts() . '. Reinstall it, or ' . $fix . ' to go on without it.');
             }
 
             return null;
@@ -131,7 +131,19 @@ final class AddonProcess
         if ($number === 2) {
             return new AddonManifest($package, $dir, $path, $data, $fix);
         }
-        throw new \RuntimeException('the add-on ' . $label . ' is written for contract ' . json_encode($number) . ' of aamio\'s add-ons, and this aamio (' . Http::VERSION . ') knows ' . implode(' and ', self::KNOWN_CONTRACTS) . '. Upgrade aamio, or install a version of the add-on for this one; ' . $fix . ' goes on without it.');
+        if ($number === 3) {
+            return new AddonTransport($package, $dir, $path, $data, $fix);
+        }
+        throw new \RuntimeException('the add-on ' . $label . ' is written for contract ' . json_encode($number) . ' of aamio\'s add-ons, and this aamio (' . Http::VERSION . ') knows ' . self::knownContracts() . '. Upgrade aamio, or install a version of the add-on for this one; ' . $fix . ' goes on without it.');
+    }
+
+    /** The contracts this aamio knows, as the three runtimes say them: 1, 2 and 3. */
+    public static function knownContracts(): string
+    {
+        $names = array_map('strval', self::KNOWN_CONTRACTS);
+        $last = array_pop($names);
+
+        return $names === [] ? $last : implode(', ', $names) . ' and ' . $last;
     }
 
     /** What composer.json says under extra.aamio-addon.contract, or null when it says nothing. */

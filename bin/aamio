@@ -32,6 +32,9 @@ declare(strict_types=1);
  *   addon list                   (the add-ons installed beside aamio, and which of them run here)
  *   addon enable NAME            (let an installed add-on run here; disable takes it out again)
  *   addon NAME ...               (an add-on's commands: aamio addon domain --help with Domain Keys)
+ *   transport list | transport profile add NAME [--readable] [--lifetime N] [--window N] [--max-content N]
+ *   transport profile remove NAME | transport bind PARTNER TRANSPORT [--profile NAME] | transport unbind PARTNER [TRANSPORT]
+ *   (a partner bound to a transport, as lan, is sent to over it and never over HTTPS instead)
  */
 
 // Diagnostics to stderr from here on, so stdout carries the JSON and nothing
@@ -59,6 +62,7 @@ use Aamio\McpServer;
 use Aamio\Runtime;
 use Aamio\SendFailed;
 use Aamio\Storage;
+use Aamio\Transports;
 
 function out(mixed $value): void
 {
@@ -105,7 +109,7 @@ function csv(?string $text): ?array
     return array_values(array_filter(array_map('trim', explode(',', $text)), static fn (string $t): bool => $t !== ''));
 }
 
-[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'all', 'help', 'version']);
+[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'all', 'help', 'version', 'readable']);
 // An option that takes a value, given without one, is refused before anything
 // is read or written: `--home` alone would otherwise mean the default home.
 foreach (['home' => 'DIR', 'host' => 'URL', 'tags' => 'a,b'] as $takesValue => $what) {
@@ -242,8 +246,12 @@ if ($command !== 'addon') {
         'channel list' => [[], 0, [], []],
         'channel close' => [['label'], 0, [], []],
         'archive' => [['policy'], 1, ['max-mb'], ['all']],
+        'transport list' => [[], 0, [], []],
+        'transport profile' => [['action', 'name'], 0, ['lifetime', 'window', 'max-content'], ['readable']],
+        'transport bind' => [['partner', 'transport'], 0, ['profile'], []],
+        'transport unbind' => [['partner', 'transport'], 1, [], []],
     ];
-    $used = in_array($command, ['partner', 'outbox', 'board', 'scope', 'channel'], true) ? trim($command . ' ' . (string) ($args[1] ?? '')) : (string) $command;
+    $used = in_array($command, ['partner', 'outbox', 'board', 'scope', 'channel', 'transport'], true) ? trim($command . ' ' . (string) ($args[1] ?? '')) : (string) $command;
     if (!isset($commands[$used])) {
         fail('Expected one of: ' . implode(', ', array_keys($commands)) . '. Run aamio help for usage.', 2);
     }
@@ -467,6 +475,17 @@ if ($command !== 'addon') {
             break;
         case 'scope add':
             $asUsage(static fn () => Runtime::checkScopeAdd($given[0], $opts['key'] ?? null, $opts['address'] ?? null));
+            break;
+        case 'transport profile':
+            if (!in_array($given[0], ['add', 'remove'], true)) {
+                fail('transport profile add NAME [--readable] [--lifetime N] [--window N] [--max-content N], or transport profile remove NAME.', 2);
+            }
+            if ($given[0] === 'remove' && array_intersect(array_keys($opts), ['readable', 'lifetime', 'window', 'max-content']) !== []) {
+                fail('transport profile remove takes the name and nothing else.', 2);
+            }
+            $whole('lifetime', 11, 86400);
+            $whole('window', 10, 600);
+            $whole('max-content', 0, 65431);
             break;
     }
 }
@@ -726,6 +745,21 @@ try {
             break;
         case 'addon':
             exit(Addons::byName((string) $args[1])->command(array_slice($args, 2), $opts, $runtime));
+        case 'transport':
+            $action = (string) ($args[1] ?? '');
+            if ($action === 'list') {
+                out(Transports::listing($runtime));
+            } elseif ($action === 'profile' && ($args[2] ?? '') === 'add') {
+                out(Transports::profileAdd($runtime, (string) $args[3], isset($opts['readable']), isset($opts['lifetime']) ? (int) $opts['lifetime'] : null,
+                    isset($opts['window']) ? (int) $opts['window'] : null, isset($opts['max-content']) ? (int) $opts['max-content'] : null));
+            } elseif ($action === 'profile') {
+                out(Transports::profileRemove($runtime, (string) $args[3]));
+            } elseif ($action === 'bind') {
+                out(Transports::bind($runtime, (string) $args[2], (string) $args[3], isset($opts['profile']) ? (string) $opts['profile'] : null));
+            } else {
+                out(Transports::unbind($runtime, (string) $args[2], isset($args[3]) ? (string) $args[3] : null));
+            }
+            break;
         case 'serve':
             (new McpServer($runtime))->serve();
             break;

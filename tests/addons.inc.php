@@ -775,16 +775,16 @@ if (!class_exists(InstalledVersions::class, false)) {
 
     // A contract this aamio does not know is said, and can be taken out.
     Addons::disable('demo2');
-    $three = $pkg('demo3', 'acme/demo3', 'demo3', $manifestFor('demo3', 3));
+    $three = $pkg('demo3', 'acme/demo3', 'demo3', $manifestFor('demo3', 4));
     Addons::useInstalled([$three]);
     Addons::reset();
     $row = Addons::describe()['addons'][0];
-    $check($row['enabled'] === false && str_contains($row['error'] ?? '', 'contract 3') && str_contains($row['error'] ?? '', 'knows 1 and 2') && !isset($row['contract']), 'a manifest for a contract this aamio does not know is the row\'s error');
+    $check($row['enabled'] === false && str_contains($row['error'] ?? '', 'contract 4') && str_contains($row['error'] ?? '', 'knows 1, 2 and 3') && !isset($row['contract']), 'a manifest for a contract this aamio does not know is the row\'s error');
     $threw = $refused(static fn () => Addons::enable('demo3'));
-    $check($threw !== null && str_contains($threw, 'contract 3') && $ran('demo3') === '' && $enabledFile() === ['enabled' => []], 'enable refuses it, and nothing ran');
+    $check($threw !== null && str_contains($threw, 'contract 4') && $ran('demo3') === '' && $enabledFile() === ['enabled' => []], 'enable refuses it, and nothing ran');
     file_put_contents($home . '/addons.json', json_encode(['enabled' => ['acme/demo3']]));
     Addons::reset();
-    $check(str_contains(Addons::describe()['error'] ?? '', 'contract 3'), 'enabled by an older aamio, say: the list says what is wrong');
+    $check(str_contains(Addons::describe()['error'] ?? '', 'contract 4'), 'enabled by an older aamio, say: the list says what is wrong');
     Addons::disable('demo3');
     $check($enabledFile() === ['enabled' => []] && $ran('demo3') === '', 'and disable works, running nothing');
 
