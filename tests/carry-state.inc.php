@@ -137,6 +137,220 @@ try {
     } finally {
         CarryState::$maxRecords = $saved;
     }
+
+    echo "carry: the review of 2026-11-15\n";
+    $keysA = Keys::fromSeedHex($carryParties['A']['seed']);
+    $keysB = Keys::fromSeedHex($carryParties['B']['seed']);
+    $pkA = $keysA->publicRaw();
+    $pkB = $keysB->publicRaw();
+    $T = 1794700000;
+    $challenged = CarryState::profile('readable');
+    $review = $stateRoot . DIRECTORY_SEPARATOR . 'review';
+    $throws = static function (callable $attempt, string $class): bool {
+        try {
+            $attempt();
+        } catch (\Throwable $thrown) {
+            return $thrown instanceof $class;
+        }
+
+        return false;
+    };
+    $opened = static function (CarryState $atA, CarryState $atB, array $profile, float $mono = 0.0) use ($pkA, $pkB, $T): string {
+        [$session, $ask] = $atA->ask($pkB, $profile, $mono);
+        [, $challenge] = $atB->deliver($ask, [$pkA], $profile, $mono, $T);
+        [, $opening] = $atA->deliver($challenge, [$pkB], $profile, $mono, $T);
+        $atB->deliver($opening, [$pkA], $profile, $mono, $T);
+
+        return $session;
+    };
+
+    // Finding 1: kept with its content until the program says it has it; a crash before offers it again.
+    $path = $review . DIRECTORY_SEPARATOR . 'kept' . DIRECTORY_SEPARATOR . 'b.json';
+    $sender = new CarryState($keysA);
+    $session = $sender->oneWay($pkB, $T + 300);
+    $envelope = $sender->send($pkB, $session, 'hei', $oneWay);
+    $first = (new CarryState($keysB, $path))->deliver($envelope, [$pkA], $oneWay, 0, $T)[0];
+    $key = CarryState::mark($pkA, $session, 1);
+    $again = new CarryState($keysB, $path);
+    $offered = $again->pending();
+    $again->handedOver($key);
+    $after = new CarryState($keysB, $path);
+    [$result, $receipt] = $after->deliver($envelope, [$pkA], $oneWay, 0, $T);
+    $check($first === 'accepted' && $offered === [[$key, $pkA, $session, 1, 'hei']] && $after->pending() === [] && $result === 'duplicate' && $receipt !== null,
+        'a message is kept with its content until the program says it has it, and only its mark after that');
+
+    // Finding 1, the sender: the same bytes and the tries left after a restart; used up is unknown, a late receipt confirms.
+    $path = $review . DIRECTORY_SEPARATOR . 'sent' . DIRECTORY_SEPARATOR . 'a.json';
+    $atA = new CarryState($keysA, $path);
+    $session = $atA->oneWay($pkB, $T + 300);
+    $envelope = $atA->send($pkB, $session, 'hei', $oneWay, 0, null, 3);
+    $key = CarryState::mark($pkB, $session, 1);
+    $again = new CarryState($keysA, $path);
+    $resumed = $again->unconfirmed() === [[$key, $pkB, $session, 1, $envelope]] && $again->outcome($key) === 'waiting';
+    $twice = $again->tried($key) && $again->tried($key);
+    $kept = (new CarryState($keysA, $path))->durable['outbox'][$key]['tries'] === 3;
+    $spent = !$again->tried($key) && $again->outcome($key) === 'unknown' && $again->unconfirmed() === [];
+    [, $receipt] = (new CarryState($keysB))->deliver($envelope, [$pkA], $oneWay, 0, $T);
+    $late = $again->deliver($receipt, [$pkB], $oneWay, 0, $T)[0] === 'accepted' && (new CarryState($keysA, $path))->outcome($key) === 'confirmed';
+    $check($resumed && $twice && $kept && $spent && $late, 'a message sent keeps its bytes and tries until its receipt, and a receipt that comes late still confirms it');
+
+    // Finding 2: a failed write never turns into a duplicate with a receipt for what was never kept.
+    $inTheWay = $review . DIRECTORY_SEPARATOR . 'in-the-way';
+    @mkdir($review, 0700, true);
+    $broken = new CarryState($keysB, $inTheWay . DIRECTORY_SEPARATOR . 'carry.json');
+    file_put_contents($inTheWay, 'not a folder');
+    $envelope = Carry::write($keysA, $pkB, Carry::READABLE, Carry::MESSAGE, 0, str_repeat("\0", 8), 1, $T + 300, 'hei');
+    $codes = [];
+    for ($i = 0; $i < 2; $i++) {
+        $codes[] = $carryCode(static fn () => $broken->deliver($envelope, [$pkA], $oneWay, 0, $T));
+    }
+    $codes[] = $carryCode(static fn () => $broken->prune($T));
+    $check($codes === ['carry_storage_failed', 'carry_storage_failed', 'carry_storage_failed'], 'after a write fails nothing is answered until the state is read again');
+
+    // Finding 3: a higher floor is kept before the answer, also a refusal, and also for bytes that are no envelope.
+    $path = $review . DIRECTORY_SEPARATOR . 'floor' . DIRECTORY_SEPARATOR . 'b.json';
+    (new CarryState($keysB, $path))->prune($T);
+    $sender = new CarryState($keysA);
+    $session = $sender->oneWay($pkB, $T + 300);
+    $envelope = $sender->send($pkB, $session, 'sent', $oneWay);
+    $deadlinePassed = $carryCode(static fn () => (new CarryState($keysB, $path))->deliver($envelope, [$pkA], $oneWay, 0, $T + 421)) === 'carry_deadline_passed';
+    $again = new CarryState($keysB, $path);
+    $kept = $again->durable['floor'] === $T + 421 && $carryCode(static fn () => $again->deliver($envelope, [$pkA], $oneWay, 0, $T)) === 'carry_deadline_passed';
+    $jump = $carryCode(static fn () => $again->deliver('XXXX' . str_repeat("\0", 200), [$pkA], $oneWay, 0, $T + 900)) === 'carry_bad_magic'
+        && (new CarryState($keysB, $path))->durable['floor'] === $T + 900;
+    $check($deadlinePassed && $kept && $jump, 'the time floor is kept also when what came is refused');
+
+    // Finding 7: 60 messages a minute from one partner, copies too, and 256 KiB; ten asks a minute.
+    $atB = new CarryState($keysB);
+    $sender = new CarryState($keysA);
+    $session = $sender->oneWay($pkB, $T + 3000);
+    $firstMessage = $sender->send($pkB, $session, '0', $oneWay);
+    $results = [$atB->deliver($firstMessage, [$pkA], $oneWay, 0.0, $T)[0]];
+    for ($i = 0; $i < 59; $i++) {
+        $results[] = $atB->deliver($firstMessage, [$pkA], $oneWay, 0.5, $T)[0];
+    }
+    $copyLimited = $carryCode(static fn () => $atB->deliver($firstMessage, [$pkA], $oneWay, 0.5, $T)) === 'carry_rate_limited';
+    $second = $sender->send($pkB, $session, '1', $oneWay);
+    $newLimited = $carryCode(static fn () => $atB->deliver($second, [$pkA], $oneWay, 59.9, $T)) === 'carry_rate_limited';
+    $later = $atB->deliver($second, [$pkA], $oneWay, 60.0, $T)[0] === 'accepted';
+    $check($results === array_merge(['accepted'], array_fill(0, 59, 'duplicate')) && $copyLimited && $newLimited && $later,
+        'sixty messages a minute from one partner, copies too, then carry_rate_limited');
+    $atB = new CarryState($keysB);
+    $session = $sender->oneWay($pkB, $T + 3000);
+    $big = [];
+    for ($n = 0; $n < 5; $n++) {
+        $big[] = $sender->send($pkB, $session, str_repeat(chr($n), 60000), $oneWay);
+    }
+    $fits = true;
+    for ($n = 0; $n < 4; $n++) {
+        $fits = $fits && $atB->deliver($big[$n], [$pkA], $oneWay, 1.0, $T)[0] === 'accepted';
+    }
+    $check($fits && $carryCode(static fn () => $atB->deliver($big[4], [$pkA], $oneWay, 2.0, $T)) === 'carry_rate_limited', '256 KiB a minute from one partner');
+    $atA = new CarryState($keysA);
+    $atB = new CarryState($keysB);
+    for ($n = 0; $n < 10; $n++) {
+        $opened($atA, $atB, $challenged, (float) $n);
+    }
+    [, $ask] = $atA->ask($pkB, $challenged, 10.0);
+    $limited = $carryCode(static fn () => $atB->deliver($ask, [$pkA], $challenged, 10.0, $T)) === 'carry_rate_limited';
+    [, $ask] = $atA->ask($pkB, $challenged, 61.0);
+    $check($limited && $atB->deliver($ask, [$pkA], $challenged, 61.0, $T)[0] === 'accepted', 'ten asks a minute from one partner');
+
+    // Finding 8: only challenges that wait inside their window count; spent ones keep their code while remembered.
+    $atA = new CarryState($keysA);
+    $atB = new CarryState($keysB);
+    $spread = true;
+    for ($n = 0; $n < 9; $n++) {
+        [, $ask] = $atA->ask($pkB, $challenged, 100.0 * $n);
+        $spread = $spread && $atB->deliver($ask, [$pkA], $challenged, 100.0 * $n, $T)[0] === 'accepted';
+    }
+    for ($n = 0; $n < 8; $n++) {
+        [, $ask] = $atA->ask($pkB, $challenged, 1000.0);
+        $atB->deliver($ask, [$pkA], $challenged, 1000.0, $T);
+    }
+    [, $ask] = $atA->ask($pkB, $challenged, 1000.0);
+    $check($spread && $carryCode(static fn () => $atB->deliver($ask, [$pkA], $challenged, 1000.0, $T)) === 'carry_rate_limited',
+        'challenges used or past their window do not fill the limit, and eight that wait do');
+    $atA = new CarryState($keysA);
+    $atB = new CarryState($keysB);
+    [$session, $ask] = $atA->ask($pkB, $challenged, 0.0);
+    [, $challenge] = $atB->deliver($ask, [$pkA], $challenged, 0.0, $T);
+    [, $opening] = $atA->deliver($challenge, [$pkB], $challenged, 0.0, $T);
+    $codes = [$carryCode(static fn () => $atB->deliver($opening, [$pkA], $challenged, 61.0, $T))];
+    for ($n = 1; $n <= CarryState::SPENT_KEPT_PER_PARTNER; $n++) {
+        [, $ask] = $atA->ask($pkB, $challenged, 61.0 * $n);
+        $atB->deliver($ask, [$pkA], $challenged, 61.0 * $n, $T);
+    }
+    $codes[] = $carryCode(static fn () => $atB->deliver($opening, [$pkA], $challenged, 61.0 * 65, $T));
+    [, $ask] = $atA->ask($pkB, $challenged, 61.0 * 66);
+    $atB->deliver($ask, [$pkA], $challenged, 61.0 * 66, $T);
+    $codes[] = $carryCode(static fn () => $atB->deliver($opening, [$pkA], $challenged, 61.0 * 66, $T));
+    $check($codes === ['carry_nonce_expired', 'carry_nonce_expired', 'carry_nonce_unknown'],
+        'a spent challenge has its own code while it is remembered, and is unknown after: refused either way');
+
+    // Finding 10: the count of challenges stops at 2^53 - 1, never rounded or wrapped.
+    $path = $review . DIRECTORY_SEPARATOR . 'count' . DIRECTORY_SEPARATOR . 'b.json';
+    @mkdir(dirname($path), 0700, true);
+    file_put_contents($path, str_replace('"challenges":0', '"challenges":' . (CarryState::SAFE - 1), $empty));
+    $atA = new CarryState($keysA);
+    $atB = new CarryState($keysB, $path);
+    [, $ask] = $atA->ask($pkB, $challenged, 0.0);
+    $last = $atB->deliver($ask, [$pkA], $challenged, 0.0, $T)[0] === 'accepted' && json_decode((string) file_get_contents($path), true)['challenges'] === CarryState::SAFE;
+    [, $ask] = $atA->ask($pkB, $challenged, 1.0);
+    $check($last && $carryCode(static fn () => $atB->deliver($ask, [$pkA], $challenged, 1.0, $T)) === 'carry_storage_full'
+        && (new CarryState($keysB, $path))->durable['challenges'] === CarryState::SAFE, 'the count of challenges stops at 2^53 - 1');
+
+    // Finding 11: numbers outside their four bytes are refused, never cut down by pack.
+    $outside = [[2 ** 32, 0], [-1, 0], [1, 2 ** 32], [1, -1]];
+    $allRefused = true;
+    foreach ($outside as [$counter, $deadline]) {
+        $allRefused = $allRefused && $throws(static fn () => Carry::write($keysA, $pkB, Carry::READABLE, Carry::MESSAGE, 0, str_repeat("\0", 8), $counter, $deadline, 'x'), \ValueError::class);
+    }
+    $atA = new CarryState($keysA);
+    $session = $opened($atA, new CarryState($keysB), $challenged);
+    $unchanged = $throws(static fn () => $atA->send($pkB, $session, 'x', $challenged, 2 ** 32), \ValueError::class)
+        && $atA->counterOf($pkB, $session) === 0 && $atA->durable['outbox'] === [];
+    $check($allRefused && $unchanged, 'numbers outside their four bytes are refused, and a deadline outside them changes nothing in the state');
+
+    // Finding 12: the first message without a challenge needs room for its session, its used id and its mark.
+    $sender = new CarryState($keysA);
+    $session = $sender->oneWay($pkB, $T + 300);
+    $envelope = $sender->send($pkB, $session, 'hei', $oneWay);
+    $saved = CarryState::$maxRecords;
+    try {
+        CarryState::$maxRecords = 2;
+        $atB = new CarryState($keysB);
+        $tooFull = $carryCode(static fn () => $atB->deliver($envelope, [$pkA], $oneWay, 0, $T)) === 'carry_storage_full' && $atB->durable['incoming'] === [];
+        CarryState::$maxRecords = 3;
+        $check($tooFull && $atB->deliver($envelope, [$pkA], $oneWay, 0, $T)[0] === 'accepted', 'the first message without a challenge needs room for its three records');
+    } finally {
+        CarryState::$maxRecords = $saved;
+    }
+
+    // Finding 13: a profile changed later can shorten the lifetime of a session, never lengthen it.
+    $short = CarryState::profile('readable', true, false, 600);
+    $long = CarryState::profile('readable', true, false, 86400);
+    $atA = new CarryState($keysA);
+    $atB = new CarryState($keysB);
+    $session = $opened($atA, $atB, $short, 0.0);
+    $envelope = $atA->send($pkB, $session, 'x', $short);
+    $notLonger = $carryCode(static fn () => $atB->deliver($envelope, [$pkA], $long, 601.0, $T)) === 'carry_session_expired';
+    $session = $opened($atA, $atB, $long, 1000.0);
+    $envelope = $atA->send($pkB, $session, 'y', $long);
+    $shorter = $carryCode(static fn () => $atB->deliver($envelope, [$pkA], $short, 1601.0, $T)) === 'carry_session_expired';
+    $check($notLonger && $shorter && $atB->deliver($envelope, [$pkA], $long, 1601.0, $T)[0] === 'accepted', 'a session keeps the lifetime it was opened with');
+
+    // A sealed receipt for the same message has the same bytes every time, so the frames of several copies add up.
+    $sealedOneWay = CarryState::profile('sealed', false, true);
+    $sender = new CarryState($keysA);
+    $atB = new CarryState($keysB);
+    $session = $sender->oneWay($pkB, $T + 300);
+    $first = $sender->send($pkB, $session, 'en', $sealedOneWay);
+    $second = $sender->send($pkB, $session, 'to', $sealedOneWay);
+    $receiptOne = $atB->deliver($first, [$pkA], $sealedOneWay, 0.0, $T)[1];
+    $receiptTwo = $atB->deliver($first, [$pkA], $sealedOneWay, 1.0, $T)[1];
+    $check($receiptOne === $receiptTwo && $atB->deliver($second, [$pkA], $sealedOneWay, 2.0, $T)[1] !== $receiptOne,
+        'a sealed receipt for the same message has the same bytes every time, and another message gets another');
 } finally {
     $removeTree($stateRoot);
 }

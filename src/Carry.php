@@ -136,6 +136,12 @@ final class Carry
         if (strlen($session) !== 8) {
             throw new \InvalidArgumentException('a session is 8 bytes');
         }
+        foreach (['counter' => $counter, 'deadline' => $deadline] as $name => $value) {
+            // A number outside its four bytes is refused, never cut down by pack to one that fits and means something else.
+            if ($value < 0 || $value > 0xFFFFFFFF) {
+                throw new \ValueError($name . ' is a whole number from 0 to 2^32 - 1, not ' . $value);
+            }
+        }
         $fields = $session . pack('N', $counter) . pack('N', $deadline) . pack('n', strlen($content)) . $content;
         $me = $keys->publicRaw();
         $prefix = self::DOMAIN . $me . $recipientPk . self::bind($binding);
