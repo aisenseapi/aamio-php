@@ -16,7 +16,16 @@ namespace Aamio;
  * The first answer for a frame decides its status, also after its deadline
  * (B3.2). A transport is hung when three frames in a row reach their deadline
  * unanswered, or when frames wait 60 seconds for room no ready gave; what else
- * it says does not count as progress.
+ * it says does not count as progress. A transport that says down gets no frames
+ * until it says up and a new ready gives room, and one that has said down for
+ * 60 seconds is stopped to be started again.
+ *
+ * Writing never blocks: lines wait in order and go as far as the transport takes
+ * them, a whole line at a time, so a transport that stops reading never holds up
+ * the owner, its deadlines or its stop, and a cancel or a stop never lands inside
+ * another line. A frame's deadline runs from when it is given. A send line not yet
+ * begun when its deadline comes is withdrawn and not sent, and the room it held
+ * comes back; one begun or written is unknown.
  */
 final class TransportProcess
 {
@@ -25,6 +34,8 @@ final class TransportProcess
     public const STOP_SECONDS = 5;
     public const HANG_TIMEOUTS = 3;
     public const HANG_ROOM_SECONDS = 60;
+    public const WRITE_QUEUE = 1024;
+    public const WRITE_PIECE = 8192;
 
     /** @var resource|null */
     private $process = null;
@@ -38,7 +49,13 @@ final class TransportProcess
     public array $frames = [];
     private int $counter = 0;
     private int $timeoutsInARow = 0;
-    private ?float $waitingForRoomSince = null;
+    public ?float $waitingForRoomSince = null;
+    /** when the transport said down, while it has not said up again */
+    private ?float $downSince = null;
+    /** down was said: no room until a ready that comes after up */
+    private bool $afterDown = false;
+    /** @var list<array{data: string, offset: int, frame: ?string}> lines on their way, in order */
+    private array $out = [];
     public ?TransportFailed $failed = null;
     /** @var callable(): float */
     private $clock;
@@ -120,6 +137,7 @@ final class TransportProcess
         }
         $this->process = $process;
         $this->pipes = $pipes;
+        stream_set_blocking($this->pipes[0], false);
         stream_set_blocking($this->pipes[1], false);
         stream_set_blocking($this->pipes[2], false);
         $this->write(['t' => 'hello', 'aamio_addon' => 3, 'aamio' => ['version' => $aamioVersion, 'runtime' => $runtime], 'state_dir' => $stateDir]);
@@ -134,15 +152,63 @@ final class TransportProcess
         return $this->properties;
     }
 
-    private function write(array $message): void
+    /** A line on its way: it goes as far as the transport takes it now, and the rest in poll. */
+    private function write(array $message, ?string $frame = null): void
     {
         if ($this->failed !== null) {
             throw $this->failed;
         }
-        $line = json_encode($message, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-        if (@fwrite($this->pipes[0], $line) !== strlen($line)) {
-            $this->fail(new TransportFailed('transport_down', 'the process does not take what is written to it'));
+        if (count($this->out) >= self::WRITE_QUEUE) {
+            $this->fail(new TransportFailed('transport_hung', 'the transport has not read the last ' . self::WRITE_QUEUE . ' lines it was given'));
         }
+        $this->out[] = ['data' => json_encode($message, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", 'offset' => 0, 'frame' => $frame];
+        $this->flushOut();
+    }
+
+    /**
+     * What the transport takes now, never waiting for it: a line begun is finished before the next one. The socket is
+     * set not to block, but that does not hold everywhere (WSL1 lets such a write wait for the reader), so each piece is
+     * written only when stream_select says there is room for it, and pieces are small enough to fit that room.
+     */
+    private function flushOut(): void
+    {
+        while ($this->out !== [] && $this->process !== null) {
+            $read = null;
+            $write = [$this->pipes[0]];
+            $except = null;
+            if (@stream_select($read, $write, $except, 0, 0) < 1) {
+                return;
+            }
+            $line = $this->out[0];
+            $taken = @fwrite($this->pipes[0], substr($line['data'], $line['offset'], self::WRITE_PIECE));
+            if ($taken === false) {
+                $this->out = [];
+                $this->fail(new TransportFailed('transport_down', 'the process does not take what is written to it'));
+            }
+            if ($taken === 0) {
+                return;
+            }
+            $this->out[0]['offset'] += $taken;
+            if ($this->out[0]['offset'] < strlen($line['data'])) {
+                return;
+            }
+            array_shift($this->out);
+            if ($line['frame'] !== null && isset($this->frames[$line['frame']])) {
+                $this->frames[$line['frame']]['written'] = true;
+            }
+        }
+    }
+
+    /** Where the send line of a frame waits, not yet begun, or null when it is begun or gone. */
+    private function unstarted(string $id): ?int
+    {
+        foreach ($this->out as $at => $line) {
+            if ($line['frame'] === $id) {
+                return $line['offset'] === 0 ? $at : null;
+            }
+        }
+
+        return null;
     }
 
     private function fail(TransportFailed $failure): never
@@ -165,9 +231,25 @@ final class TransportProcess
         if ($this->process === null) {
             return;
         }
-        @fwrite($this->pipes[0], "{\"t\":\"stop\"}\n");
+        // Lines not yet begun are withdrawn rather than waited for, and the stop line goes next.
+        $kept = [];
+        foreach ($this->out as $line) {
+            if ($line['offset'] > 0) {
+                $kept[] = $line;
+            } elseif ($line['frame'] !== null && ($this->frames[$line['frame']]['status'] ?? null) === 'waiting') {
+                $this->frames[$line['frame']]['status'] = 'not_sent';
+                $this->frames[$line['frame']]['reason'] = 'stopped before it was written';
+            }
+        }
+        $this->out = $kept;
+        $this->out[] = ['data' => "{\"t\":\"stop\"}\n", 'offset' => 0, 'frame' => null];
         $until = hrtime(true) / 1e9 + self::STOP_SECONDS;
         while ((proc_get_status($this->process)['running'] ?? false) && hrtime(true) / 1e9 < $until) {
+            try {
+                $this->flushOut();
+            } catch (TransportFailed) {
+                $this->out = [];
+            }
             usleep(50000);
         }
         if (proc_get_status($this->process)['running'] ?? false) {
@@ -184,7 +266,20 @@ final class TransportProcess
 
     public function room(): int
     {
-        return $this->credit - ($this->written - $this->sendsRead);
+        $free = $this->credit - ($this->written - $this->sendsRead);
+
+        // After a down, the room it had is not trusted: only a ready that comes after up gives room again.
+        return $this->afterDown ? min($free, 0) : $free;
+    }
+
+    /** The owner has frames that wait for room, or has none: B3.2 counts the sixty seconds from the first moment. */
+    public function waitingForRoom(bool $waiting): void
+    {
+        if (!$waiting) {
+            $this->waitingForRoomSince = null;
+        } elseif ($this->room() <= 0) {
+            $this->waitingForRoomSince ??= ($this->clock)();
+        }
     }
 
     /** Give the transport a frame if there is room: its id, or null when there is no room now. */
@@ -197,9 +292,10 @@ final class TransportProcess
         }
         $this->counter++;
         $id = 'f-' . $this->counter;
-        $this->write(['t' => 'send', 'id' => $id, 'to' => $to, 'frame' => Codec::b64url($frame), 'deadline_ms' => $deadlineMs]);
+        // The frame and its deadline are known before the line goes, so the deadline holds whatever the writing does.
+        $this->frames[$id] = ['status' => 'waiting', 'deadline' => ($this->clock)() + $deadlineMs / 1000, 'late' => false, 'answered' => false, 'written' => false];
         $this->written++;
-        $this->frames[$id] = ['status' => 'waiting', 'deadline' => ($this->clock)() + $deadlineMs / 1000, 'late' => false, 'answered' => false];
+        $this->write(['t' => 'send', 'id' => $id, 'to' => $to, 'frame' => Codec::b64url($frame), 'deadline_ms' => $deadlineMs], $id);
 
         return $id;
     }
@@ -215,8 +311,17 @@ final class TransportProcess
         $now = ($this->clock)();
         foreach ($this->frames as $id => $entry) {
             if ($entry['status'] === 'waiting' && $now > $entry['deadline']) {
-                $this->frames[$id]['status'] = 'unknown';
                 $this->timeoutsInARow++;
+                $at = $this->unstarted((string) $id);
+                if ($at !== null) {
+                    // It never reached the transport: not sent, and the room it held comes back (B3.1).
+                    array_splice($this->out, $at, 1);
+                    $this->frames[$id]['status'] = 'not_sent';
+                    $this->frames[$id]['reason'] = 'never written before its deadline';
+                    $this->written--;
+                    continue;
+                }
+                $this->frames[$id]['status'] = 'unknown';
                 try {
                     $this->write(['t' => 'cancel', 'id' => $id]);
                 } catch (TransportFailed) {
@@ -228,6 +333,10 @@ final class TransportProcess
         }
         if ($this->waitingForRoomSince !== null && $now - $this->waitingForRoomSince >= self::HANG_ROOM_SECONDS) {
             $this->fail(new TransportFailed('transport_hung', 'frames waited 60 seconds for room no ready gave'));
+        }
+        if ($this->downSince !== null && $now - $this->downSince >= self::HANG_ROOM_SECONDS) {
+            // Also with nothing to send: a transport that cannot hear is started again (B2), not waited on for good.
+            $this->fail(new TransportFailed('transport_down', 'the transport has said down for 60 seconds'));
         }
     }
 
@@ -242,8 +351,9 @@ final class TransportProcess
         $lines = $this->injected;
         $this->injected = [];
         if ($this->process !== null) {
+            $this->flushOut();
             $read = [$this->pipes[1], $this->pipes[2]];
-            $write = null;
+            $write = $this->out !== [] ? [$this->pipes[0]] : null;
             $except = null;
             $seconds = (int) floor($timeout);
             if (@stream_select($read, $write, $except, $seconds, (int) (($timeout - $seconds) * 1e6)) > 0) {
@@ -269,6 +379,7 @@ final class TransportProcess
             if (strlen($this->buffer) > self::LINE_LIMIT) {
                 $this->fail(new TransportFailed('transport_protocol', 'a line longer than 262144 bytes'));
             }
+            $this->flushOut();
         }
         foreach ($lines as $line) {
             foreach ($this->take($line) as $event) {
@@ -320,6 +431,9 @@ final class TransportProcess
                 $before = $this->room();
                 $this->credit = $credit;
                 $this->sendsRead = $sendsRead;
+                if ($this->downSince === null) {
+                    $this->afterDown = false;
+                }
                 if ($this->room() > max($before, 0)) {
                     $this->waitingForRoomSince = null;
                 }
@@ -348,7 +462,16 @@ final class TransportProcess
 
                 return [['received', $source, $frame]];
             case 'status':
-                return [['status', $message['state'] ?? null, $message['reason'] ?? null]];
+                $state = $message['state'] ?? null;
+                if ($state === 'down') {
+                    // Room is gone until up and a new ready; the sixty seconds run also with nothing to send.
+                    $this->afterDown = true;
+                    $this->downSince ??= ($this->clock)();
+                } elseif ($state === 'up') {
+                    $this->downSince = null;
+                }
+
+                return [['status', $state, $message['reason'] ?? null]];
         }
         $this->fail(new TransportFailed('transport_protocol', 'an unknown line ' . $message['t']));
     }

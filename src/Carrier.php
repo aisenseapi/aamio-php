@@ -12,33 +12,40 @@ namespace Aamio;
  * is put together from its frames and given to the state, which decides; what
  * the state answers goes back to the address it came from.
  *
- * A message is sent again with the same bytes until its receipt comes; it is
- * never sealed again or moved to another session, so a copy is known as one.
- * It is confirmed only when its receipt comes: when the tries run out without
- * one, its outcome is unknown, since it may still have arrived, and it is never
- * reported as confirmed. The challenge and the open are sent again with the same bytes through the
+ * A message is known by its mark (partner, session and counter), which outlives
+ * the process. It is sent again with the same bytes until its receipt comes; it
+ * is never sealed again or moved to another session, so a copy is known as one.
+ * The bytes and the tries are kept in the state, so a carrier on the same home
+ * after a restart goes on with the same bytes and the tries that are left. It is
+ * confirmed only when its receipt comes: when the tries run out without one, its
+ * outcome is unknown, since it may still have arrived, and it is never reported
+ * as confirmed.
+ *
+ * What came in is the state's until the program says it has it: inbox() is what
+ * the state keeps that the program has not taken, read as often as needed, and
+ * take(mark) says the program has it. A crash before take offers it again.
+ *
+ * The challenge and the open are sent again with the same bytes through the
  * challenge window, since on a medium that loses frames one try is not enough;
  * an ask no challenge answers is asked again with a new session.
  */
 final class Carrier
 {
     public const UNVERIFIED_PER_SECOND = 20;
-    public const OUTCOMES_KEPT = 10000;
 
     private CarryReassembly $reassembly;
     private int $frameLimit;
     private array $queue = [];
-    public array $waiting = [];
+    /** @var array<string, array{envelope: string, pk: string, session: string, next: float}> mark => sent, its receipt not come */
+    public array $messages = [];
+    /** @var array<string, array> challenges and opens sent again through the window */
+    private array $control = [];
     private array $asks = [];
     /** @var array<string, array{0: string, 1: string}> pair => [partner pk, session] */
     public array $answered = [];
     private array $addresses = [];
-    /** @var list<array{0: string, 1: string, 2: int, 3: string}> */
-    public array $inbox = [];
     /** @var list<string> */
     public array $refused = [];
-    /** @var array<string, string> envelope id => confirmed or unknown, the newest OUTCOMES_KEPT */
-    public array $outcomes = [];
     private float $budget = self::UNVERIFIED_PER_SECOND;
     private float $budgetAt;
     private int $counter = 0;
@@ -48,13 +55,20 @@ final class Carrier
     private $wall;
 
     public function __construct(private CarryState $state, private TransportProcess $process, private array $profile, private array $known,
-        ?callable $clock = null, ?callable $wall = null, private float $retrySeconds = 2.0, private float $askRetrySeconds = 5.0, private int $tries = 30)
+        ?callable $clock = null, ?callable $wall = null, private float $retrySeconds = 2.0, private float $askRetrySeconds = 5.0, private int $tries = CarryState::TRIES_DEFAULT)
     {
         $this->clock = $clock ?? static fn (): float => hrtime(true) / 1e9;
         $this->wall = $wall ?? static fn (): int => time();
         $this->reassembly = new CarryReassembly($this->clock);
         $this->frameLimit = $process->properties['max_frame_up'];
         $this->budgetAt = ($this->clock)();
+        $knownSet = array_fill_keys(array_map('bin2hex', $known), true);
+        foreach ($state->unconfirmed() as [$key, $pk, $session, , $envelope]) {
+            // Sent before this process started: taken up with the same bytes and the tries that are left.
+            if (isset($knownSet[bin2hex($pk)])) {
+                $this->messages[$key] = ['envelope' => $envelope, 'pk' => $pk, 'session' => $session, 'next' => ($this->clock)()];
+            }
+        }
     }
 
     private static function pair(string $pk, string $session): string
@@ -67,15 +81,12 @@ final class Carrier
         $this->queue[] = [Carry::split($envelope, $this->frameLimit), $to];
     }
 
-    private function await(string $envelope, ?string $to, string $kind, string $pk, string $session, ?int $counter = null, ?int $tries = null): string
+    private function control(string $envelope, ?string $to, string $kind, string $pk, string $session, int $most): void
     {
         $this->counter++;
-        $key = 'e-' . $this->counter;
-        $this->waiting[$key] = ['envelope' => $envelope, 'to' => $to, 'next' => ($this->clock)() + $this->retrySeconds, 'tries' => 1, 'kind' => $kind,
-            'pk' => $pk, 'session' => $session, 'counter' => $counter, 'most' => $tries ?? $this->tries];
+        $this->control['c-' . $this->counter] = ['envelope' => $envelope, 'to' => $to, 'kind' => $kind, 'pk' => $pk, 'session' => $session,
+            'next' => ($this->clock)() + $this->retrySeconds, 'tries' => 1, 'most' => $most];
         $this->queue($envelope, $to);
-
-        return $key;
     }
 
     private function windowTries(): int
@@ -106,40 +117,48 @@ final class Carrier
         return $found;
     }
 
-    /** A message in an open session, sent again with the same bytes until its receipt comes: its id. */
+    /** A message in an open session, sent again with the same bytes until its receipt comes: its mark. */
     public function send(string $partnerPk, string $session, string $content, int $deadline = 0): string
     {
-        $envelope = $this->state->send($partnerPk, $session, $content, $this->profile, $deadline);
+        $envelope = $this->state->send($partnerPk, $session, $content, $this->profile, $deadline, null, $this->tries);
+        $key = CarryState::mark($partnerPk, $session, $this->state->counterOf($partnerPk, $session));
+        $this->messages[$key] = ['envelope' => $envelope, 'pk' => $partnerPk, 'session' => $session, 'next' => ($this->clock)() + $this->retrySeconds];
+        $this->queue($envelope, $this->addresses[bin2hex($partnerPk)] ?? null);
 
-        return $this->await($envelope, $this->addresses[bin2hex($partnerPk)] ?? null, 'message', $partnerPk, $session, $this->state->counterOf($partnerPk, $session));
+        return $key;
     }
 
     /** True only when the receipt came; never for a message whose tries ran out without one. */
     public function confirmed(string $key): bool
     {
-        return ($this->outcomes[$key] ?? null) === 'confirmed';
+        return $this->state->outcome($key) === 'confirmed';
+    }
+
+    /** waiting while it is sent again, confirmed when its receipt came, and unknown when the tries ran out without one. */
+    public function outcome(string $key): string
+    {
+        return $this->state->outcome($key);
     }
 
     /**
-     * waiting while it is sent again, confirmed when its receipt came, and unknown when
-     * the tries ran out without one (it may still have arrived) or the id is no longer remembered.
+     * What came and is kept that the program has not taken: [sender pk, session, counter, content, mark], in order.
+     *
+     * @return list<array{0: string, 1: string, 2: int, 3: string, 4: string}>
      */
-    public function outcome(string $key): string
+    public function inbox(): array
     {
-        if (isset($this->waiting[$key])) {
-            return 'waiting';
+        $out = [];
+        foreach ($this->state->pending() as [$key, $pk, $session, $counter, $content]) {
+            $out[] = [$pk, $session, $counter, $content, $key];
         }
 
-        return $this->outcomes[$key] ?? 'unknown';
+        return $out;
     }
 
-    private function finish(string $key, string $outcome): void
+    /** The program has the message: the state keeps only its mark from now on. */
+    public function take(string $key): void
     {
-        unset($this->waiting[$key]);
-        $this->outcomes[$key] = $outcome;
-        while (count($this->outcomes) > self::OUTCOMES_KEPT) {
-            unset($this->outcomes[array_key_first($this->outcomes)]);
-        }
+        $this->state->handedOver($key);
     }
 
     /** Read what the transport said, deliver what is whole, resend what waits, and give frames within the room. */
@@ -191,8 +210,10 @@ final class Carrier
         switch ($got['kind']) {
             case Carry::CHALLENGE:
                 unset($this->asks[$pair]);
-                $this->answered[$pair] = [$got['sender'], $got['session']];
-                $this->await($reply, $source, 'open', $got['sender'], $got['session'], null, $this->windowTries());
+                $this->answered[$pair] ??= [$got['sender'], $got['session']];
+                // The open is sent again with the same bytes through the challenge window, until the first receipt in the
+                // session shows it came: on a medium that loses frames, one try is not enough.
+                $this->control($reply, $source, 'open', $got['sender'], $got['session'], $this->windowTries());
 
                 return;
             case Carry::OPEN:
@@ -200,21 +221,14 @@ final class Carrier
 
                 return;
             case Carry::ASK:
-                $this->await($reply, $source, 'challenge', $got['sender'], $got['session'], null, $this->windowTries());
+                $this->control($reply, $source, 'challenge', $got['sender'], $got['session'], $this->windowTries());
 
                 return;
             case Carry::RECEIPT:
-                $counter = unpack('N', substr($got['content'], 9, 4))[1];
-                foreach ($this->waiting as $key => $entry) {
-                    if (self::pair($entry['pk'], $entry['session']) === $pair && ($entry['kind'] === 'open' || $entry['counter'] === $counter)) {
-                        $this->finish($key, 'confirmed');
-                    }
-                }
+                unset($this->messages[CarryState::mark($got['sender'], substr($got['content'], 1, 8), unpack('N', substr($got['content'], 9, 4))[1])]);
+                $this->settled($pair, 'open');
 
                 return;
-        }
-        if ($got['kind'] === Carry::MESSAGE && $result === 'accepted') {
-            $this->inbox[] = [$got['sender'], $got['session'], $got['counter'], $got['content']];
         }
         if ($reply !== null) {
             $this->queue($reply, $source);
@@ -223,9 +237,9 @@ final class Carrier
 
     private function settled(string $pair, string $kind): void
     {
-        foreach ($this->waiting as $key => $entry) {
+        foreach ($this->control as $key => $entry) {
             if (self::pair($entry['pk'], $entry['session']) === $pair && $entry['kind'] === $kind) {
-                $this->finish($key, 'confirmed');
+                unset($this->control[$key]);
             }
         }
     }
@@ -233,17 +247,28 @@ final class Carrier
     private function resend(): void
     {
         $now = ($this->clock)();
-        foreach ($this->waiting as $key => $entry) {
+        foreach ($this->messages as $key => $entry) {
+            if ($now < $entry['next']) {
+                continue;
+            }
+            // The try is counted in the state before it goes, so a restart never gives back tries that were used.
+            if (!$this->state->tried((string) $key)) {
+                unset($this->messages[$key]);
+                continue;
+            }
+            $this->messages[$key]['next'] = $now + $this->retrySeconds;
+            $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? null);
+        }
+        foreach ($this->control as $key => $entry) {
             if ($now < $entry['next']) {
                 continue;
             }
             if ($entry['tries'] >= $entry['most']) {
-                // The outcome stays unknown; nothing is wrapped again or sent as a new message on its own.
-                $this->finish($key, 'unknown');
+                unset($this->control[$key]);
                 continue;
             }
-            $this->waiting[$key]['tries']++;
-            $this->waiting[$key]['next'] = $now + $this->retrySeconds;
+            $this->control[$key]['tries']++;
+            $this->control[$key]['next'] = $now + $this->retrySeconds;
             $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? $entry['to']);
         }
         foreach ($this->asks as $pair => $entry) {
@@ -265,12 +290,13 @@ final class Carrier
             $frame = array_shift($this->queue[0][0]);
             if ($this->process->send($frame, $this->queue[0][1]) === null) {
                 array_unshift($this->queue[0][0], $frame);
-
-                return;
+                break;
             }
             if ($this->queue[0][0] === []) {
                 array_shift($this->queue);
             }
         }
+        // The host measures how long frames wait for room (B3.2), so it is told whether any do.
+        $this->process->waitingForRoom($this->queue !== []);
     }
 }

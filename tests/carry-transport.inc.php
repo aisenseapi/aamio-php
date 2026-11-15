@@ -214,9 +214,156 @@ try {
         $carrier->pump(0.05);
     }
     $check($taken === 'accepted' && $first === ['waiting', false] && $carrier->outcome($key) === 'unknown' && !$carrier->confirmed($key)
-        && $carrier->refused !== [] && $carrier->inbox === [], 'a message whose tries run out without a receipt is unknown, never confirmed');
+        && $carrier->refused !== [] && $carrier->inbox() === [], 'a message whose tries run out without a receipt is unknown, never confirmed');
 } finally {
     $loop->stop();
+}
+
+// The review of 2026-11-15, findings 1, 4, 5, 6 and 14.
+$T = 1794700000;
+$reviewProfile = CarryState::profile('readable');
+$openedPair = static function (CarryState $atA, CarryState $atB) use ($carryA, $carryB, $reviewProfile, $T): string {
+    [$session, $ask] = $atA->ask($carryB->publicRaw(), $reviewProfile, 0.0);
+    [, $challenge] = $atB->deliver($ask, [$carryA->publicRaw()], $reviewProfile, 0.0, $T);
+    [, $opening] = $atA->deliver($challenge, [$carryB->publicRaw()], $reviewProfile, 0.0, $T);
+    $atB->deliver($opening, [$carryA->publicRaw()], $reviewProfile, 0.0, $T);
+
+    return $session;
+};
+
+// Finding 4: before anything is verified, copies take no more room and the room is checked at every frame.
+$reassembly = new CarryReassembly(clone $fakeClock);
+$firstFrame = 'AF' . "\0" . 'tagA' . chr(0) . chr(2) . str_repeat('x', 32768);
+$copies = true;
+for ($i = 0; $i < 10; $i++) {
+    $copies = $copies && $reassembly->add($firstFrame) === null;
+}
+$copies = $copies && $reassembly->held() === strlen($firstFrame);
+$within = true;
+for ($n = 1; $n < 40; $n++) {
+    $reassembly->add('AF' . "\0" . 'tagB' . chr($n) . chr(255) . str_repeat(chr($n), 32768));
+    $within = $within && $reassembly->held() <= CarryReassembly::BYTES;
+}
+for ($n = 0; $n < 40; $n++) {
+    $reassembly->add('AF' . "\0" . chr($n) . "\1\2\3" . chr(0) . chr(2) . str_repeat(chr($n), 20000));
+    $within = $within && $reassembly->held() <= CarryReassembly::BYTES && count($reassembly->groups) <= CarryReassembly::GROUPS;
+}
+$check($copies && $within, 'reassembly holds a copy once and never more than its room');
+
+// Finding 5: a transport that stops reading never holds up the owner, its deadlines or its stop. The socket pair of
+// proc_open on Windows takes a whole line of many megabytes at once, so there a line is written as soon as it is given,
+// and its outcome is unknown; whether a line can be left unbegun depends on what the system buffers, so that part is
+// tried on a host with no process, where nothing is ever written.
+$clock = clone $fakeClock;
+$deaf = $startFake('deaf', $clock);
+try {
+    $waitRoom($deaf, 2);
+    $began = microtime(true);
+    $big = $deaf->send('AF' . str_repeat("\0", 1000000), null, 100);
+    $small = $deaf->send('AF' . str_repeat("\0", 20), null, 100);
+    $quick = microtime(true) - $began < 0.5;
+    $clock->now += 1;
+    $deaf->checkTime();
+    $decided = array_diff([$deaf->status($big), $deaf->status($small)], ['unknown', 'not_sent']) === [];
+    $began = microtime(true);
+    $deaf->stop();
+    $check($quick && $decided && microtime(true) - $began < TransportProcess::STOP_SECONDS + 1,
+        'a transport that stops reading never holds up the owner, its deadlines or its stop');
+} finally {
+    $deaf->stop();
+}
+$clock = clone $fakeClock;
+$unread = new TransportProcess('fake', '0.1.0', [], null, [], $clock);
+$unread->injected[] = '{"t":"ready","credit":4,"sends_read":0}';
+$unread->poll();
+$begun = $unread->send('AF' . str_repeat("\0", 20), null, 100);
+$unbegun = $unread->send('AF' . str_repeat("\1", 20), null, 100);
+$out = new ReflectionProperty(TransportProcess::class, 'out');
+$lines = $out->getValue($unread);
+$lines[0]['offset'] = 1;
+$out->setValue($unread, $lines);
+$clock->now += 1;
+$unread->checkTime();
+$check([$unread->status($begun), $unread->status($unbegun), $unread->room()] === ['unknown', 'not_sent', 4 - 1],
+    'a send line never begun by its deadline is not sent and gives its room back; one begun is unknown');
+
+// Finding 6: the host hears from the Carrier that frames wait for room, so B3.2 holds through the Carrier too.
+$clock = clone $fakeClock;
+$stateA = new CarryState($carryA);
+$session = $openedPair($stateA, new CarryState($carryB));
+$noRoomProcess = $startFake('no_room', $clock);
+try {
+    $carrier = new Carrier($stateA, $noRoomProcess, $reviewProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T, 1000.0);
+    $carrier->send($carryB->publicRaw(), $session, 'hei');
+    $carrier->pump(0.05);
+    $started = $noRoomProcess->waitingForRoomSince === $clock->now;
+    $clock->now += 59;
+    $carrier->pump(0.05);
+    $clock->now += 2;
+    $code = null;
+    try {
+        $carrier->pump(0.05);
+    } catch (TransportFailed $failure) {
+        $code = $failure->transportCode;
+    }
+    $check($started && $code === 'transport_hung', 'frames that wait in the carrier make the transport hung after sixty seconds');
+} finally {
+    $noRoomProcess->stop();
+}
+
+// Finding 14: down takes the room away, up alone gives none back, and sixty seconds of down start it again.
+$downByHand = new TransportProcess('fake', '0.1.0', [], null, [], clone $fakeClock);
+$rooms = [];
+foreach (['{"t":"ready","credit":3,"sends_read":0}', '{"t":"status","state":"down","reason":"the receiver stopped"}',
+          '{"t":"ready","credit":3,"sends_read":0}', '{"t":"status","state":"up","reason":"back"}', '{"t":"ready","credit":3,"sends_read":0}'] as $line) {
+    $downByHand->injected[] = $line;
+    $downByHand->poll();
+    $rooms[] = $downByHand->room();
+}
+$check($rooms === [3, 0, 0, 0, 3], 'a transport that says down gets no room until up and a new ready');
+$clock = clone $fakeClock;
+$downByHand = new TransportProcess('fake', '0.1.0', [], null, [], $clock);
+$downByHand->injected[] = '{"t":"status","state":"down","reason":"the receiver stopped"}';
+$downByHand->poll();
+$clock->now += 59;
+$downByHand->checkTime();
+$downByHand->injected[] = '{"t":"status","state":"up","reason":"back"}';
+$downByHand->poll();
+$clock->now += 120;
+$downByHand->checkTime();
+$downByHand->injected[] = '{"t":"status","state":"down","reason":"stopped again"}';
+$downByHand->poll();
+$clock->now += 60;
+$code = null;
+try {
+    $downByHand->checkTime();
+} catch (TransportFailed $failure) {
+    $code = $failure->transportCode;
+}
+$check($code === 'transport_down', 'a transport that says down is started again after sixty seconds, also with nothing to send');
+
+// Finding 1: a carrier on the same home after a restart sends the same bytes, with the mark and the tries left.
+$clock = clone $fakeClock;
+$resumeRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-carry-resume-' . bin2hex(random_bytes(4));
+$path = $resumeRoot . DIRECTORY_SEPARATOR . 'a.json';
+$stateA = new CarryState($carryA, $path);
+$stateB = new CarryState($carryB);
+[$session, $ask] = $stateA->ask($carryB->publicRaw(), $reviewProfile, 0.0);
+[, $challenge] = $stateB->deliver($ask, [$carryA->publicRaw()], $reviewProfile, 0.0, $T);
+$stateA->deliver($challenge, [$carryB->publicRaw()], $reviewProfile, 0.0, $T);
+$envelope = $stateA->send($carryB->publicRaw(), $session, 'hei', $reviewProfile, 0, null, 5);
+$key = CarryState::mark($carryB->publicRaw(), $session, 1);
+$loopback = $startFake('loopback', $clock);
+try {
+    $carrier = new Carrier(new CarryState($carryA, $path), $loopback, $reviewProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0, 5.0, 5);
+    $same = ($carrier->messages[$key]['envelope'] ?? null) === $envelope;
+    $carrier->pump(0.05);
+    $after = new CarryState($carryA, $path);
+    $check($same && $after->durable['outbox'][$key]['tries'] === 2 && $after->counterOf($carryB->publicRaw(), $session) === 1 && $carrier->outcome($key) === 'waiting',
+        'a carrier on the same home after a restart sends the same bytes with the tries left');
+} finally {
+    $loopback->stop();
+    $removeTree($resumeRoot);
 }
 
 // Two homes over the simulated radio, in this one process.
@@ -258,18 +405,18 @@ foreach ([['readable', []], ['readable', ['AAMIO_SIM_LOSS' => '0.2', 'AAMIO_SIM_
         $atA->open($carryB->publicRaw());
         $ok = $pumpUntil(static fn () => $atA->openSession($carryB->publicRaw()) !== null);
         $sent = $ok ? $atA->send($carryB->publicRaw(), $atA->openSession($carryB->publicRaw()), 'hei fra A') : null;
-        $ok = $ok && $pumpUntil(static fn () => $atA->confirmed($sent) && $atB->inbox !== []);
+        $ok = $ok && $pumpUntil(static fn () => $atA->confirmed($sent) && $atB->inbox() !== []);
         $atB->open($carryA->publicRaw());
         $ok = $ok && $pumpUntil(static fn () => $atB->openSession($carryA->publicRaw()) !== null);
         $reply = $ok ? $atB->send($carryA->publicRaw(), $atB->openSession($carryA->publicRaw()), 'hei tilbake fra B') : null;
-        $ok = $ok && $pumpUntil(static fn () => $atB->confirmed($reply) && $atA->inbox !== []);
+        $ok = $ok && $pumpUntil(static fn () => $atB->confirmed($reply) && $atA->inbox() !== []);
         $until = microtime(true) + 2;
         while (microtime(true) < $until) {
             $atA->pump(0.01);
             $atB->pump(0.01);
         }
-        $check($ok && array_column($atB->inbox, 3) === ['hei fra A'] && array_column($atA->inbox, 3) === ['hei tilbake fra B']
-            && $atB->inbox[0][0] === $carryA->publicRaw(), "two homes over the simulated radio, $mode" . ($medium === [] ? ', clean' : ', poor') . ': a message each way, once, with its receipt');
+        $check($ok && array_column($atB->inbox(), 3) === ['hei fra A'] && array_column($atA->inbox(), 3) === ['hei tilbake fra B']
+            && $atB->inbox()[0][0] === $carryA->publicRaw(), "two homes over the simulated radio, $mode" . ($medium === [] ? ', clean' : ', poor') . ': a message each way, once, with its receipt');
     } finally {
         foreach ($radios as $radio) {
             $radio->stop();
