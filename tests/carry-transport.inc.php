@@ -139,6 +139,24 @@ try {
     $noRoom->stop();
 }
 
+// start read lines until describe had come and dropped whatever else had come with it: a status, or a frame that came
+// in as the medium opened. A port in use was said as down in the same breath, and whoever waited for it saw nothing
+// (a full run of 16 November 2026).
+$early = $startFake('early');
+try {
+    $heard = [];
+    $until = microtime(true) + 5;
+    while (count($heard) < 2 && microtime(true) < $until) {
+        foreach ($early->poll(0.05) as $event) {
+            $heard[] = $event;
+        }
+    }
+    $check($heard === [['status', 'up', 'said with describe'], ['received', 'early', "\x00\x01\x02"]] && $early->room() === 4,
+        'what a transport says with its describe is not lost: the status and the frame come with the first poll after start');
+} finally {
+    $early->stop();
+}
+
 $clock = clone $fakeClock;
 $late = $startFake('late', $clock);
 try {

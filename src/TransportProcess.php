@@ -67,6 +67,8 @@ final class TransportProcess
     private $log;
     /** @var list<array> lines put in by hand, for the tests */
     public array $injected = [];
+    /** @var list<array> what the transport said before start returned, for the first poll after it */
+    private array $early = [];
 
     public function __construct(public readonly string $name, public readonly string $version, private array $command, private ?string $cwd, private array $env, ?callable $clock = null, ?callable $log = null)
     {
@@ -155,7 +157,10 @@ final class TransportProcess
             if (($this->clock)() >= $until) {
                 $this->fail(new TransportFailed('transport_timeout', 'no describe within 10 seconds of hello'));
             }
-            $this->poll(0.2);
+            // What comes with describe is kept for whoever polls next: a status, or a frame that came in as the
+            // medium opened. It was dropped here, so a port said as down in the same breath as describe was
+            // never heard of (a full run of 16 November 2026).
+            $this->early = $this->poll(0.2);
         }
 
         return $this->properties;
@@ -370,7 +375,12 @@ final class TransportProcess
      */
     public function poll(float $timeout = 0.0): array
     {
-        $events = [];
+        // What was said before start returned comes first, and is not waited behind.
+        $events = $this->early;
+        $this->early = [];
+        if ($events !== []) {
+            $timeout = 0.0;
+        }
         $lines = $this->injected;
         $this->injected = [];
         if ($this->process !== null) {
