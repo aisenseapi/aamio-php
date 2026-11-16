@@ -571,6 +571,61 @@ try {
         && str_contains($notes[0]['what'], $mark) && str_contains($notes[0]['what'], 'sealed'), 'a message written readable is given up and said in attention when the partner is bound sealed',
         json_encode([$service->status(), $service->outbox(), $notes]));
     $from->close();
+
+    // seen never named a message that came over a transport: what was read over one went past the trace, where seen is
+    // taken from, and a send over one was not recorded there either. In all three runtimes (the exchange over one local
+    // network of 16 November 2026). b reads in a process of its own while a sends, and then the other way round.
+    echo "transports: seen and the trace over a transport\n";
+    [$portFrom, $portTo] = $tFreePorts(2);
+    [$from, $to] = $tHomes('seen');
+    $to->close();
+    $from->transportService()->environ = array_merge(getenv(), $lanVariables($portFrom, $portTo));
+    [$reader, $readerPipes, $readerErr] = $tStart(['--home', $to->home, '--host', $nowhere, 'read', '--wait', '25'], $tEnv($portTo, $portFrom));
+    $readerUp = $tUp($readerErr);
+    $snFirst = $readerUp ? $tTry(static fn () => $from->send('b', 'første over nettet')) : null;
+    $readOut = (string) stream_get_contents($readerPipes[1]);
+    fclose($readerPipes[1]);
+    proc_close($reader);
+    $snGot = json_decode($readOut, true)['messages'] ?? [];
+    $snSha = (string) ($snFirst['sha256'] ?? '');
+    $check(($snFirst['status'] ?? null) === 'confirmed' && Runtime::isMessageHash($snSha) && count($snGot) === 1 && ($snGot[0]['sha256'] ?? null) === $snSha
+        && !array_key_exists('seen', $snGot[0]['body'] ?? []), 'both sides name a message over a transport by the sha256 of its envelope',
+        json_encode([$snFirst, $tThrown?->getMessage(), substr($readOut, 0, 600), substr((string) @file_get_contents($readerErr), -400)]));
+    @unlink($readerErr);
+    $from->close();
+
+    $to = $tOpen[] = new Runtime($to->home, $nowhere, null, true, $quietly);
+    $to->transportService()->environ = array_merge(getenv(), $lanVariables($portTo, $portFrom));
+    [$reader, $readerPipes, $readerErr] = $tStart(['--home', $from->home, '--host', $nowhere, 'read', '--wait', '25'], $tEnv($portFrom, $portTo));
+    $readerUp = $tUp($readerErr);
+    $snBack = $readerUp ? $tTry(static fn () => $to->send('a', 'svar over nettet', null, null, $snSha)) : null;
+    $readOut = (string) stream_get_contents($readerPipes[1]);
+    fclose($readerPipes[1]);
+    proc_close($reader);
+    $snAnswers = json_decode($readOut, true)['messages'] ?? [];
+    $check(($snBack['status'] ?? null) === 'confirmed' && Runtime::isMessageHash($snBack['sha256'] ?? null) && count($snAnswers) === 1
+        && ($snAnswers[0]['body']['seen'] ?? null) === $snSha && ($snAnswers[0]['body']['re'] ?? null) === $snSha && ($snAnswers[0]['sha256'] ?? null) === ($snBack['sha256'] ?? ''),
+        'b read it, and its next message says so in seen', json_encode([$snBack, $tThrown?->getMessage(), substr($readOut, 0, 600), substr((string) @file_get_contents($readerErr), -400)]));
+    @unlink($readerErr);
+    $snTheirs = $to->trace('a');
+    $to->close();
+
+    $from = $tOpen[] = new Runtime($from->home, $nowhere, null, true, $quietly);
+    $snMine = $from->trace('b');
+    $snRow = $snMine['sent'][0] ?? [];
+    $check(count($snMine['sent'] ?? []) === 1 && ($snRow['message_id'] ?? null) === ($snFirst['mark'] ?? '') && ($snRow['via'] ?? null) === 'lan' && ($snRow['sha256'] ?? null) === $snSha
+        && ($snRow['outcome'] ?? null) === 'confirmed' && ($snRow['seen_by_them'] ?? null) === true && ($snRow['answered_by_them'] ?? null) === true && ($snRow['sealed'] ?? null) === true
+        && ($snRow['fields'] ?? null) === ['from', 'text'] && !array_key_exists('status', $snRow) && !array_key_exists('w', $snRow)
+        && ($snMine['received'][0]['channel'] ?? null) === 'lan' && ($snMine['received'][0]['seen'] ?? null) === $snSha && ($snMine['received'][0]['acknowledges']['sha256'] ?? null) === $snSha
+        && ($snMine['no_read_claim'] ?? null) === [] && str_starts_with((string) ($snMine['note'] ?? ''), '1 delivered, and their runtime says it read and opened 1 of them.')
+        && ($snMine['last_read']['sha256'] ?? null) === ($snBack['sha256'] ?? ''),
+        'the sender sees in its trace that the message it sent over the transport was read, read back from the file', json_encode($snMine));
+    $snNote = (string) ($snTheirs['note'] ?? '');
+    $check(array_map(static fn (array $row): array => [$row['channel'] ?? null, $row['sha256'] ?? null], $snTheirs['received'] ?? []) === [['lan', $snSha]]
+        && array_map(static fn (array $row): array => [$row['via'] ?? null, $row['seen_by_them'] ?? null], $snTheirs['sent'] ?? []) === [['lan', null]]
+        && str_contains($snNote, 'unknown, not unread') && str_contains($snNote, 'the envelope a transport carried') && !str_contains($snNote, 'is what the service stored'),
+        'and the one who read it has it in its trace, with its own send not yet named', json_encode($snTheirs));
+    $from->close();
 } finally {
     foreach ($tOpen ?? [] as $runtime) {
         $runtime->close();

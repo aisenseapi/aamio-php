@@ -460,3 +460,30 @@ $check(
 );
 $t->close();
 $u->close();
+
+// A send over a transport has no answer from the service. It arrived when a receipt came or a claim of theirs names it,
+// and what is said of a send over HTTPS is not said of it (the exchange over one local network of 16 November 2026).
+$tvView = new \ReflectionMethod(\Aamio\Runtime::class, 'traceView');
+$tvCarried = static fn (int $number, string $outcome = 'confirmed', bool $sealed = true): array => ['message_id' => str_repeat('ab', 32) . ':' . sprintf('%016x', $number) . ':1',
+    'at' => 1794852000 + $number, 'outcome' => $outcome, 'sha256' => hash('sha256', (string) $number), 'sealed' => $sealed, 'via' => 'lan', 'bytes' => 300, 'fields' => ['from', 'text'], 'text_chars' => 10];
+$tvNamed = $tvCarried(2, 'handed_over');
+$tvSeen = $tvView->invoke(null, ['sent' => [$tvCarried(1), $tvNamed, $tvCarried(3, 'handed_over')], 'received' => [['at' => 1794852100, 'channel' => 'lan',
+    'sha256' => hash('sha256', '10'), 'seen' => $tvNamed['sha256'], 'encrypted' => true, 'format' => 'json', 'fields' => ['from', 'seen', 'text']]], 'last_read' => null], 50);
+$check(
+    array_map(static fn (array $row): ?bool => $row['seen_by_them'], $tvSeen['sent']) === [null, true, null] && $tvSeen['no_read_claim'] === [$tvCarried(1)['message_id']]
+        && ($tvSeen['received'][0]['acknowledges']['sha256'] ?? null) === $tvNamed['sha256'] && str_starts_with($tvSeen['note'], '2 delivered, and their runtime says it read and opened 1 of them.')
+        && str_contains($tvSeen['note'], 'For 1 sent over a transport no receipt had come when the send answered') && str_contains($tvSeen['note'], 'aamio transport list')
+        && !str_contains($tvSeen['note'], 'retry it from the outbox') && !str_contains($tvSeen['note'], 'the service stored it'),
+    'a send over a transport is matched by the sha256 of its envelope, and said in words of its own',
+    json_encode($tvSeen)
+);
+$tvNothing = $tvView->invoke(null, ['sent' => [$tvCarried(1, 'unknown', false)], 'received' => [], 'last_read' => null], 50)['note'];
+$tvUnnamed = $tvView->invoke(null, ['sent' => [$tvCarried(1, 'confirmed', false)], 'received' => [], 'last_read' => null], 50)['note'];
+$tvSealed = $tvView->invoke(null, ['sent' => [$tvCarried(1)], 'received' => [], 'last_read' => null], 50)['note'];
+$check(
+    str_starts_with($tvNothing, 'No message here has an answer from the service that confirms it was stored, or a receipt from their runtime over a transport.')
+        && str_contains($tvNothing, 'For 1 sent over a transport no receipt had come') && str_starts_with($tvUnnamed, 'Nothing has come back from them, so each is unknown, not unread.')
+        && !str_contains($tvUnnamed, 'every message here is sealed') && str_contains($tvUnnamed, 'the envelope a transport carried') && str_contains($tvSealed, 'every message here is sealed to their key'),
+    'a send over a transport under a readable profile is not said to be sealed',
+    json_encode([$tvNothing, $tvUnnamed, $tvSealed])
+);

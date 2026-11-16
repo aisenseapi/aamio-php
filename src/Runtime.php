@@ -3869,7 +3869,7 @@ final class Runtime
             // error added after the weighing let 1036 bytes through a budget of
             // 768 (a review of 10 November 2026).
             if ($entry['verified'] === true && $from) {
-                $this->traceSafely('received', fn (): ?string => $this->traceReceived($channel, $entry));
+                $this->traceSafely('received', fn (): ?string => $this->traceReceived($channel->label, $channel->w, $entry));
             }
             // Received, readable, archived and handled are four different things.
             try {
@@ -4143,7 +4143,7 @@ final class Runtime
     public const TRACE_KEYS = 100;
 
     /** What a row of the trace may hold, and of what type. */
-    private const TRACE_SENT_FIELDS = ['message_id' => 'string', 'at' => 'int', 'w' => 'string', 'status' => 'int', 'outcome' => 'string', 'seq' => 'int', 'sha256' => 'hash', 'sealed' => 'bool', 'bytes' => 'int', 'fields' => 'list', 'text_chars' => 'int', 're' => 'hash', 'seen' => 'hash'];
+    private const TRACE_SENT_FIELDS = ['message_id' => 'string', 'at' => 'int', 'w' => 'string', 'status' => 'int', 'outcome' => 'string', 'seq' => 'int', 'sha256' => 'hash', 'sealed' => 'bool', 'bytes' => 'int', 'fields' => 'list', 'text_chars' => 'int', 're' => 'hash', 'seen' => 'hash', 'via' => 'string'];
     private const TRACE_RECEIVED_FIELDS = ['at' => 'int', 'channel' => 'string', 'w' => 'string', 'seq' => 'int', 'sha256' => 'hash', 'encrypted' => 'bool', 'format' => 'string', 'error' => 'string', 'fields' => 'list', 'text_chars' => 'int', 're' => 'hash', 'seen' => 'hash'];
     private const TRACE_READ_FIELDS = ['sha256' => 'hash', 'seq' => 'int', 'w' => 'string', 'at' => 'int'];
 
@@ -4285,6 +4285,9 @@ final class Runtime
      * version read one seen as covering every earlier send, so a side channel
      * nobody had read showed as read (R1). A message nothing names is unknown,
      * never unread.
+     *
+     * A send over a transport is matched the same way, by the sha256 of the
+     * envelope it carried, which is the sha256 their runtime reads it under.
      */
     private static function traceView(array $book, int $limit): array
     {
@@ -4306,7 +4309,21 @@ final class Runtime
                 $mine[$row['sha256']] = $row;
             }
         }
-        $delivered = array_values(array_filter($sentRows, static fn (array $row): bool => ($row['status'] ?? null) === 201 && self::isMessageHash($row['sha256'] ?? null)));
+        // Over HTTPS, the service's answer that it stored the message. A send over a transport has no such answer: it
+        // arrived when their runtime gave a receipt before the send answered, or when a message of theirs names it
+        // since. Its sha256 is known either way, since it is of the envelope this side wrote.
+        $arrived = static function (array $row) use ($claimed, $answered): bool {
+            $digest = $row['sha256'] ?? null;
+            if (!self::isMessageHash($digest)) {
+                return false;
+            }
+            if (self::sentOver($row) !== null) {
+                return ($row['outcome'] ?? null) === 'confirmed' || isset($claimed[$digest]) || isset($answered[$digest]);
+            }
+
+            return ($row['status'] ?? null) === 201;
+        };
+        $delivered = array_values(array_filter($sentRows, $arrived));
         $noClaim = [];
         foreach ($delivered as $row) {
             if (!isset($claimed[$row['sha256']])) {
@@ -4315,7 +4332,7 @@ final class Runtime
         }
         $sent = [];
         foreach (array_slice($sentRows, -$limit) as $record) {
-            $stored = ($record['status'] ?? null) === 201 && self::isMessageHash($record['sha256'] ?? null) ? $record['sha256'] : null;
+            $stored = $arrived($record) ? $record['sha256'] : null;
             $record['seen_by_them'] = $stored !== null && isset($claimed[$stored]) ? true : null;
             $record['answered_by_them'] = $stored !== null && isset($answered[$stored]) ? true : null;
             $sent[] = $record;
@@ -4343,23 +4360,41 @@ final class Runtime
      * the text again as new bytes, which is a second message. A claim naming
      * such a send was put down to a message older than the record or sent from
      * elsewhere. R5 of the follow-up review of 25 September 2026.
+     *
+     * A send over a transport has no answer from the service. It has a receipt
+     * from their runtime, or a claim of theirs that names it, and its sha256 is
+     * of the envelope the transport carried. Such sends were not recorded at all
+     * until the exchange over one local network of 16 November 2026 showed that
+     * seen never named one, and what is said of a send over HTTPS is not said of
+     * them.
      */
     private static function traceNote(array $sent, array $received, array $delivered, array $noClaim, int $elsewhere): string
     {
         if ($sent === []) {
             return 'Nothing sent to them is recorded here.';
         }
+        $carried = count(array_filter($sent, static fn (array $row): bool => self::sentOver($row) !== null));
+        $carriedDelivered = count(array_filter($delivered, static fn (array $row): bool => self::sentOver($row) !== null));
         $named = false;
         foreach ($received as $row) {
             $named = $named || self::isMessageHash($row['seen'] ?? null);
         }
-        $turnedAway = count(array_filter($sent, static fn (array $row): bool => ($row['outcome'] ?? null) === 'refused' && ($row['status'] ?? null) !== 201));
-        $unsettled = count($sent) - count($delivered) - $turnedAway;
+        $turnedAway = count(array_filter($sent, static fn (array $row): bool => self::sentOver($row) === null && ($row['outcome'] ?? null) === 'refused' && ($row['status'] ?? null) !== 201));
+        $unsettled = count($sent) - $carried - (count($delivered) - $carriedDelivered) - $turnedAway;
+        $withoutReceipt = $carried - $carriedDelivered;
         if ($delivered === []) {
-            $note = 'No message here has an answer from the service that confirms it was stored.';
+            $note = $carried > 0
+                ? 'No message here has an answer from the service that confirms it was stored, or a receipt from their runtime over a transport.'
+                : 'No message here has an answer from the service that confirms it was stored.';
         } elseif (!$named) {
             $said = $received !== [] ? 'Nothing from them has named a message of yours as read' : 'Nothing has come back from them';
-            $note = $said . ', so each is unknown, not unread. A client that does not send seen says nothing, and neither does one that cannot open what it gets: every message here is sealed to their key, so a reader without it sees an envelope and no text. The sha256 of each message is what the service stored, byte for byte; ask them for the sha256 they read.';
+            // A transport's profile can be readable, and then not every message is sealed.
+            $sealed = array_filter($sent, static fn (array $row): bool => ($row['sealed'] ?? null) === false) === [];
+            $note = $said . ', so each is unknown, not unread. A client that does not send seen says nothing, and neither does one that cannot open what it gets'
+                . ($sealed ? ': every message here is sealed to their key, so a reader without it sees an envelope and no text.' : '.')
+                . ($carried > 0
+                    ? ' The sha256 of each message is of the bytes that went, byte for byte: what the service stored, or the envelope a transport carried; ask them for the sha256 they read.'
+                    : ' The sha256 of each message is what the service stored, byte for byte; ask them for the sha256 they read.');
         } else {
             $note = count($delivered) . ' delivered, and their runtime says it read and opened ' . (count($delivered) - count($noClaim)) . ' of them.';
             if ($noClaim !== []) {
@@ -4367,10 +4402,13 @@ final class Runtime
             }
         }
         if ($elsewhere > 0) {
-            $note .= ' They named ' . $elsewhere . ' message(s) this record cannot match to a send the service confirmed: older than this record, sent from elsewhere, or sent from here without an answer that confirmed it.';
+            $note .= ' They named ' . $elsewhere . ' message(s) this record cannot match to a send ' . ($carried > 0 ? 'recorded here' : 'the service confirmed') . ': older than this record, sent from elsewhere, or sent from here without an answer that confirmed it.';
         }
         if ($unsettled > 0) {
             $note .= ' For ' . $unsettled . ' no answer settled whether the service stored it, so it may be stored already. Check each one\'s status and outcome first, and if it must go again, retry it from the outbox: the same bytes are marked a replay where the first arrived, and new bytes would be a second message.';
+        }
+        if ($withoutReceipt > 0) {
+            $note .= ' For ' . $withoutReceipt . ' sent over a transport no receipt had come when the send answered, and nothing of theirs names it since. aamio transport list says how each stands now. The carrier sends the same bytes again by itself while its tries last, and sending the text again would be a second message.';
         }
         if ($turnedAway > 0) {
             $note .= ' The service turned away ' . $turnedAway . '; the status of each says why.';
@@ -4380,6 +4418,14 @@ final class Runtime
         }
 
         return $note;
+    }
+
+    /** The transport a send in the trace went over, or null for a send over HTTPS. */
+    private static function sentOver(array $row): ?string
+    {
+        $via = $row['via'] ?? null;
+
+        return is_string($via) && $via !== '' ? $via : null;
     }
 
     /** The record for one key, made when first needed and kept to a bound. */
@@ -4505,6 +4551,35 @@ final class Runtime
             'sha256' => $stored ? ($result['sha256'] ?? null) : null,
             'sealed' => true,
         ] + (is_array($entry['shape'] ?? null) ? $entry['shape'] : []), self::TRACE_SENT_FIELDS);
+
+        return $this->keepSent($key, $record);
+    }
+
+    /**
+     * One send over a transport, as the transport service answered it. The mark
+     * names it, via says which transport it went over, and the sha256 is of the
+     * envelope the transport carries: the sha256 their runtime reads it under,
+     * and the one its seen names once it has read it. There is no status, since
+     * there is no answer from the service.
+     */
+    private function traceCarried(string $key, array $result, array $body): ?string
+    {
+        $record = self::traceRow([
+            'message_id' => $result['mark'] ?? null,
+            'at' => time(),
+            'outcome' => $result['status'] ?? null,
+            'sha256' => $result['sha256'] ?? null,
+            'sealed' => $result['sealed'] ?? null,
+            'via' => $result['via'] ?? null,
+            'bytes' => $result['bytes'] ?? null,
+        ] + self::messageShape($body, ''), self::TRACE_SENT_FIELDS);
+
+        return $this->keepSent($key, $record);
+    }
+
+    /** A send in the record of its key, in place of an earlier row for the same message. */
+    private function keepSent(string $key, array $record): ?string
+    {
         $book = &$this->traceBook($key);
         $kept = array_values(array_filter($book['sent'], static fn (array $r): bool => ($r['message_id'] ?? null) !== $record['message_id']));
         $kept[] = $record;
@@ -4514,14 +4589,16 @@ final class Runtime
     }
 
     /**
-     * One verified message from a key, as it arrived here. Recorded whether or
+     * One verified message from a key, as it arrived here: over HTTPS on the
+     * channel $label and address $w, or over a transport, under the transport's
+     * name and with no address. Recorded whether or
      * not it could be opened, since one that could not is what a trace is for.
      * Taken as read only when it could: last_read is what the next message to
      * this key names as seen, and it names a message this side opened, not one
      * that merely arrived. A replay is neither recorded nor read: its first
      * arrival was, and an old message sent again must not move seen back to it.
      */
-    private function traceReceived(Channel $channel, array $entry): ?string
+    private function traceReceived(string $label, ?string $w, array $entry): ?string
     {
         if (($entry['replay'] ?? false) === true) {
             return null;
@@ -4533,8 +4610,8 @@ final class Runtime
         sort($fields);
         $row = self::traceRow([
             'at' => $entry['at'] ?? null,
-            'channel' => $channel->label,
-            'w' => $channel->w,
+            'channel' => $label,
+            'w' => $w,
             'seq' => $entry['seq'] ?? null,
             'sha256' => $entry['sha256'] ?? null,
             'encrypted' => $entry['encrypted'] ?? null,
@@ -4557,7 +4634,7 @@ final class Runtime
         $book['received'][] = $row;
         $book['received'] = array_slice($book['received'], -self::TRACE_KEEP);
         if ($opened && ($entry['verified'] ?? false) === true && self::isMessageHash($entry['sha256'] ?? null)) {
-            $book['last_read'] = self::traceRow(['sha256' => $entry['sha256'], 'seq' => $entry['seq'] ?? null, 'w' => $channel->w, 'at' => $entry['at'] ?? null], self::TRACE_READ_FIELDS);
+            $book['last_read'] = self::traceRow(['sha256' => $entry['sha256'], 'seq' => $entry['seq'] ?? null, 'w' => $w, 'at' => $entry['at'] ?? null], self::TRACE_READ_FIELDS);
         }
         unset($book);
         return $this->saveTrace();
@@ -4566,8 +4643,9 @@ final class Runtime
     /**
      * What was sent to one counterpart and what came back, as hashes and shapes.
      * $who is a partner name, a key or a write address; null gives one line per
-     * counterpart. Nothing here is content: the sha256 is what the service stored,
-     * byte for byte, so the other side can hold its own trace against this one.
+     * counterpart. Nothing here is content: the sha256 is of the bytes that went,
+     * what the service stored or the envelope a transport carried, byte for byte,
+     * so the other side can hold its own trace against this one.
      */
     public function trace(?string $who = null, int $limit = 20): array
     {
@@ -4937,7 +5015,9 @@ final class Runtime
         $budget = $this->client->workBudget;
         $wait = $budget === null ? Transports::$waitDefault : max(1, min(Transports::$waitDefault, (int) $budget));
         $result = $this->transportService()->send(Codec::unb64url($partner['key']), $content, $wait);
-        $sent = ['to' => $partner['name']] + $result;
+        // The sha256 is of the envelope the transport carries: what their runtime reads it under and names as seen, as
+        // the sha256 of a send over HTTPS is what the service stored.
+        $sent = ['to' => $partner['name'], 'via' => $result['via'], 'profile' => $result['profile'], 'mark' => $result['mark'], 'sha256' => $result['sha256'], 'status' => $result['status']];
         $sent['note'] = strtr(self::CARRIED_NOTES[$result['status']], ['%via' => $result['via'], '%wait' => (string) $wait]);
         try {
             $this->archive('sent', ['kind' => 'sent', 'at' => time(), 'to' => $partner['name'], 'via' => $result['via'], 'profile' => $result['profile'],
@@ -4945,6 +5025,10 @@ final class Runtime
         } catch (\Throwable $error) {
             $sent['archive_error'] = $error->getMessage();
             $this->logged('archive sent ' . $result['mark'] . ': ' . $error->getMessage());
+        }
+        $traceError = $this->traceSafely('sent', fn (): ?string => $this->traceCarried($partner['key'], $result, $body));
+        if ($traceError !== null) {
+            $sent['trace_error'] = $traceError;
         }
 
         return $sent;
@@ -5209,7 +5293,12 @@ final class Runtime
         }
     }
 
-    /** What a read hands over that came over a transport: written to the archive, and then taken out of the carrier state. */
+    /**
+     * What a read hands over that came over a transport: written to the archive and the trace, and then taken out of
+     * the carrier state. The trace is where the next message to that partner takes its seen from, as a read records a
+     * message over HTTPS there. A message over a transport went past it, so seen never named one, and aamio trace showed
+     * nothing of it (the exchange over one local network of 16 November 2026).
+     */
     private function carriedHandedOver(array &$collected): void
     {
         $marks = [];
@@ -5219,6 +5308,9 @@ final class Runtime
             }
             $collected[$at]['archived'] = $this->archiveCarried($entry);
             $marks[] = $entry['mark'];
+            if (($entry['verified'] ?? false) === true && ($entry['from_key'] ?? null)) {
+                $this->traceSafely('received', fn (): ?string => $this->traceReceived((string) $entry['channel'], null, $entry));
+            }
         }
         if ($marks === []) {
             return;

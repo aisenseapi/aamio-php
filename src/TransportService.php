@@ -358,7 +358,9 @@ final class TransportService
     }
 
     /**
-     * $content to $pk over its first transport, in an open session or in a new one: its mark and how far it came.
+     * $content to $pk over its first transport, in an open session or in a new one: its mark, the sha256 of its envelope
+     * and how far it came, and for the trace its size and whether it went sealed. The sha256 is the one the partner's
+     * runtime reads it under and names as seen once it has read it.
      *
      * status is confirmed when the receipt came, handed_over when every frame of a try was given to the medium and no
      * receipt came within $wait, queued when the message waits in the outbox for room, and unknown when its tries are
@@ -400,6 +402,9 @@ final class TransportService
         } catch (CarryRefused $refused) {
             throw new CodedInvalidArgument($refused->carryCode, $refused->getMessage() . '. Nothing was sent.');
         }
+        // What went, as the outbox keeps it: the envelope, and its sha256.
+        $written = $this->carry()->durable['outbox'][$key];
+        $envelope = (string) hex2bin((string) $written['envelope']);
         $state = $this->carry();
         $this->wait(static fn (): bool => $state->outcome($key) !== 'waiting', $until);
         $outcome = $state->outcome($key);
@@ -408,7 +413,8 @@ final class TransportService
             $outcome = $current !== null && $current->handedOver($key) ? 'handed_over' : 'queued';
         }
 
-        return ['via' => $name, 'profile' => $route['profile'], 'mark' => $key, 'status' => $outcome];
+        return ['via' => $name, 'profile' => $route['profile'], 'mark' => $key, 'status' => $outcome, 'sha256' => $written['sha256'],
+            'bytes' => strlen($envelope), 'sealed' => ord($envelope[strlen(Carry::MAGIC)]) === Carry::SEALED];
     }
 
     /** @return list<array{mark: string, outcome: string}> what was sent over a transport, as aamio transport list shows it, oldest first */
