@@ -188,6 +188,27 @@ try {
     $late->stop();
 }
 
+// No describe within ten seconds said only that. A start that stopped so once, with three suites running, could not be
+// told from any other: whether the hello had gone, whether the process lived, or what it had said (16 November 2026).
+// The clock here runs ten times as fast, so the ten seconds take one.
+$env = TransportProcess::environment([], $baseEnv);
+$env['FAKE_TRANSPORT_MODE'] = 'mute';
+$mute = new TransportProcess('fake', '0.1.0', [...$python, '-u', $pythonRepo . '/tests/fake_transport.py'], sys_get_temp_dir(), $env, static fn (): float => hrtime(true) / 1e9 * 10);
+$muteSaid = '';
+$muteCode = null;
+try {
+    $mute->start('0.0.0-test', 'php', sys_get_temp_dir());
+} catch (TransportFailed $failure) {
+    $muteCode = $failure->transportCode;
+    $muteSaid = $failure->getMessage();
+} finally {
+    $mute->stop();
+}
+$muteWords = ['no describe within 10 seconds of hello: ', 'the hello was written to it', 'its process runs', 'it said 1 line that was no describe',
+    'On standard error: the fake transport has nothing to say'];
+$check($muteCode === 'transport_timeout' && array_filter($muteWords, static fn (string $words): bool => !str_contains($muteSaid, $words)) === [],
+    'a transport that does not describe itself is said with what is known of it');
+
 foreach (['bad_describe' => 'transport_bad_describe', 'long_line' => 'transport_protocol'] as $mode => $code) {
     $env = TransportProcess::environment([], $baseEnv);
     $env['FAKE_TRANSPORT_MODE'] = $mode;

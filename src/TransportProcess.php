@@ -69,6 +69,10 @@ final class TransportProcess
     public array $injected = [];
     /** @var list<array> what the transport said before start returned, for the first poll after it */
     private array $early = [];
+    /** Lines taken from the transport in all. */
+    private int $said = 0;
+    /** @var list<string> the last lines it wrote on standard error */
+    private array $lastWords = [];
 
     public function __construct(public readonly string $name, public readonly string $version, private array $command, private ?string $cwd, private array $env, ?callable $clock = null, ?callable $log = null)
     {
@@ -155,7 +159,7 @@ final class TransportProcess
         $until = ($this->clock)() + self::DESCRIBE_SECONDS;
         while ($this->properties === null) {
             if (($this->clock)() >= $until) {
-                $this->fail(new TransportFailed('transport_timeout', 'no describe within 10 seconds of hello'));
+                $this->fail(new TransportFailed('transport_timeout', 'no describe within 10 seconds of hello: ' . $this->silence()));
             }
             // What comes before describe or with it is kept for whoever polls next: a status, or a frame that
             // came in as the medium opened. It was dropped here, so a port said as down in the same breath as
@@ -167,6 +171,25 @@ final class TransportProcess
         }
 
         return $this->properties;
+    }
+
+    /**
+     * What is known of a transport that did not describe itself: whether the hello was written to it, whether its
+     * process runs, what it said, and its last lines on standard error. Said alone, no describe told nothing of where
+     * the start had stopped, and one that stopped once could not be told from any other (16 November 2026).
+     */
+    private function silence(): string
+    {
+        $written = $this->out === [] ? 'the hello was written to it' : 'the hello was not written to it';
+        $status = is_resource($this->process) ? proc_get_status($this->process) : [];
+        $runs = ($status['running'] ?? false) === true ? 'its process runs' : 'its process has ended';
+        $said = match (true) {
+            $this->said === 0 => 'it said nothing',
+            $this->said === 1 => 'it said 1 line that was no describe',
+            default => 'it said ' . $this->said . ' lines, none of them a describe',
+        };
+
+        return $written . ', ' . $runs . ', and ' . $said . ($this->lastWords === [] ? '' : '. On standard error: ' . implode(' | ', $this->lastWords));
     }
 
     /** A line on its way: it goes as far as the transport takes it now, and the rest in poll. */
@@ -438,7 +461,9 @@ final class TransportProcess
     {
         $this->errors .= $chunk;
         while (($at = strpos($this->errors, "\n")) !== false) {
-            ($this->log)('transport ' . $this->name . ': ' . rtrim(substr($this->errors, 0, $at)));
+            $words = rtrim(substr($this->errors, 0, $at));
+            $this->lastWords = array_slice([...$this->lastWords, substr($words, 0, 200)], -3);
+            ($this->log)('transport ' . $this->name . ': ' . $words);
             $this->errors = substr($this->errors, $at + 1);
         }
         if (strlen($this->errors) > 65536) {
@@ -452,6 +477,7 @@ final class TransportProcess
         if (!is_array($message) || !is_string($message['t'] ?? null)) {
             $this->fail(new TransportFailed('transport_protocol', 'a line that is not a JSON object with t'));
         }
+        $this->said++;
         switch ($message['t']) {
             case 'describe':
                 if ($this->properties === null) {
