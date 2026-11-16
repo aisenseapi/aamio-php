@@ -475,7 +475,28 @@ try {
     $check($got === [] && $readThrew === null && $waited >= 1.5 && in_array('transports carry_unreadable', $states, true) && $tThrown === null,
         'a read that waits with a transport running says the state is closed and waits its wait out, and a round between two calls goes on',
         json_encode([$got, $readThrew?->getMessage(), $waited, $states, $tThrown?->getMessage()]));
-    $from->close();
+    // The owner closes while a frame still waits for the transport, with the state closed: the drain pumps then, and
+    // what the carrier cannot do comes to close. It says it in the log, stops the transports and lets go of the home
+    // all the same; thrown out of close, the home stayed taken in this process.
+    $carrier = $from->transportService()->running['lan']['carrier'] ?? null;
+    $closeThrew = $carrier === null ? 'no carrier ran' : null;
+    if ($carrier !== null) {
+        (new ReflectionProperty($carrier, 'queue'))->setValue($carrier, [[['x'], null, null, []]]);
+    }
+    try {
+        $from->close();
+    } catch (\Throwable $error) {
+        $closeThrew = get_class($error) . ': ' . $error->getMessage();
+    }
+    $again = null;
+    try {
+        $again = $tOpen[] = new Runtime($from->home, $nowhere, null, false, $quietly);
+    } catch (\Throwable $error) {
+        $closeThrew = ($closeThrew ?? 'close did not throw') . ', and the home could not be taken again: ' . $error->getMessage();
+    }
+    $check($closeThrew === null && $again !== null,
+        'the owner closes with a frame still waiting and the state closed: the transports stop and the home is let go of all the same', (string) $closeThrew);
+    $again?->close();
 
     // Finding 8: after the only partner was removed the transport ran on, held its port and would have been started again
     // after a crash. PHP cannot tell on its own whether a UDP port is held, so the process is asked for instead.

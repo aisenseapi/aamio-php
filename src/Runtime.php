@@ -4995,6 +4995,12 @@ final class Runtime
         }
         try {
             $this->transports->drain();
+        } catch (\RuntimeException | \InvalidArgumentException $error) {
+            // Nothing pumps behind the caller here, so a round that fails while the queue is given its moment, as
+            // with the carrier state closed after a write that failed, comes to close. It is said in the log, and
+            // the transports stop and the home is let go of all the same: thrown out of close, the home stayed
+            // taken in this process.
+            $this->logged('transports: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage());
         } finally {
             $this->transports->stop();
         }
