@@ -157,6 +157,20 @@ try {
     $early->stop();
 }
 
+// The simulated radio listens before it has read hello, so a frame from a partner that is already sending comes before
+// describe. It is kept as what comes with describe is, and describe is still waited for: kept and then not waited
+// behind, a host with one thread never read the describe that came after (a full run of 16 November 2026).
+$began = microtime(true);
+$eager = $startFake('eager');
+try {
+    $first = $eager->poll();
+    $waitRoom($eager, 4);
+    $check(microtime(true) - $began < 5 && $first === [['received', 'eager', "\x00\x01\x02"]] && $eager->room() === 4,
+        'what a transport says before its describe is kept, and describe is still waited for');
+} finally {
+    $eager->stop();
+}
+
 $clock = clone $fakeClock;
 $late = $startFake('late', $clock);
 try {

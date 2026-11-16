@@ -157,10 +157,13 @@ final class TransportProcess
             if (($this->clock)() >= $until) {
                 $this->fail(new TransportFailed('transport_timeout', 'no describe within 10 seconds of hello'));
             }
-            // What comes with describe is kept for whoever polls next: a status, or a frame that came in as the
-            // medium opened. It was dropped here, so a port said as down in the same breath as describe was
-            // never heard of (a full run of 16 November 2026).
-            $this->early = $this->poll(0.2);
+            // What comes before describe or with it is kept for whoever polls next: a status, or a frame that
+            // came in as the medium opened. It was dropped here, so a port said as down in the same breath as
+            // describe was never heard of (a full run of 16 November 2026). Each round waits for a line as
+            // before, whatever is kept already.
+            foreach ($this->heard(0.2) as $event) {
+                $this->early[] = $event;
+            }
         }
 
         return $this->properties;
@@ -378,9 +381,17 @@ final class TransportProcess
         // What was said before start returned comes first, and is not waited behind.
         $events = $this->early;
         $this->early = [];
-        if ($events !== []) {
-            $timeout = 0.0;
+        foreach ($this->heard($events !== [] ? 0.0 : $timeout) as $event) {
+            $events[] = $event;
         }
+
+        return $events;
+    }
+
+    /** @return list<array> the lines that have come, taken in, after a wait of up to $timeout for the first: the events in them */
+    private function heard(float $timeout): array
+    {
+        $events = [];
         $lines = $this->injected;
         $this->injected = [];
         if ($this->process !== null) {
