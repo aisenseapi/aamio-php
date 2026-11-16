@@ -481,7 +481,7 @@ try {
     $carrier = $from->transportService()->running['lan']['carrier'] ?? null;
     $closeThrew = $carrier === null ? 'no carrier ran' : null;
     if ($carrier !== null) {
-        (new ReflectionProperty($carrier, 'queue'))->setValue($carrier, [[['x'], null, null, []]]);
+        (new ReflectionProperty($carrier, 'queue'))->setValue($carrier, [[['x'], null, null, [], true]]);
     }
     try {
         $from->close();

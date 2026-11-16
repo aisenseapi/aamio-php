@@ -14,6 +14,11 @@ declare(strict_types=1);
  * README named a state this runtime never reports, and the description said
  * its first sentence twice. Found in a review on 28 September 2026.
  *
+ * With transports a message can be in the home before a read: what came over
+ * one. The text still said that every message larger than the budget stays at
+ * the service, while a read hands such a message over on its own and says so
+ * as over_budget. Found in the check of 16 November 2026.
+ *
  * The note in attention carried the service's advice word for word: a header
  * by name and a cursor to step past the message with. Whoever reads the note
  * set max_bytes and holds neither.
@@ -41,11 +46,18 @@ $check(
     $budgetSaid
 );
 $check(
+    str_contains($budgetSaid, 'A message at the service that is larger') && str_contains($budgetSaid, 'What came over a transport is in this home before it is read')
+    && str_contains($budgetSaid, 'comes alone') && str_contains($budgetSaid, 'over_budget'),
+    'and that this is so for a message at the service, while one that came over a transport comes alone and is said',
+    $budgetSaid
+);
+$check(
     !str_contains($budgetReadme, 'over_budget') && !str_contains($budgetReadme, 'already on this machine')
     && str_contains($budgetReadme, 'This runtime has no listener, so nothing is fetched ahead of a read'),
     'the README names no state this runtime never reports'
 );
-$check(!str_contains($budgetHelp, 'still comes') && str_contains($budgetHelp, 'a message larger than it stays at the service'), 'and the help of the command line says the same');
+$check(!str_contains($budgetHelp, 'still comes') && str_contains($budgetHelp, 'a message larger than it stays at the service')
+    && str_contains($budgetHelp, 'what came over a transport is in the home already'), 'and the help of the command line says the same');
 
 // ---------------------------------------------------------------- and that it is so
 $budgetQuiet = static function (string $line): void {

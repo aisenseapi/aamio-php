@@ -133,9 +133,13 @@ final class Carrier
         return false;
     }
 
-    private function queue(string $envelope, ?string $to, ?string $key = null): void
+    /**
+     * An envelope in frames, waiting for room. $counted says whether the try it is has been counted in the state: the
+     * first try of a message is, when the message is written, and a later one is counted as it begins.
+     */
+    private function queue(string $envelope, ?string $to, ?string $key = null, bool $counted = true): void
     {
-        $this->queue[] = [Carry::split($envelope, $this->frameLimit), $to, $key, []];
+        $this->queue[] = [Carry::split($envelope, $this->frameLimit), $to, $key, [], $counted];
     }
 
     private function control(string $envelope, ?string $to, string $kind, string $pk, string $session, int $most): void
@@ -357,15 +361,17 @@ final class Carrier
                 unset($this->messages[$key]);
                 continue;
             }
-            // The try is counted in the state before it goes, so a restart never gives back tries that were used.
-            if (!$this->state->tried($key)) {
+            if ($this->state->triesLeft($key) === 0) {
+                // The tries are used: the bytes go, and the outcome is unknown for good (A7).
+                $this->state->tried($key);
                 unset($this->messages[$key]);
-                // A try that never started is not sent after the message is over (A7): it went out after unknown was said.
-                $this->queue = array_values(array_filter($this->queue, static fn (array $item): bool => !($item[2] === $key && $item[3] === [])));
                 continue;
             }
             $this->messages[$key]['next'] = $now + $this->retrySeconds;
-            $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? null, $key);
+            // Queued, the try has used nothing: it is counted as it begins, in flush, when it can be given to the
+            // transport. Counted here, every new owner used a try as it took the outbox up, room or not, and a
+            // budget went with nothing sent (the check of 16 November 2026).
+            $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? null, $key, false);
         }
         foreach ($this->control as $key => $entry) {
             if ($now < $entry['next']) {
@@ -395,7 +401,7 @@ final class Carrier
     private function flush(): void
     {
         while ($this->queue !== [] && $this->process->room() > 0) {
-            [, , $key, $ids] = $this->queue[0];
+            [, , $key, $ids, $counted] = $this->queue[0];
             if ($key !== null && $ids === []) {
                 // A try at a message begins here, so here is where it may still be stopped: when the message is over
                 // (its receipt came, or its tries are used), or when the partner's profile is of another mode now than
@@ -406,6 +412,18 @@ final class Carrier
                     array_shift($this->queue);
                     continue;
                 }
+                if (!$counted) {
+                    // Counted in the state before its first frame goes, so a restart never gives back a try that
+                    // was used, and counted only now that there is room for it.
+                    if (!$this->state->tried($key)) {
+                        unset($this->messages[$key]);
+                        array_shift($this->queue);
+                        continue;
+                    }
+                    $this->queue[0][4] = true;
+                }
+                // The next try is one wait after this one began, however long it waited for room.
+                $this->messages[$key]['next'] = ($this->clock)() + $this->retrySeconds;
             }
             $frame = array_shift($this->queue[0][0]);
             $id = $this->process->send($frame, $this->queue[0][1]);

@@ -162,7 +162,7 @@
           "max_bytes": {
             "type": "integer",
             "minimum": 512,
-            "description": "how many bytes of messages to hand over, per channel, 65536 unless you say otherwise: a read across several channels can return that much from each, since a budget split between them would refuse a message that fits. Whole messages only. A message larger than the whole budget is not handed over: it stays at the service, attention names it as too_large with its size, and what was written after it on that channel waits behind it. Read again with a larger max_bytes to take it."
+            "description": "how many bytes of messages to hand over, per channel, 65536 unless you say otherwise: a read across several channels can return that much from each, since a budget split between them would refuse a message that fits. Whole messages only. A message at the service that is larger than the whole budget is not handed over: it stays at the service, attention names it as too_large with its size, and what was written after it on that channel waits behind it. Read again with a larger max_bytes to take it. What came over a transport is in this home before it is read, and its budget is counted for each transport: one such message larger than the whole budget comes alone, said in attention as over_budget, and the rest waits in the home for the next read."
           }
         },
         "additionalProperties": false

@@ -460,7 +460,8 @@ $first = $wire->written;
 $roomByHand($wire, 0);
 $clock->now += 2.1;
 $carrier->pump(0.0);
-$waits = $waitsUnbegun($carrier, $key) && $stateA->durable['outbox'][$key]['tries'] === 2;
+// It waits, and has used nothing yet: a try is counted as it begins.
+$waits = $waitsUnbegun($carrier, $key) && $stateA->durable['outbox'][$key]['tries'] === 1;
 [, $receipt] = $stateB->deliver($carrier->messages[$key]['envelope'], [$carryA->publicRaw()], $reviewProfile, 1.0, $T);
 foreach (Carry::split($receipt, 64) as $frame) {
     $wire->injected[] = json_encode(['t' => 'received', 'from' => null, 'frame' => Codec::b64url($frame)]);
@@ -469,7 +470,45 @@ $carrier->pump(0.0);
 $confirmed = $carrier->confirmed($key);
 $roomByHand($wire, 1000);
 $carrier->pump(0.0);
-$check($first > 0 && $waits && $confirmed && $wire->written === $first && $queueOf->getValue($carrier) === [], 'a try that waits for room is not begun once its receipt has come');
+$check($first > 0 && $waits && $confirmed && $wire->written === $first && $queueOf->getValue($carrier) === [] && $stateA->durable['outbox'][$key]['tries'] === 1,
+    'a try that waits for room is not begun once its receipt has come, and is never counted');
+
+// The check of 2026-11-16: every new owner counted a try as it took the outbox up, room or not. With a budget of three
+// and no room, three owners used it all, the bytes went, and not one frame had been given.
+$clock = clone $fakeClock;
+$ownerRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-carry-owner-' . bin2hex(random_bytes(4));
+$path = $ownerRoot . DIRECTORY_SEPARATOR . 'a.json';
+$stateA = new CarryState($carryA, $path);
+$session = $openedPair($stateA, new CarryState($carryB));
+$stateA->send($carryB->publicRaw(), $session, 'hei', $reviewProfile, 0, null, 3);
+$key = CarryState::mark($carryB->publicRaw(), $session, 1);
+$kept = [];
+$given = 0;
+for ($owner = 0; $owner < 3; $owner++) {
+    $wire = $hostByHand($clock, 0);
+    $state = new CarryState($carryA, $path);
+    $carrier = new Carrier($state, $wire, $reviewProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0);
+    for ($i = 0; $i < 3; $i++) {
+        $clock->now += 2.1;
+        $carrier->pump(0.0);
+    }
+    $kept[] = [$state->durable['outbox'][$key]['tries'], $carrier->outcome($key)];
+    $given += $wire->written;
+}
+$check($kept === [[1, 'waiting'], [1, 'waiting'], [1, 'waiting']] && $given === 0,
+    'a new owner uses no try while the transport has no room: three owners, and the budget of three is untouched');
+$wire = $hostByHand($clock, 1000);
+$state = new CarryState($carryA, $path);
+$carrier = new Carrier($state, $wire, $reviewProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0);
+$carrier->pump(0.0);
+$began = $wire->written > 0 && $state->durable['outbox'][$key]['tries'] === 2;
+for ($i = 0; $i < 3; $i++) {
+    $clock->now += 2.1;
+    $carrier->pump(0.0);
+}
+$check($began && $state->durable['outbox'][$key]['tries'] === 3 && $carrier->outcome($key) === 'unknown' && $state->durable['outbox'][$key]['envelope'] === null,
+    'with room the next owner\'s try is counted as it begins and goes, and the tries still end in unknown');
+$removeTree($ownerRoot);
 
 // Finding 2: a new owner compared only the partner's key, and sent the old readable bytes though the profile said sealed.
 $clock = clone $fakeClock;

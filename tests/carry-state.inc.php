@@ -468,6 +468,50 @@ try {
         $room = $room && $atB->deliver($ask, $known, $profileOf, 700.0, $T)[0] === 'accepted';
     }
     $check($given && $full && $taken && $room, 'every challenge waits in the window it was given under, whatever window the one who asks now has');
+
+    // The check of 2026-11-16: the quota counted a challenge in the window it was given under, and an open was taken in
+    // the window of the profile now. Given with 60 seconds, a challenge was refused at 61 under that profile and taken
+    // under one of 600, while the quota no longer counted it.
+    $atA = new CarryState($keysA);
+    $atB = new CarryState($keysB);
+    [, $ask] = $atA->ask($pkB, $narrow, 0.0);
+    [, $challenge] = $atB->deliver($ask, [$pkA], $narrow, 0.0, $T);
+    [, $opening] = $atA->deliver($challenge, [$pkB], $narrow, 1.0, $T);
+    $late = $carryCode(static fn () => $atB->deliver($opening, [$pkA], $wide, 61.0, $T)) === 'carry_nonce_expired';
+    // What was given stands the other way too: given with 600 seconds, it is taken at 61 under a profile of 60.
+    [, $ask] = $atA->ask($pkB, $wide, 100.0);
+    [, $challenge] = $atB->deliver($ask, [$pkA], $wide, 100.0, $T);
+    [, $opening] = $atA->deliver($challenge, [$pkB], $wide, 101.0, $T);
+    $taken = null;
+    $refused = $carryCode(static function () use ($atB, $opening, $pkA, $narrow, $T, &$taken): void {
+        $taken = $atB->deliver($opening, [$pkA], $narrow, 161.0, $T)[0];
+    });
+    $stands = $refused === null && $taken === 'accepted';
+    $check($late && $stands, 'an open is taken in the window its challenge was given under, whatever window the profile has now');
+
+    // The same, as the quota sees it: 64 challenges given with 60 seconds are out of the count at 61, a new one is given
+    // under a profile of 600, and none of the 64 opens a session then.
+    $atB = new CarryState($keysB);
+    $givenWith = [];
+    $all = true;
+    foreach (array_slice($partners, 0, 8) as $partner) {
+        $asking = new CarryState($partner);
+        for ($n = 0; $n < CarryState::MAX_WAITING_PER_PARTNER; $n++) {
+            [, $ask] = $asking->ask($pkB, $narrow, 0.0);
+            [$result, $challenge] = $atB->deliver($ask, $known, $narrow, 0.0, $T);
+            $all = $all && $result === 'accepted';
+        }
+        $givenWith[] = [$asking, $challenge];
+    }
+    $late = new CarryState($partners[8]);
+    [, $ask] = $late->ask($pkB, $wide, 61.0);
+    $counted = $atB->deliver($ask, $known, $wide, 61.0, $T)[0] === 'accepted';
+    $none = true;
+    foreach ($givenWith as [$asking, $challenge]) {
+        [, $opening] = $asking->deliver($challenge, [$pkB], $narrow, 1.0, $T);
+        $none = $none && $carryCode(static fn () => $atB->deliver($opening, $known, $wide, 61.0, $T)) === 'carry_nonce_expired';
+    }
+    $check($all && $counted && $none, 'a challenge the quota no longer counts opens no session');
 } finally {
     $removeTree($stateRoot);
 }
