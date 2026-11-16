@@ -37,9 +37,31 @@ namespace Aamio;
 final class Carrier
 {
     public const UNVERIFIED_PER_SECOND = 20;
+    /** A receipt, a challenge or an open, sealed, is under 200 bytes: 192, 163 and 163. An ask is 147. */
+    public const ANSWER_BYTES = 200;
+    /** What a sealed message adds to its content, rounded up: 262 bytes carry a body of about 110. */
+    public const MESSAGE_BYTES = 160;
+    /**
+     * On a slow medium a turn is longer by a random part of up to half of it: two that began together, as two that both
+     * ask for a session at once, and lost each other's frames, would otherwise try again together for good.
+     */
+    public const JITTER = 0.5;
+    /**
+     * How much longer than the bare time on the medium a wait gives: a half-duplex medium takes turns, and what is heard
+     * has to be read before it is answered.
+     */
+    public const SLACK = 2.0;
 
     private CarryReassembly $reassembly;
     private int $frameLimit;
+    /**
+     * A full frame's time on the medium, as the transport's rate says, and what the waits are measured in where the
+     * medium is slow. Over sound a frame is 16 seconds: a try every 2 seconds filled the air with copies of a message
+     * whose receipt then had no turn, and a session could not be opened in the 30 seconds a send waited.
+     */
+    private float $frameSeconds;
+    /** @var \Closure(): float a number from 0 up to 1, for the random part of a turn; a property, so a test can fix it */
+    public \Closure $random;
     /** @var list<array{0: list<string>, 1: ?string, 2: ?string, 3: list<string>}> [frames, to, mark or null, ids given so far], in order */
     private array $queue = [];
     /** @var array<string, list<list<string>>> mark => the frame ids of each try that was given to the transport whole */
@@ -81,8 +103,14 @@ final class Carrier
         $this->wall = $wall ?? static fn (): int => time();
         $this->note = $note ?? static function (string $text): void {
         };
-        $this->reassembly = new CarryReassembly($this->clock);
+        $rateDown = $process->properties['rate_down'] ?? null;
+        $frameDown = $process->properties['max_frame_down'] ?? null;
+        $slow = (is_int($rateDown) || is_float($rateDown)) && $rateDown > 0 && is_int($frameDown);
+        $this->reassembly = new CarryReassembly($this->clock, $slow ? $frameDown / $rateDown : 0.0);
         $this->frameLimit = $process->properties['max_frame_up'];
+        $rate = $process->properties['rate_up'] ?? null;
+        $this->frameSeconds = (is_int($rate) || is_float($rate)) && $rate > 0 ? $this->frameLimit / $rate : 0.0;
+        $this->random = static fn (): float => mt_rand() / (mt_getrandmax() + 1);
         $this->budgetAt = ($this->clock)();
         $knownSet = array_fill_keys(array_map('bin2hex', $known), true);
         foreach ($state->unconfirmed() as [$key, $pk, $session, , $envelope]) {
@@ -142,27 +170,107 @@ final class Carrier
         $this->queue[] = [Carry::split($envelope, $this->frameLimit), $to, $key, [], $counted];
     }
 
-    private function control(string $envelope, ?string $to, string $kind, string $pk, string $session, int $most): void
+    /** How many frames $size bytes take on this medium. */
+    private function frames(int $size): int
     {
+        $room = max(1, $this->frameLimit - Carry::FRAME_HEADER);
+
+        return intdiv($size + $room - 1, $room);
+    }
+
+    /** The bare time $size bytes take on the medium, as the transport's rate says; nothing on a fast medium. */
+    private function airtime(int $size): float
+    {
+        return $this->frameSeconds * $this->frames($size);
+    }
+
+    /**
+     * How long to wait for the answer to an envelope before it goes again: $base, or on a slow medium the time the
+     * envelope and what answers it take there, with slack. A fast medium never reaches $base.
+     */
+    private function turn(string $envelope, float $base): float
+    {
+        $slow = self::SLACK * $this->frameSeconds * ($this->frames(strlen($envelope)) + $this->frames(self::ANSWER_BYTES));
+
+        return $slow <= $base ? $base : $slow * (1 + self::JITTER * ($this->random)());
+    }
+
+    /** What a challenge and its open take on this medium, with slack: what a profile's challenge window has to give. */
+    public function handshakeSeconds(): float
+    {
+        return self::SLACK * $this->frameSeconds * 2 * $this->frames(self::ANSWER_BYTES);
+    }
+
+    /** A challenge's and its open's time on this medium, at most: every frame counted as a full one. */
+    public function airtimeOfHandshake(): float
+    {
+        return 2 * $this->airtime(self::ANSWER_BYTES);
+    }
+
+    /**
+     * A challenge window in which an open has $tries chances to come through on this medium, the longest turns counted:
+     * what a profile for a slow medium is to give. A lost open loses its session.
+     */
+    public function windowForOpens(int $tries = 3): float
+    {
+        $turn = self::SLACK * $this->frameSeconds * 2 * $this->frames(self::ANSWER_BYTES) * (1 + self::JITTER);
+
+        return 2 * $this->airtime(self::ANSWER_BYTES) + ($tries - 1) * $turn;
+    }
+
+    /**
+     * How long a send of $size bytes of content takes on this medium when nothing is lost: an ask, its challenge and the
+     * open, the message and its receipt, with slack. Next to nothing on a fast medium.
+     */
+    public function patience(int $size): float
+    {
+        return self::SLACK * $this->frameSeconds * (4 * $this->frames(self::ANSWER_BYTES) + $this->frames($size + self::MESSAGE_BYTES));
+    }
+
+    /**
+     * A challenge or an open, sent again with the same bytes one turn after it went, as long as it can still arrive in the
+     * challenge window: a try that began later would come after the window, and be turned down, so it is left out.
+     *
+     * An open goes again on the same turn as a challenge, though the first receipt in its session is what shows it came:
+     * waiting for the message behind it and that message's receipt as well, an open over sound had two tries within a
+     * window of 60 seconds at eight times real time, and when both were lost, so was the session (16 November 2026).
+     */
+    private function control(string $envelope, ?string $to, string $kind, string $pk, string $session, int $most, float $window): void
+    {
+        $now = ($this->clock)();
         $this->counter++;
         $this->control['c-' . $this->counter] = ['envelope' => $envelope, 'to' => $to, 'kind' => $kind, 'pk' => $pk, 'session' => $session,
-            'next' => ($this->clock)() + $this->retrySeconds, 'tries' => 1, 'most' => $most];
+            'next' => $now + $this->turn($envelope, $this->retrySeconds), 'tries' => 1, 'most' => $most,
+            'until' => $now + $window - $this->airtime(self::ANSWER_BYTES)];
         $this->queue($envelope, $to);
     }
 
     private function windowTries(string $pk): int
     {
-        return max(1, (int) (($this->profileOf)($pk)['challenge_window'] / $this->retrySeconds));
+        // A challenge goes again one turn after it went, a turn being as long as a challenge and its open take.
+        return max(1, (int) (($this->profileOf)($pk)['challenge_window'] / max($this->retrySeconds, self::SLACK * $this->frameSeconds * 2 * $this->frames(self::ANSWER_BYTES))));
     }
 
     /** Ask the partner for a session of this party's: the challenge and the open follow in pump. */
     public function open(string $partnerPk): string
     {
         [$session, $envelope] = $this->state->ask($partnerPk, ($this->profileOf)($partnerPk), ($this->clock)());
-        $this->asks[self::pair($partnerPk, $session)] = ['pk' => $partnerPk, 'session' => $session, 'next' => ($this->clock)() + $this->askRetrySeconds, 'tries' => 1];
+        $this->asks[self::pair($partnerPk, $session)] = ['pk' => $partnerPk, 'session' => $session, 'next' => ($this->clock)() + $this->turn($envelope, $this->askRetrySeconds), 'tries' => 1];
         $this->queue($envelope, $this->addresses[bin2hex($partnerPk)] ?? null);
 
         return $session;
+    }
+
+    /** Whether an ask for a session with the partner is under way: sent, and gone again on its own until answered. */
+    public function asking(string $partnerPk): bool
+    {
+        foreach ($this->asks as $entry) {
+            if ($entry['pk'] === $partnerPk) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** The newest session of this party's with the partner that a challenge has answered, or null. */
@@ -197,7 +305,7 @@ final class Carrier
     {
         $envelope = $this->state->send($partnerPk, $session, $content, ($this->profileOf)($partnerPk), $deadline, null, $this->tries);
         $key = CarryState::mark($partnerPk, $session, $this->state->counterOf($partnerPk, $session));
-        $this->messages[$key] = ['envelope' => $envelope, 'pk' => $partnerPk, 'session' => $session, 'next' => ($this->clock)() + $this->retrySeconds];
+        $this->messages[$key] = ['envelope' => $envelope, 'pk' => $partnerPk, 'session' => $session, 'next' => ($this->clock)() + $this->turn($envelope, $this->retrySeconds)];
         $this->queue($envelope, $this->addresses[bin2hex($partnerPk)] ?? null, $key);
 
         return $key;
@@ -308,11 +416,19 @@ final class Carrier
         $pair = self::pair($got['sender'], $got['session']);
         switch ($got['kind']) {
             case Carry::CHALLENGE:
-                unset($this->asks[$pair]);
+                // A session with the partner is open: every ask to it ends, the one this answers and any made since. Asked
+                // again on a slow medium, each took turns from the messages it was asked for.
+                foreach ($this->asks as $asked => $entry) {
+                    if ($entry['pk'] === $got['sender']) {
+                        unset($this->asks[$asked]);
+                    }
+                }
                 $this->answered[$pair] ??= [$got['sender'], $got['session'], $now];
                 // The open is sent again with the same bytes through the challenge window, until the first receipt in the
-                // session shows it came: on a medium that loses frames, one try is not enough.
-                $this->control($reply, $source, 'open', $got['sender'], $got['session'], $this->windowTries($got['sender']));
+                // session shows it came: on a medium that loses frames, one try is not enough. The window was counted
+                // from before the challenge went, so the challenge's own time on the medium is off it.
+                $window = ($this->profileOf)($got['sender'])['challenge_window'];
+                $this->control($reply, $source, 'open', $got['sender'], $got['session'], $this->windowTries($got['sender']), $window - $this->airtime(self::ANSWER_BYTES));
 
                 return;
             case Carry::OPEN:
@@ -320,7 +436,10 @@ final class Carrier
 
                 return;
             case Carry::ASK:
-                $this->control($reply, $source, 'challenge', $got['sender'], $got['session'], $this->windowTries($got['sender']));
+                // The challenge too is sent again with the same bytes until its open comes, or the window is gone; a try is
+                // left out when the challenge and its open could no longer come through within it.
+                $window = ($this->profileOf)($got['sender'])['challenge_window'];
+                $this->control($reply, $source, 'challenge', $got['sender'], $got['session'], $this->windowTries($got['sender']), $window - $this->airtime(self::ANSWER_BYTES));
 
                 return;
             case Carry::RECEIPT:
@@ -367,7 +486,7 @@ final class Carrier
                 unset($this->messages[$key]);
                 continue;
             }
-            $this->messages[$key]['next'] = $now + $this->retrySeconds;
+            $this->messages[$key]['next'] = $now + $this->turn($entry['envelope'], $this->retrySeconds);
             // Queued, the try has used nothing: it is counted as it begins, in flush, when it can be given to the
             // transport. Counted here, every new owner used a try as it took the outbox up, room or not, and a
             // budget went with nothing sent (the check of 16 November 2026).
@@ -377,12 +496,12 @@ final class Carrier
             if ($now < $entry['next']) {
                 continue;
             }
-            if ($entry['tries'] >= $entry['most']) {
+            if ($entry['tries'] >= $entry['most'] || $now > $entry['until']) {
                 unset($this->control[$key]);
                 continue;
             }
             $this->control[$key]['tries']++;
-            $this->control[$key]['next'] = $now + $this->retrySeconds;
+            $this->control[$key]['next'] = $now + $this->turn($entry['envelope'], $this->retrySeconds);
             $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? $entry['to']);
         }
         foreach ($this->asks as $pair => $entry) {
@@ -392,7 +511,7 @@ final class Carrier
             unset($this->asks[$pair]);
             if ($entry['tries'] < $this->tries) {
                 [$session, $envelope] = $this->state->ask($entry['pk'], ($this->profileOf)($entry['pk']), $now);
-                $this->asks[self::pair($entry['pk'], $session)] = ['pk' => $entry['pk'], 'session' => $session, 'next' => $now + $this->askRetrySeconds, 'tries' => $entry['tries'] + 1];
+                $this->asks[self::pair($entry['pk'], $session)] = ['pk' => $entry['pk'], 'session' => $session, 'next' => $now + $this->turn($envelope, $this->askRetrySeconds), 'tries' => $entry['tries'] + 1];
                 $this->queue($envelope, $this->addresses[bin2hex($entry['pk'])] ?? null);
             }
         }
@@ -422,8 +541,8 @@ final class Carrier
                     }
                     $this->queue[0][4] = true;
                 }
-                // The next try is one wait after this one began, however long it waited for room.
-                $this->messages[$key]['next'] = ($this->clock)() + $this->retrySeconds;
+                // The next try is one turn after this one began, however long it waited for room.
+                $this->messages[$key]['next'] = ($this->clock)() + $this->turn($entry['envelope'], $this->retrySeconds);
             }
             $frame = array_shift($this->queue[0][0]);
             $id = $this->process->send($frame, $this->queue[0][1]);

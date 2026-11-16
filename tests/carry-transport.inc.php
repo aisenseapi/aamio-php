@@ -609,6 +609,156 @@ $carrier->pump(0.0);
 $check($first > 0 && $wire->written === $first && $stateA->durable['outbox'][$key]['tries'] === 1 && $carrier->outcome($key) === 'unknown' && !isset($carrier->messages[$key])
     && count($said) === 1, 'no try is counted or sent once the profile is of another mode than the bytes were written under');
 
+// Waits on a slow medium (phase 3, 16 November 2026). Over sound a full Earshot packet of 128 bytes takes 16.3 seconds.
+$sound = 128 / 16.3;
+$slowByHand = static function (callable $clock) use ($hostByHand, $sound): TransportProcess {
+    $process = $hostByHand($clock, 1000);
+    $process->properties = ['max_frame_up' => 128, 'max_frame_down' => 128, 'rate_up' => $sound, 'rate_down' => $sound];
+
+    return $process;
+};
+$fastByHand = static function (callable $clock) use ($hostByHand): TransportProcess {
+    $process = $hostByHand($clock, 1000);
+    $process->properties = ['max_frame_up' => 128];
+
+    return $process;
+};
+$outOf = new ReflectionProperty(TransportProcess::class, 'out');
+/** The frames given to a transport with no process, in the order given. */
+$givenFrames = static function (TransportProcess $process) use ($outOf): array {
+    $frames = [];
+    foreach ($outOf->getValue($process) as $line) {
+        if ($line['frame'] !== null) {
+            $frames[] = Codec::unb64url(json_decode($line['data'], true)['frame']);
+        }
+    }
+
+    return $frames;
+};
+$hearByHand = static function (TransportProcess $process, string $envelope): void {
+    foreach (Carry::split($envelope, 128) as $frame) {
+        $process->injected[] = json_encode(['t' => 'received', 'from' => null, 'frame' => Codec::b64url($frame)]);
+    }
+};
+$controlOf = new ReflectionProperty(Carrier::class, 'control');
+/**
+ * A pump, and then sent for every frame the transport was given: these minutes on the fake clock would otherwise pass
+ * the frames' deadlines unanswered and make the transport hung, which the fakes in the other clients never are.
+ */
+$pumpAnswered = static function (Carrier $carrier, TransportProcess $wire): void {
+    $carrier->pump(0.0);
+    foreach ($wire->frames as $id => $frame) {
+        if ($frame['status'] === 'waiting' && !$frame['answered']) {
+            $wire->injected[] = json_encode(['t' => 'sent', 'id' => $id]);
+        }
+    }
+    $wire->poll(0.0);
+};
+
+$envelope = Carry::write($carryA, $carryB->publicRaw(), Carry::READABLE, Carry::MESSAGE, 0, str_repeat("\0", 8), 1, 1794700300, str_repeat('y', 900));
+$frames = Carry::split($envelope, 128);
+$putTogether = static function (CarryReassembly $reassembly, object $clock) use ($frames): array {
+    $early = [];
+    foreach (array_slice($frames, 0, -1) as $frame) {
+        $early[] = $reassembly->add($frame);
+        $clock->now += 20;
+    }
+
+    return [$early, $reassembly->add($frames[count($frames) - 1])];
+};
+$clock = clone $fakeClock;
+$slow = new CarryReassembly($clock, 16.3);
+[$early, $last] = $putTogether($slow, $clock);
+$clock = clone $fakeClock;
+$quick = new CarryReassembly($clock);
+[, $fastLast] = $putTogether($quick, $clock);
+$check(count($frames) === 9 && abs($slow->lifetime(9) - 2 * 9 * 16.3) < 1e-9 && $slow->lifetime(1) === (float) CarryReassembly::SECONDS
+    && array_filter($early, static fn ($whole) => $whole !== null) === [] && $last === $envelope && $fastLast === null && count($quick->groups) === 1,
+    'on a slow medium a group is kept as long as its frames take there, twice over: nine frames over 160 seconds are put together, and a fast medium lets the group go after 120 seconds as before');
+
+// Asked again every 5 seconds, the air was full of asks and nothing else had a turn.
+$clock = clone $fakeClock;
+$wire = $slowByHand($clock);
+$carrier = new Carrier(new CarryState($carryA), $wire, $sealedProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T);
+$carrier->random = static fn (): float => 0.0;
+$carrier->open($carryB->publicRaw());
+$pumpAnswered($carrier, $wire);
+$first = $wire->written;
+$clock->now += 130;
+$pumpAnswered($carrier, $wire);
+$notYet = $wire->written;
+$clock->now += 1;
+$pumpAnswered($carrier, $wire);
+$again = $wire->written;
+$fast = $fastByHand($clock);
+$fastCarrier = new Carrier(new CarryState($carryA), $fast, $sealedProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T);
+$fastCarrier->open($carryB->publicRaw());
+$pumpAnswered($fastCarrier, $fast);
+$clock->now += 5.1;
+$pumpAnswered($fastCarrier, $fast);
+$check($first === 2 && $notYet === 2 && $again === 4 && $carrier->asking($carryB->publicRaw()) && $fast->written === 4,
+    'on a slow medium an ask goes again after the time it and its challenge take there, twice over; on a medium that gives no rate after 5 seconds as before');
+
+// An open that waited for the message behind it and that message's receipt before it went again had two tries in a
+// window of 60 seconds at eight times real time; both were lost in collisions, and so was the session.
+$clock = clone $fakeClock;
+$windowProfile = CarryState::profile('sealed', challengeWindow: 400);
+$stateB = new CarryState($carryB);
+$wire = $slowByHand($clock);
+$carrier = new Carrier(new CarryState($carryA), $wire, $windowProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T);
+$carrier->random = static fn (): float => 0.999;
+$carrier->open($carryB->publicRaw());
+$pumpAnswered($carrier, $wire);
+[, $challenge] = $stateB->deliver(Carry::reassemble($givenFrames($wire)), [$carryA->publicRaw()], $windowProfile, 0.0, $T);
+$hearByHand($wire, $challenge);
+$pumpAnswered($carrier, $wire);
+$given = $wire->written;
+$asksOver = !$carrier->asking($carryB->publicRaw());
+// A turn is 130.4 seconds and up to half of it again: 195.5 with the random part near the top.
+$clock->now += 195;
+$pumpAnswered($carrier, $wire);
+$early = $wire->written;
+$clock->now += 1;
+$pumpAnswered($carrier, $wire);
+$second = $wire->written;
+// The window is 400 seconds, less the challenge's and the open's time on the medium: a try that begins later than 334.8
+// seconds after the challenge came is too late, and the third would begin at 391.5.
+$clock->now += 196;
+$pumpAnswered($carrier, $wire);
+$clock->now += 200;
+$pumpAnswered($carrier, $wire);
+$check($given === 4 && $asksOver && $early === 4 && $second === 6 && $wire->written === 6 && $controlOf->getValue($carrier) === [],
+    'on a slow medium an open goes again on a challenge\'s turn, and no try goes that would come after the window');
+
+// The first ask was answered after it had been asked again with a new session: the second went on being asked again.
+$clock = clone $fakeClock;
+$stateB = new CarryState($carryB);
+$wire = $fastByHand($clock);
+$carrier = new Carrier(new CarryState($carryA), $wire, $sealedProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T);
+$carrier->open($carryB->publicRaw());
+$pumpAnswered($carrier, $wire);
+$firstAsk = Carry::reassemble($givenFrames($wire));
+$clock->now += 5.1;
+$pumpAnswered($carrier, $wire);
+$askedAgain = $carrier->asking($carryB->publicRaw()) && $wire->written === 4;
+[, $challenge] = $stateB->deliver($firstAsk, [$carryA->publicRaw()], $sealedProfile, 0.0, $T);
+$hearByHand($wire, $challenge);
+$pumpAnswered($carrier, $wire);
+$ended = !$carrier->asking($carryB->publicRaw());
+for ($i = 0; $i < 4; $i++) {
+    $clock->now += 5.1;
+    $pumpAnswered($carrier, $wire);
+}
+$check($askedAgain && $ended && !$carrier->asking($carryB->publicRaw()) && $carrier->openSession($carryB->publicRaw()) !== null,
+    'a challenge ends every ask to that partner, one asked again since as well, and none is asked again');
+
+$slowCarrier = new Carrier(new CarryState($carryA), $slowByHand(clone $fakeClock), $sealedProfile, [$carryB->publicRaw()], clone $fakeClock, static fn (): int => $T);
+$fastCarrier = new Carrier(new CarryState($carryA), $fastByHand(clone $fakeClock), $sealedProfile, [$carryB->publicRaw()], clone $fakeClock, static fn (): int => $T);
+$near = static fn (float $a, float $b): bool => abs($a - $b) < 1e-6;
+$check($near($slowCarrier->handshakeSeconds(), 2 * 16.3 * 4) && $near($slowCarrier->windowForOpens(), 2 * 2 * 16.3 + 2 * 1.5 * 2 * 16.3 * 4)
+    && $near($slowCarrier->patience(12), 2 * 16.3 * (4 * 2 + 2)) && [$fastCarrier->handshakeSeconds(), $fastCarrier->windowForOpens(), $fastCarrier->patience(12)] === [0.0, 0.0, 0.0],
+    'what a slow medium needs for a session and a send is measured in its frames: over sound 130.4, 456.4 and 326 seconds, and on a medium that gives no rate nothing');
+
 // Two homes over the simulated radio, in this one process.
 $simRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-carry-sim-' . bin2hex(random_bytes(4));
 $freePort = static function (): int {

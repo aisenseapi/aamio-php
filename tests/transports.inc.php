@@ -16,12 +16,14 @@ declare(strict_types=1);
  */
 
 use Aamio\Addons;
+use Aamio\Carrier;
 use Aamio\CarryState;
 use Aamio\Codec;
 use Aamio\Http;
 use Aamio\McpServer;
 use Aamio\Runtime;
 use Aamio\TransportProcess;
+use Aamio\TransportService;
 use Aamio\Transports;
 
 echo "transports\n";
@@ -89,6 +91,18 @@ try {
     $check($bound['routes'] === [['transport' => 'lan', 'profile' => 'sealed']] && str_contains($bound['note'], 'never over HTTPS instead'), 'bind: a partner over lan, sealed unless another profile is named');
     $readable = Transports::profileAdd($made['c'], 'open-lan', true, 300, 30);
     $check($readable['profile']['mode'] === 'readable' && str_contains($readable['note'], 'everyone who hears the medium can read'), 'a readable profile is made only by choice, and says what it means');
+    // A profile whose window is too short for a slow medium is said in attention, with the fix (phase 3, 16 November
+    // 2026): a carrier over a transport that says the rate of sound, 128 bytes in 16.3 seconds.
+    $slowWire = new TransportProcess('lan', '0.1.0', [], null, []);
+    $slowWire->properties = ['max_frame_up' => 128, 'max_frame_down' => 128, 'rate_up' => 128 / 16.3, 'rate_down' => 128 / 16.3];
+    $slowCarrier = new Carrier($made['c']->transportService()->carry(), $slowWire, CarryState::profile('sealed'), []);
+    (new ReflectionMethod(TransportService::class, 'checkWindows'))->invoke($made['c']->transportService(), 'lan', $slowCarrier);
+    $windowNotes = array_values(array_filter($made['c']->attentionTaken(), static fn (array $noted): bool => $noted['state'] === 'window_too_short'));
+    $check(count($windowNotes) === 1 && $windowNotes[0]['channel'] === 'lan' && str_contains($windowNotes[0]['what'], 'the profile sealed gives a challenge 60 seconds')
+        && str_contains($windowNotes[0]['what'], 'take up to 65 seconds in the air')
+        && str_contains($windowNotes[0]['what'], 'aamio transport profile add sealed-slow --window 480 --lifetime 3600')
+        && str_contains($windowNotes[0]['what'], 'aamio transport bind d lan --profile sealed-slow'),
+        'a profile whose window is too short for a slow medium is said in attention, with a window that gives an open three tries');
     $code = static function (callable $try): ?string {
         try {
             $try();

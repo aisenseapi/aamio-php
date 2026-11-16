@@ -5014,11 +5014,12 @@ final class Runtime
         $content = Codec::json($body);
         $budget = $this->client->workBudget;
         $wait = $budget === null ? Transports::$waitDefault : max(1, min(Transports::$waitDefault, (int) $budget));
-        $result = $this->transportService()->send(Codec::unb64url($partner['key']), $content, $wait);
+        // Without a work budget, as on the command line, a send waits as long as the medium needs: over sound, minutes.
+        $result = $this->transportService()->send(Codec::unb64url($partner['key']), $content, $wait, $budget === null);
         // The sha256 is of the envelope the transport carries: what their runtime reads it under and names as seen, as
         // the sha256 of a send over HTTPS is what the service stored.
         $sent = ['to' => $partner['name'], 'via' => $result['via'], 'profile' => $result['profile'], 'mark' => $result['mark'], 'sha256' => $result['sha256'], 'status' => $result['status']];
-        $sent['note'] = strtr(self::CARRIED_NOTES[$result['status']], ['%via' => $result['via'], '%wait' => (string) $wait]);
+        $sent['note'] = strtr(self::CARRIED_NOTES[$result['status']], ['%via' => $result['via'], '%wait' => (string) ($result['waited'] ?? $wait)]);
         try {
             $this->archive('sent', ['kind' => 'sent', 'at' => time(), 'to' => $partner['name'], 'via' => $result['via'], 'profile' => $result['profile'],
                 'mark' => $result['mark'], 'status' => $result['status'], 'body' => $archivedData === null ? $body : ['data' => $archivedData] + $body]);
@@ -5094,6 +5095,12 @@ final class Runtime
      * For the transport service: what a carrier has to tell the user, as a message that is not sent again, in attention
      * under the transport's name, added to what waits there unread.
      */
+    /** What a transport has to tell the user, in attention under its name and the state given. */
+    public function noteTransport(string $transport, string $state, string $text): void
+    {
+        $this->noteTrouble($transport, $state, $text);
+    }
+
     public function notSentAgain(string $transport, string $text): void
     {
         $earlier = $this->attention[$transport . '|not_sent_again'] ?? null;

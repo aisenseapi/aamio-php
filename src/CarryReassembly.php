@@ -10,6 +10,12 @@ namespace Aamio;
  * A copy of a frame already held is not held again, and room is made before a
  * frame is held, so what is held never passes BYTES, whatever comes before
  * anything is verified.
+ *
+ * A group is let go SECONDS after its first frame, or on a slow medium after
+ * twice the time its frames take there, whichever is longer. $frameSeconds is a
+ * full frame's time on the medium, as the transport's rate says. Over sound a
+ * frame takes 16 seconds and more, so a message of more than six frames could
+ * never be put together within 120 seconds, and went again and again for nothing.
  */
 final class CarryReassembly
 {
@@ -17,16 +23,22 @@ final class CarryReassembly
     public const BYTES = 262144;
     public const SECONDS = 120;
 
-    /** @var array<string, array{first: float, frames: array<int, string>, bytes: int}> 't' and the tag in hex => the group */
+    /** @var array<string, array{first: float, frames: array<int, string>, bytes: int, count: int}> 't' and the tag in hex => the group */
     public array $groups = [];
     /** groups and frames let go to stay within A10, counted */
     public int $dropped = 0;
     /** @var callable(): float */
     private $clock;
 
-    public function __construct(?callable $clock = null)
+    public function __construct(?callable $clock = null, private float $frameSeconds = 0.0)
     {
         $this->clock = $clock ?? static fn (): float => hrtime(true) / 1e9;
+    }
+
+    /** How long a group of $count frames is kept after its first frame. */
+    public function lifetime(int $count): float
+    {
+        return max((float) self::SECONDS, 2 * $count * $this->frameSeconds);
     }
 
     public function held(): int
@@ -39,7 +51,7 @@ final class CarryReassembly
     {
         $now = ($this->clock)();
         foreach ($this->groups as $tag => $group) {
-            if ($now - $group['first'] > self::SECONDS) {
+            if ($now - $group['first'] > $this->lifetime($group['count'])) {
                 unset($this->groups[$tag]);
             }
         }
@@ -71,7 +83,7 @@ final class CarryReassembly
             unset($this->groups[$oldest]);
             $this->dropped++;
         }
-        $this->groups[$tag] ??= ['first' => $now, 'frames' => [], 'bytes' => 0];
+        $this->groups[$tag] ??= ['first' => $now, 'frames' => [], 'bytes' => 0, 'count' => ord($frame[8])];
         $this->groups[$tag]['frames'][$index] = $frame;
         $this->groups[$tag]['bytes'] += strlen($frame);
         $frames = array_values($this->groups[$tag]['frames']);

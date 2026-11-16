@@ -220,6 +220,7 @@ final class TransportService
                     note: fn (string $text) => $this->runtime->notSentAgain((string) $name, $text));
                 $this->running[$name]['process'] = $process;
                 $this->runtime->logged('transport ' . $name . ': up');
+                $this->checkWindows((string) $name, $this->running[$name]['carrier']);
             } catch (TransportFailed $error) {
                 $process->stop();
                 $this->crashed($name, $error);
@@ -230,6 +231,55 @@ final class TransportService
                 $this->running[$name]['down'] = rtrim($error->getMessage(), '.') . '. It stays down until that is put right and aamio starts again';
                 $this->runtime->logged('transport ' . $name . ': down: ' . $this->running[$name]['down']);
             }
+        }
+    }
+
+    /**
+     * Say it when a partner's profile gives a challenge less time than this medium needs for it and its open.
+     *
+     * Over sound a challenge and its open take close to a minute in the air alone, and two with the waits for a turn, and
+     * the profile sealed gives 60 seconds: most opens would come too late and be turned down, few sessions would open,
+     * and sends would end in carry_not_sent or without a receipt, with nothing to say why.
+     */
+    private function checkWindows(string $name, Carrier $carrier): void
+    {
+        $need = $carrier->handshakeSeconds();
+        if ($need <= 0) {
+            return;
+        }
+        try {
+            $bindings = $this->config->bindings();
+        } catch (\RuntimeException) {
+            return;
+        }
+        foreach ($bindings as $key => $routes) {
+            $route = null;
+            foreach ($routes as $candidate) {
+                if (($candidate['transport'] ?? null) === $name) {
+                    $route = $candidate;
+                    break;
+                }
+            }
+            $partner = $this->runtime->partnerByKey((string) $key);
+            if ($route === null || $partner === null) {
+                continue;
+            }
+            try {
+                $window = Transports::checked($this->config->profile($route['profile']))['challenge_window'];
+            } catch (\RuntimeException | \InvalidArgumentException) {
+                continue;
+            }
+            if ($window >= $need) {
+                continue;
+            }
+            // Long enough for an open to have three tries, in whole minutes, as long as a profile can give at the most.
+            $longer = min(max(Transports::CHALLENGE_WINDOW_SLOW, (int) (ceil($carrier->windowForOpens() / 60) * 60)), 600);
+            $this->runtime->noteTransport($name, 'window_too_short', 'the profile ' . $route['profile'] . ' gives a challenge ' . $window
+                . ' seconds to be answered, and on ' . $name . ' a challenge and its open take up to ' . (int) $carrier->airtimeOfHandshake()
+                . ' seconds in the air, more with the waits for a turn: most sessions with ' . $partner['name'] . ' cannot open, and a send to '
+                . $partner['name'] . ' ends in carry_not_sent or gets no receipt. A window of ' . $longer . ' seconds gives an open three tries: '
+                . 'aamio transport profile add ' . $route['profile'] . '-slow --window ' . $longer . ' --lifetime 3600, then aamio transport unbind '
+                . $partner['name'] . ' and aamio transport bind ' . $partner['name'] . ' ' . $name . ' --profile ' . $route['profile'] . '-slow');
         }
     }
 
@@ -362,11 +412,14 @@ final class TransportService
      * and how far it came, and for the trace its size and whether it went sealed. The sha256 is the one the partner's
      * runtime reads it under and names as seen once it has read it.
      *
+     * With $stretch, the wait is as long as the medium needs as well, once its carrier is up and has said its rate: a
+     * session and a message over sound take minutes. waited says how long it was.
+     *
      * status is confirmed when the receipt came, handed_over when every frame of a try was given to the medium and no
      * receipt came within $wait, queued when the message waits in the outbox for room, and unknown when its tries are
      * used without a receipt. A partner that gives no challenge within $wait gets nothing: carry_not_sent.
      */
-    public function send(string $pk, string $content, ?int $wait = null): array
+    public function send(string $pk, string $content, ?int $wait = null, bool $stretch = false): array
     {
         $wait ??= Transports::$waitDefault;
         $route = $this->routeOf($pk);
@@ -374,8 +427,15 @@ final class TransportService
             throw new CodedRuntime('transport_unbound', 'that partner has no transport');
         }
         $name = $route['transport'];
-        $until = self::now() + $wait;
+        $began = self::now();
+        $until = $began + $wait;
         $this->start();
+        if ($stretch && $this->wait(fn (): bool => $this->carrierOf($name) !== null, $until)) {
+            $carrier = $this->carrierOf($name);
+            if ($carrier !== null) {
+                $until = max($until, $began + $carrier->patience(strlen($content)));
+            }
+        }
         $asked = null;
         $opened = function () use ($name, $pk, &$asked): bool {
             // A carrier that started again after a crash knows nothing of the ask, so it asks again.
@@ -387,14 +447,18 @@ final class TransportService
                 return true;
             }
             if ($asked !== $carrier) {
-                $carrier->open($pk);
+                // An ask under way, as one an earlier send made before it gave up, is answered all the same: a new one
+                // beside it only adds frames, and on a half-duplex medium they take each other's turns.
+                if (!$carrier->asking($pk)) {
+                    $carrier->open($pk);
+                }
                 $asked = $carrier;
             }
 
             return false;
         };
         if (!$this->wait($opened, $until)) {
-            throw new CodedRuntime('carry_not_sent', 'the partner did not answer on ' . $name . ' within ' . $wait . ' seconds, so nothing was sent. Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ' . $name);
+            throw new CodedRuntime('carry_not_sent', 'the partner did not answer on ' . $name . ' within ' . (int) ($until - $began) . ' seconds, so nothing was sent. Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ' . $name);
         }
         $carrier = $this->carrierOf($name);
         try {
@@ -414,7 +478,7 @@ final class TransportService
         }
 
         return ['via' => $name, 'profile' => $route['profile'], 'mark' => $key, 'status' => $outcome, 'sha256' => $written['sha256'],
-            'bytes' => strlen($envelope), 'sealed' => ord($envelope[strlen(Carry::MAGIC)]) === Carry::SEALED];
+            'bytes' => strlen($envelope), 'sealed' => ord($envelope[strlen(Carry::MAGIC)]) === Carry::SEALED, 'waited' => (int) ($until - $began)];
     }
 
     /** @return list<array{mark: string, outcome: string}> what was sent over a transport, as aamio transport list shows it, oldest first */

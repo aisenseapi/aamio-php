@@ -24,6 +24,8 @@ final class Transports
     public const UNBOUND_CHANNEL = 'carry';
     /** How often a running carrier's list of whom it takes messages from is read again. */
     public const KNOWN_REFRESH = 2.0;
+    /** The window a profile for a slow medium is told to give, at the least. */
+    public const CHALLENGE_WINDOW_SLOW = 300;
 
     /** @var list<float> how long a transport that stopped waits before it is started again; a property, so a test can shorten it */
     public static array $restartAfter = [1.0, 5.0, 30.0];
