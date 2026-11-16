@@ -49,6 +49,12 @@ try {
                     $party['state'] = new CarryState($state->keys, $state->path);
                     break;
                 case 'prune':
+                    // The scenarios are about the guard against replays, and no program in them takes a message. A
+                    // session with a message nobody has taken is kept whatever its age, so the program takes what has
+                    // come before it tidies.
+                    foreach ($state->pending() as [$waiting]) {
+                        $state->handedOver($waiting);
+                    }
                     $state->prune($step['now']);
                     break;
                 case 'ask':
@@ -351,6 +357,117 @@ try {
     $receiptTwo = $atB->deliver($first, [$pkA], $sealedOneWay, 1.0, $T)[1];
     $check($receiptOne === $receiptTwo && $atB->deliver($second, [$pkA], $sealedOneWay, 2.0, $T)[1] !== $receiptOne,
         'a sealed receipt for the same message has the same bytes every time, and another message gets another');
+
+    echo "carry: the follow-up check of 2026-11-15\n";
+
+    // Finding 3: tidying takes what guards against a replay when its time is up, never a message the program has not taken.
+    $path = $review . DIRECTORY_SEPARATOR . 'untaken' . DIRECTORY_SEPARATOR . 'b.json';
+    $sender = new CarryState($keysA);
+    $session = $sender->oneWay($pkB, $T + 300);
+    $envelope = $sender->send($pkB, $session, 'hei', $oneWay);
+    $atB = new CarryState($keysB, $path);
+    $first = $atB->deliver($envelope, [$pkA], $oneWay, 0, $T)[0];
+    $key = CarryState::mark($pkA, $session, 1);
+    $whole = [[$key, $pkA, $session, 1, 'hei']];
+    $atB->prune($T + 300 + CarryState::SKEW);
+    $before = (new CarryState($keysB, $path))->pending() === $whole;
+    $atB->prune($T + 300 + CarryState::SKEW + 1);
+    $again = new CarryState($keysB, $path);
+    $check($first === 'accepted' && $before && $again->pending() === $whole,
+        'a message nobody has taken outlives the guard against replays: the receipt said it was kept, and the program has not said it has it');
+    try {
+        $copy = $again->deliver($envelope, [$pkA], $oneWay, 0, $T + 300 + CarryState::SKEW + 1)[0];
+    } catch (CarryRefused $refused) {
+        $copy = $refused->carryCode;
+    }
+    $again->handedOver($key);
+    $again->prune($T + 300 + CarryState::SKEW + 1);
+    $after = new CarryState($keysB, $path);
+    $check($copy === 'duplicate' && $after->pending() === [] && $after->durable['incoming'] === [] && $after->durable['stored'] === []
+        && $carryCode(static fn () => $after->deliver($envelope, [$pkA], $oneWay, 0, $T)) === 'carry_deadline_passed',
+        'it is kept with its session, so a copy is still known as one, and once taken it goes with its session at the next tidying');
+
+    // Finding 4: a receipt whose save failed is not shown as confirmed; what only reads refuses as deliver does.
+    $path = $review . DIRECTORY_SEPARATOR . 'unsaved' . DIRECTORY_SEPARATOR . 'a.json';
+    $atA = new CarryState($keysA, $path);
+    $receiver = new CarryState($keysB);
+    $session = $atA->oneWay($pkB, $T + 300);
+    $envelope = $atA->send($pkB, $session, 'hei', $oneWay);
+    $key = CarryState::mark($pkB, $session, 1);
+    [, $receipt] = $receiver->deliver($envelope, [$pkA], $oneWay, 0, $T);
+    mkdir($path . '.tmp');
+    $codes = [$carryCode(static fn () => $atA->deliver($receipt, [$pkB], $oneWay, 0, $T))];
+    foreach ([static fn () => $atA->outcome($key), static fn () => $atA->unconfirmed(), static fn () => $atA->pending(), static fn () => $atA->kept($key),
+              static fn () => $atA->giveUp($key)] as $attempt) {
+        $codes[] = $carryCode($attempt);
+    }
+    rmdir($path . '.tmp');
+    $onFile = (new CarryState($keysA, $path))->outcome($key);
+    $atA->restart();
+    $check($codes === array_fill(0, 6, 'carry_storage_failed') && $onFile === 'waiting' && $atA->outcome($key) === 'waiting' && $atA->deliver($receipt, [$pkB], $oneWay, 0, $T)[0] === 'accepted'
+        && (new CarryState($keysA, $path))->outcome($key) === 'confirmed',
+        'after a write fails nothing is read from memory either: outcome, unconfirmed, pending, kept and giveUp refuse as deliver does, until the state is read again');
+
+    // Finding 4, the receiver: deliver refuses with carry_storage_failed, and pending shows nothing of what never reached the file.
+    $inTheWay = $review . DIRECTORY_SEPARATOR . 'in-the-way-of-pending';
+    $receiver = new CarryState($keysB, $inTheWay . DIRECTORY_SEPARATOR . 'carry.json');
+    file_put_contents($inTheWay, 'not a folder');
+    $envelope = Carry::write($keysA, $pkB, Carry::READABLE, Carry::MESSAGE, 0, str_repeat("\0", 8), 1, $T + 300, 'hei');
+    $check($carryCode(static fn () => $receiver->deliver($envelope, [$pkA], $oneWay, 0, $T)) === 'carry_storage_failed'
+        && $carryCode(static fn () => $receiver->pending()) === 'carry_storage_failed', 'a message that was not kept is not listed as waiting after the write failed');
+
+    // Finding 2, in the state: given up, the bytes go and the outcome is unknown; the hash stays, so a late receipt confirms it.
+    $path = $review . DIRECTORY_SEPARATOR . 'given-up' . DIRECTORY_SEPARATOR . 'a.json';
+    $atA = new CarryState($keysA, $path);
+    $receiver = new CarryState($keysB);
+    $session = $atA->oneWay($pkB, $T + 300);
+    $envelope = $atA->send($pkB, $session, 'hei', $oneWay);
+    $key = CarryState::mark($pkB, $session, 1);
+    $once = $atA->giveUp($key) && !$atA->giveUp($key);
+    $again = new CarryState($keysA, $path);
+    $gone = $again->outcome($key) === 'unknown' && $again->unconfirmed() === [] && $again->durable['outbox'][$key]['envelope'] === null && !$again->tried($key);
+    [, $receipt] = $receiver->deliver($envelope, [$pkA], $oneWay, 0, $T);
+    $check($once && $gone && $again->deliver($receipt, [$pkB], $oneWay, 0, $T)[0] === 'accepted' && $again->outcome($key) === 'confirmed',
+        'a message given up is never sent again and keeps its mark and hash, so a receipt that comes late confirms it');
+
+    // Finding 10: the 64 in all are counted with each challenge's own window, not with the window of the one who asks now.
+    $wide = CarryState::profile('readable', true, false, 3600, 600);
+    $narrow = CarryState::profile('readable', true, false, 600, 60);
+    $partners = [];
+    for ($n = 1; $n <= 9; $n++) {
+        $partners[] = Keys::fromSeedHex(str_repeat(sprintf('%02x', $n), 32));
+    }
+    $ninth = $partners[8]->publicRaw();
+    $known = array_map(static fn (Keys $keys): string => $keys->publicRaw(), $partners);
+    $profileOf = static fn (string $from): array => $from === $ninth ? $narrow : $wide;
+    $atB = new CarryState($keysB);
+    $openings = [];
+    $given = true;
+    foreach (array_slice($partners, 0, 8) as $partner) {
+        $asking = new CarryState($partner);
+        for ($n = 0; $n < CarryState::MAX_WAITING_PER_PARTNER; $n++) {
+            [, $ask] = $asking->ask($pkB, $wide, 0.0);
+            [$result, $challenge] = $atB->deliver($ask, $known, $profileOf, 0.0, $T);
+            $given = $given && $result === 'accepted';
+        }
+        $openings[] = [$asking, $challenge];
+    }
+    $late = new CarryState($partners[8]);
+    [, $ask] = $late->ask($pkB, $narrow, 100.0);
+    $full = $carryCode(static fn () => $atB->deliver($ask, $known, $profileOf, 100.0, $T)) === 'carry_rate_limited';
+    // The 64 still wait: an open for one of them is taken at the same moment.
+    [$asking, $challenge] = $openings[0];
+    [, $opening] = $asking->deliver($challenge, [$pkB], $wide, 100.0, $T);
+    $taken = $atB->deliver($opening, $known, $profileOf, 100.0, $T)[0] === 'accepted';
+    // One is used now, so there is room for one more.
+    [, $ask] = $late->ask($pkB, $narrow, 100.0);
+    $room = $atB->deliver($ask, $known, $profileOf, 100.0, $T)[0] === 'accepted';
+    // And past their own window the old ones no longer count, whatever window the asker has.
+    for ($n = 0; $n < CarryState::MAX_WAITING_PER_PARTNER - 1; $n++) {
+        [, $ask] = $late->ask($pkB, $narrow, 700.0);
+        $room = $room && $atB->deliver($ask, $known, $profileOf, 700.0, $T)[0] === 'accepted';
+    }
+    $check($given && $full && $taken && $room, 'every challenge waits in the window it was given under, whatever window the one who asks now has');
 } finally {
     $removeTree($stateRoot);
 }

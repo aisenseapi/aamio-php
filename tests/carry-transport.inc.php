@@ -18,6 +18,7 @@ use Aamio\Carry;
 use Aamio\CarryReassembly;
 use Aamio\CarryRefused;
 use Aamio\CarryState;
+use Aamio\Codec;
 use Aamio\Keys;
 use Aamio\TransportFailed;
 use Aamio\TransportProcess;
@@ -365,6 +366,156 @@ try {
     $loopback->stop();
     $removeTree($resumeRoot);
 }
+
+// The follow-up check of 2026-11-15, findings 2 and 5. The transport is a host with no process: what a Carrier needs of
+// one, with the room in the test's hands and every frame given to it counted. Nothing is written, and no answer comes.
+$hostByHand = static function (callable $clock, int $room): TransportProcess {
+    $process = new TransportProcess('medium', '0.1.0', [], null, [], $clock);
+    $process->properties = ['max_frame_up' => 64];
+    $process->injected[] = '{"t":"ready","credit":' . $room . ',"sends_read":0}';
+    $process->poll();
+
+    return $process;
+};
+/** Room for $room frames more, from the next pump on. */
+$roomByHand = static function (TransportProcess $process, int $room): void {
+    $process->injected[] = '{"t":"ready","credit":' . $room . ',"sends_read":' . $process->written . '}';
+};
+$queueOf = new ReflectionProperty(Carrier::class, 'queue');
+/** Whether a try at the message waits in the carrier's queue, not one frame of it given to the transport yet. */
+$waitsUnbegun = static fn (Carrier $carrier, string $key): bool => array_filter($queueOf->getValue($carrier), static fn (array $item): bool => $item[2] === $key && $item[3] === []) !== [];
+
+// Finding 5: with a budget of two and no room, three rounds used both tries and left two copies in the queue, which went
+// out when room came, after unknown had been said.
+$clock = clone $fakeClock;
+$stateA = new CarryState($carryA);
+$session = $openedPair($stateA, new CarryState($carryB));
+$wire = $hostByHand($clock, 0);
+$carrier = new Carrier($stateA, $wire, $reviewProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0, 5.0, 2);
+$key = $carrier->send($carryB->publicRaw(), $session, 'hei');
+foreach ([0.0, 2.1, 2.1] as $step) {
+    $clock->now += $step;
+    $carrier->pump(0.0);
+}
+$check([$carrier->outcome($key), $stateA->durable['outbox'][$key]['tries'], count($queueOf->getValue($carrier)), $wire->written] === ['waiting', 1, 1, 0],
+    'no try is counted while the first waits for room, and no copy is queued behind it');
+$roomByHand($wire, 1000);
+$carrier->pump(0.0);
+$first = $wire->written;
+$went = $first > 0 && $queueOf->getValue($carrier) === [];
+$clock->now += 2.1;
+$carrier->pump(0.0);
+$counted = $wire->written === 2 * $first && $stateA->durable['outbox'][$key]['tries'] === 2;
+$clock->now += 2.1;
+$carrier->pump(0.0);
+$over = $carrier->outcome($key) === 'unknown' && $stateA->durable['outbox'][$key]['envelope'] === null;
+for ($i = 0; $i < 3; $i++) {
+    $clock->now += 2.1;
+    $carrier->pump(0.0);
+}
+$check($went && $counted && $over && $wire->written === 2 * $first, 'the one try goes when there is room, the second is counted as it begins, and nothing goes after the tries are used');
+
+// Finding 5: a try that has not begun is not begun after the message is over.
+$clock = clone $fakeClock;
+$stateA = new CarryState($carryA);
+$stateB = new CarryState($carryB);
+$session = $openedPair($stateA, $stateB);
+$wire = $hostByHand($clock, 1000);
+$carrier = new Carrier($stateA, $wire, $reviewProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0, 5.0, 5);
+$key = $carrier->send($carryB->publicRaw(), $session, 'hei');
+$carrier->pump(0.0);
+$first = $wire->written;
+$roomByHand($wire, 0);
+$clock->now += 2.1;
+$carrier->pump(0.0);
+$waits = $waitsUnbegun($carrier, $key) && $stateA->durable['outbox'][$key]['tries'] === 2;
+[, $receipt] = $stateB->deliver($carrier->messages[$key]['envelope'], [$carryA->publicRaw()], $reviewProfile, 1.0, $T);
+foreach (Carry::split($receipt, 64) as $frame) {
+    $wire->injected[] = json_encode(['t' => 'received', 'from' => null, 'frame' => Codec::b64url($frame)]);
+}
+$carrier->pump(0.0);
+$confirmed = $carrier->confirmed($key);
+$roomByHand($wire, 1000);
+$carrier->pump(0.0);
+$check($first > 0 && $waits && $confirmed && $wire->written === $first && $queueOf->getValue($carrier) === [], 'a try that waits for room is not begun once its receipt has come');
+
+// Finding 2: a new owner compared only the partner's key, and sent the old readable bytes though the profile said sealed.
+$clock = clone $fakeClock;
+$sealedProfile = CarryState::profile('sealed');
+$modeRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-carry-mode-' . bin2hex(random_bytes(4));
+$path = $modeRoot . DIRECTORY_SEPARATOR . 'a.json';
+$stateA = new CarryState($carryA, $path);
+$stateB = new CarryState($carryB);
+[$session, $ask] = $stateA->ask($carryB->publicRaw(), $reviewProfile, 0.0);
+[, $challenge] = $stateB->deliver($ask, [$carryA->publicRaw()], $reviewProfile, 0.0, $T);
+$stateA->deliver($challenge, [$carryB->publicRaw()], $reviewProfile, 0.0, $T);
+$envelope = $stateA->send($carryB->publicRaw(), $session, 'lesbar tekst', $reviewProfile, 0, null, 5);
+$key = CarryState::mark($carryB->publicRaw(), $session, 1);
+$readable = ord($envelope[4]) === Carry::READABLE && str_contains($envelope, 'lesbar tekst');
+$said = [];
+$note = static function (string $text) use (&$said): void {
+    $said[] = $text;
+};
+try {
+    $wire = $hostByHand($clock, 1000);
+    $carrier = new Carrier(new CarryState($carryA, $path), $wire, $sealedProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0, 5.0, 5, $note);
+    $leftAlone = !isset($carrier->messages[$key]);
+    for ($i = 0; $i < 4; $i++) {
+        $clock->now += 3;
+        $carrier->pump(0.0);
+    }
+    $kept = new CarryState($carryA, $path);
+    $check($readable && $leftAlone && $wire->written === 0 && $kept->outcome($key) === 'unknown' && $kept->durable['outbox'][$key]['envelope'] === null,
+        'bytes written readable are not taken up under a sealed profile: nothing readable goes out, and the message is given up with its mark and hash kept');
+    $check(count($said) === 1 && str_contains($said[0], $key) && str_contains($said[0], 'readable') && str_contains($said[0], 'sealed') && str_contains($said[0], 'not sent again'),
+        'and the user is told, once, that it is not sent again and why');
+    // The same mode is taken up as before. One state at a time on the file, as one owner has the home.
+    [$session, $ask] = $kept->ask($carryB->publicRaw(), $sealedProfile, 10.0);
+    [, $challenge] = $stateB->deliver($ask, [$carryA->publicRaw()], $sealedProfile, 10.0, $T);
+    $kept->deliver($challenge, [$carryB->publicRaw()], $sealedProfile, 10.0, $T);
+    $kept->send($carryB->publicRaw(), $session, 'forseglet', $sealedProfile, 0, null, 5);
+    $carrier = new Carrier(new CarryState($carryA, $path), $hostByHand($clock, 1000), $sealedProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0, 5.0, 5, $note);
+    $check(array_keys($carrier->messages) === [CarryState::mark($carryB->publicRaw(), $session, 1)] && count($said) === 1, 'bytes written under the mode the profile has now are taken up as before');
+} finally {
+    $removeTree($modeRoot);
+}
+
+// Finding 2, while it runs: the profile changed while a try waited for room, and the try is not begun.
+$modeNow = 'readable';
+$profileNow = static function (string $pk) use (&$modeNow, $reviewProfile, $sealedProfile): array {
+    return $modeNow === 'sealed' ? $sealedProfile : $reviewProfile;
+};
+$clock = clone $fakeClock;
+$stateA = new CarryState($carryA);
+$session = $openedPair($stateA, new CarryState($carryB));
+$wire = $hostByHand($clock, 0);
+$said = [];
+$carrier = new Carrier($stateA, $wire, $profileNow, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0, 5.0, CarryState::TRIES_DEFAULT, $note);
+$key = $carrier->send($carryB->publicRaw(), $session, 'lesbar');
+$carrier->pump(0.0);
+$waits = $waitsUnbegun($carrier, $key);
+$modeNow = 'sealed';
+$roomByHand($wire, 1000);
+$carrier->pump(0.0);
+$check($waits && $wire->written === 0 && $queueOf->getValue($carrier) === [] && !isset($carrier->messages[$key]) && $carrier->outcome($key) === 'unknown'
+    && count($said) === 1 && str_contains($said[0], 'not sent again'), 'a try that waits for room is not begun once the profile is of another mode, and the user is told');
+
+// Finding 2, between two tries: the profile changed after the first try went, and no try is counted for a message given up.
+$modeNow = 'readable';
+$clock = clone $fakeClock;
+$stateA = new CarryState($carryA);
+$session = $openedPair($stateA, new CarryState($carryB));
+$wire = $hostByHand($clock, 1000);
+$said = [];
+$carrier = new Carrier($stateA, $wire, $profileNow, [$carryB->publicRaw()], $clock, static fn (): int => $T, 2.0, 5.0, CarryState::TRIES_DEFAULT, $note);
+$key = $carrier->send($carryB->publicRaw(), $session, 'lesbar');
+$carrier->pump(0.0);
+$first = $wire->written;
+$modeNow = 'sealed';
+$clock->now += 2.1;
+$carrier->pump(0.0);
+$check($first > 0 && $wire->written === $first && $stateA->durable['outbox'][$key]['tries'] === 1 && $carrier->outcome($key) === 'unknown' && !isset($carrier->messages[$key])
+    && count($said) === 1, 'no try is counted or sent once the profile is of another mode than the bytes were written under');
 
 // Two homes over the simulated radio, in this one process.
 $simRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-carry-sim-' . bin2hex(random_bytes(4));

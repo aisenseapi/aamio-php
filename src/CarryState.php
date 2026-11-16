@@ -20,8 +20,10 @@ namespace Aamio;
  * the program says it has it, each message sent with its bytes and its tries
  * until its receipt comes, the time floor and the count of challenges given.
  * A write that fails is carry_storage_failed with no receipt, and the state
- * then refuses everything until restart has read the file again. Nothing that
- * guards against a replay is deleted before A6.9 allows it.
+ * then refuses everything, what only reads too, until restart has read the
+ * file again. Nothing that guards against a replay is deleted before A6.9
+ * allows it, and a session with a message the program has not taken is kept
+ * past that, until the program says it has it.
  *
  * The kept state has one shape in every runtime, since another runtime may take
  * the home over: docs/aamio-carry-v1-tilstand-2026-11-15.md in the service says
@@ -68,6 +70,7 @@ final class CarryState
     public bool $broken = false;
     private array $used;
     private ?int $keptFloor;
+    /** @var array<string, array{nonce: string, t0: float, used: bool, window: int}> pair => a challenge given, with the window of the profile it was given under */
     private array $waiting = [];
     private array $anchors = [];
     private array $askedAt = [];
@@ -497,9 +500,13 @@ final class CarryState
     /**
      * waiting while the bytes are kept for another try, confirmed when the receipt came, and unknown otherwise: the
      * tries ran out, so it may or may not have arrived, or nothing is known of it here.
+     *
+     * After a write failed nothing is answered from memory: what is held there may be what never reached the file, as
+     * a receipt taken in whose save failed (the follow-up check of 15 November 2026).
      */
     public function outcome(string $key): string
     {
+        $this->check();
         $entry = $this->durable['outbox'][$key] ?? null;
         if ($entry === null) {
             return 'unknown';
@@ -535,9 +542,28 @@ final class CarryState
         return true;
     }
 
+    /**
+     * A message that cannot go on as it was written, as one sealed under a profile the partner no longer has: its bytes
+     * go, as when the tries are used, and its mark and hash stay, so a receipt that comes late still confirms it. It is
+     * never sealed again under its mark (B5, A7). True when there was something to give up.
+     */
+    public function giveUp(string $key): bool
+    {
+        $this->check();
+        $entry = $this->durable['outbox'][$key] ?? null;
+        if ($entry === null || $entry['receipt'] || $entry['envelope'] === null) {
+            return false;
+        }
+        $this->durable['outbox'][$key]['envelope'] = null;
+        $this->save();
+
+        return true;
+    }
+
     /** @return list<array{0: string, 1: string, 2: string, 3: int, 4: string}> what waits for its receipt, oldest first */
     public function unconfirmed(): array
     {
+        $this->check();
         $out = [];
         foreach ($this->durable['outbox'] as $key => $entry) {
             if ($entry['envelope'] !== null && !$entry['receipt']) {
@@ -564,6 +590,7 @@ final class CarryState
      */
     public function pending(): array
     {
+        $this->check();
         $out = [];
         foreach ($this->durable['stored'] as $key => $entry) {
             if ($entry['content'] !== null) {
@@ -581,6 +608,7 @@ final class CarryState
      */
     public function kept(string $key): ?array
     {
+        $this->check();
         $entry = $this->durable['stored'][$key] ?? null;
 
         return $entry === null ? null : ['sha256' => $entry['sha256'], 'sealed' => $entry['sealed'], 'at' => $entry['at']];
@@ -637,15 +665,15 @@ final class CarryState
     }
 
     /**
-     * Challenges used or past their window are remembered for their own code, nonce_used or nonce_expired, at most
+     * Challenges used or past their own window are remembered for their own code, nonce_used or nonce_expired, at most
      * SPENT_KEPT_PER_PARTNER per partner; an open for one forgotten is nonce_unknown. Either way it is refused, and
      * nothing kept against a replay goes with it.
      */
-    private function forgetSpent(string $prefix, float $mono, int $window): void
+    private function forgetSpent(string $prefix, float $mono): void
     {
         $spent = [];
         foreach ($this->waiting as $key => $entry) {
-            if (str_starts_with((string) $key, $prefix) && ($entry['used'] || $mono - $entry['t0'] > $window)) {
+            if (str_starts_with((string) $key, $prefix) && ($entry['used'] || $mono - $entry['t0'] > $entry['window'])) {
                 $spent[(string) $key] = $entry['t0'];
             }
         }
@@ -678,8 +706,11 @@ final class CarryState
                 $window = $profile['challenge_window'];
                 $forPartner = 0;
                 $inAll = 0;
+                // Each challenge waits in the window of the profile it was given under: counted with this ask's window,
+                // one still open in a longer window of another partner's was counted as gone (the follow-up check of 15
+                // November 2026).
                 foreach ($this->waiting as $key => $entry) {
-                    if (!$entry['used'] && $mono - $entry['t0'] <= $window) {
+                    if (!$entry['used'] && $mono - $entry['t0'] <= $entry['window']) {
                         $inAll++;
                         $forPartner += str_starts_with((string) $key, $prefix) ? 1 : 0;
                     }
@@ -711,8 +742,8 @@ final class CarryState
                 $this->used[$pair] = true;
                 $this->save();
                 $this->asksSeen[bin2hex($pk)][] = [$mono, 0];
-                $this->waiting[$pair] = ['nonce' => $nonce, 't0' => $mono, 'used' => false];
-                $this->forgetSpent($prefix, $mono, $window);
+                $this->waiting[$pair] = ['nonce' => $nonce, 't0' => $mono, 'used' => false, 'window' => $window];
+                $this->forgetSpent($prefix, $mono);
 
                 return ['accepted', $this->write($pk, $profile, Carry::CHALLENGE, 0, $session, 0, 0, $nonce, null, $sealRnd), $got];
 
@@ -882,6 +913,18 @@ final class CarryState
 
     // ----------------------------------------------------------- deleting --
 
+    /** Whether a message of the session is kept with content the program has not said it has. */
+    private function holdsUntaken(string $pair): bool
+    {
+        foreach ($this->durable['stored'] as $key => $entry) {
+            if ($entry['content'] !== null && str_starts_with((string) $key, $pair . ':')) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /** Delete what A6.9 allows at this time, by the time floor and each session's own lifetime, and nothing more. */
     public function prune(int $now): void
     {
@@ -891,6 +934,12 @@ final class CarryState
             $gone = $record['challenged']
                 ? $floor > max($record['opened'] + $record['lifetime'], $record['closed_at'] ?? 0) + self::HORIZON
                 : $floor > $record['deadline'] + self::SKEW;
+            if ($gone && $this->holdsUntaken((string) $pair)) {
+                // A message the program has not taken stays until handedOver says it has it, and its session with it,
+                // since a kept message belongs to a session kept. Deleted with the guard against replays, a message a
+                // receipt had said was kept was gone (the follow-up check of 15 November 2026).
+                continue;
+            }
             if ($gone) {
                 unset($this->durable['incoming'][$pair], $this->used[$pair], $this->anchors[$pair]);
                 foreach (array_keys($this->durable['stored']) as $key) {

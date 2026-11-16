@@ -20,7 +20,11 @@ namespace Aamio;
  * after a restart goes on with the same bytes and the tries that are left. It is
  * confirmed only when its receipt comes: when the tries run out without one, its
  * outcome is unknown, since it may still have arrived, and it is never reported
- * as confirmed.
+ * as confirmed. A try is counted when it can be given to the transport, not
+ * while an earlier one waits for room, and one that has not begun is not begun
+ * once the message is over. Bytes go out only under the mode they were written
+ * in: when the partner's profile is of another mode now, the message is given
+ * up and the user is told (B5, A7).
  *
  * What came in is the state's until the program says it has it: inbox() is what
  * the state keeps that the program has not taken, read as often as needed, and
@@ -61,21 +65,30 @@ final class Carrier
     private $clock;
     /** @var callable(): int */
     private $wall;
+    /** @var callable(string): void what the user is to hear, as a message that is not sent again */
+    private $note;
 
-    /** @param array|\Closure(string): array $profile one profile for every partner, or a function from a partner's key to its own */
+    /**
+     * @param array|\Closure(string): array $profile one profile for every partner, or a function from a partner's key to its own
+     * @param ?callable(string): void $note where the user hears what a carrier has to say: the runtime keeps it in attention
+     */
     public function __construct(private CarryState $state, private TransportProcess $process, array|\Closure $profile, public array $known,
-        ?callable $clock = null, ?callable $wall = null, private float $retrySeconds = 2.0, private float $askRetrySeconds = 5.0, private int $tries = CarryState::TRIES_DEFAULT)
+        ?callable $clock = null, ?callable $wall = null, private float $retrySeconds = 2.0, private float $askRetrySeconds = 5.0, private int $tries = CarryState::TRIES_DEFAULT,
+        ?callable $note = null)
     {
         $this->profileOf = $profile instanceof \Closure ? $profile : static fn (string $pk): array => $profile;
         $this->clock = $clock ?? static fn (): float => hrtime(true) / 1e9;
         $this->wall = $wall ?? static fn (): int => time();
+        $this->note = $note ?? static function (string $text): void {
+        };
         $this->reassembly = new CarryReassembly($this->clock);
         $this->frameLimit = $process->properties['max_frame_up'];
         $this->budgetAt = ($this->clock)();
         $knownSet = array_fill_keys(array_map('bin2hex', $known), true);
         foreach ($state->unconfirmed() as [$key, $pk, $session, , $envelope]) {
-            // Sent before this process started: taken up with the same bytes and the tries that are left.
-            if (isset($knownSet[bin2hex($pk)])) {
+            // Sent before this process started: taken up with the same bytes and the tries that are left, when they
+            // were written as the partner's profile says now (B5).
+            if (isset($knownSet[bin2hex($pk)]) && $this->fitsProfile($key, $pk, $envelope)) {
                 $this->messages[$key] = ['envelope' => $envelope, 'pk' => $pk, 'session' => $session, 'next' => ($this->clock)()];
             }
         }
@@ -84,6 +97,40 @@ final class Carrier
     private static function pair(string $pk, string $session): string
     {
         return bin2hex($pk) . ':' . bin2hex($session);
+    }
+
+    /**
+     * Whether bytes written earlier may go on under the partner's profile now, given up and said when they may not.
+     *
+     * Readable bytes taken up after the partner's profile became sealed went out readable (the follow-up check of 15
+     * November 2026). A message is never sealed again under its mark, so it is given up: its mark and hash stay for a
+     * late receipt, and its outcome is unknown, since an earlier try may have arrived.
+     */
+    private function fitsProfile(string $key, string $pk, string $envelope): bool
+    {
+        $mode = ($this->profileOf)($pk)['mode'];
+        $written = ord($envelope[4]);
+        if ($written === ($mode === 'sealed' ? Carry::SEALED : Carry::READABLE)) {
+            return true;
+        }
+        $this->state->giveUp($key);
+        ($this->note)($key . ' was written ' . ($written === Carry::READABLE ? 'readable' : 'sealed') . ', and the profile for that partner is ' . $mode
+            . ' now, so it is not sent again: B5 sends no message under another mode. Its outcome is unknown, since an earlier try may have arrived; send it again as a new message to have it go '
+            . $mode . '.');
+
+        return false;
+    }
+
+    /** Whether a try at the message waits in the queue, not one frame of it given to the transport yet. */
+    private function queued(string $key): bool
+    {
+        foreach ($this->queue as $item) {
+            if ($item[2] === $key && $item[3] === []) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function queue(string $envelope, ?string $to, ?string $key = null): void
@@ -296,16 +343,29 @@ final class Carrier
     {
         $now = ($this->clock)();
         foreach ($this->messages as $key => $entry) {
+            $key = (string) $key;
             if ($now < $entry['next']) {
                 continue;
             }
-            // The try is counted in the state before it goes, so a restart never gives back tries that were used.
-            if (!$this->state->tried((string) $key)) {
+            if ($this->queued($key)) {
+                // The last try still waits for room: a try is counted when it can be given to the transport, not while
+                // copies pile up behind one that has not gone.
+                $this->messages[$key]['next'] = $now + $this->retrySeconds;
+                continue;
+            }
+            if (!$this->fitsProfile($key, $entry['pk'], $entry['envelope'])) {
                 unset($this->messages[$key]);
                 continue;
             }
+            // The try is counted in the state before it goes, so a restart never gives back tries that were used.
+            if (!$this->state->tried($key)) {
+                unset($this->messages[$key]);
+                // A try that never started is not sent after the message is over (A7): it went out after unknown was said.
+                $this->queue = array_values(array_filter($this->queue, static fn (array $item): bool => !($item[2] === $key && $item[3] === [])));
+                continue;
+            }
             $this->messages[$key]['next'] = $now + $this->retrySeconds;
-            $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? null, (string) $key);
+            $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? null, $key);
         }
         foreach ($this->control as $key => $entry) {
             if ($now < $entry['next']) {
@@ -335,6 +395,18 @@ final class Carrier
     private function flush(): void
     {
         while ($this->queue !== [] && $this->process->room() > 0) {
+            [, , $key, $ids] = $this->queue[0];
+            if ($key !== null && $ids === []) {
+                // A try at a message begins here, so here is where it may still be stopped: when the message is over
+                // (its receipt came, or its tries are used), or when the partner's profile is of another mode now than
+                // the bytes were written under. Queued earlier, it went out all the same once there was room.
+                $entry = $this->messages[$key] ?? null;
+                if ($entry === null || !$this->fitsProfile($key, $entry['pk'], $entry['envelope'])) {
+                    unset($this->messages[$key]);
+                    array_shift($this->queue);
+                    continue;
+                }
+            }
             $frame = array_shift($this->queue[0][0]);
             $id = $this->process->send($frame, $this->queue[0][1]);
             if ($id === null) {

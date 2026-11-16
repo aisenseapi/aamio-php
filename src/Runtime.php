@@ -1369,9 +1369,24 @@ final class Runtime
             throw new CodedInvalidArgument('unknown_partner', 'a scope is shared only with a partner in your address book, by name. Never with an address, which can be anyone\'s');
         }
         $share = $access === 'read' ? ['name' => $scope['name'], 'key' => $scope['key']] : ['name' => $scope['name'], 'address' => $scope['address']];
-        [$w, $key] = $this->addressFor($partner['name']);
+        $text = sprintf('Scope %s, shared to %s.', $scope['name'], $access === 'read' ? 'read and post' : 'post only');
         // The archive keeps what was shared and with whom, never the key.
-        $sent = $this->sendSealed($w, $key, $partner['name'], sprintf('Scope %s, shared to %s.', $scope['name'], $access === 'read' ? 'read and post' : 'post only'), ['aamio_scope' => $share], null, ['aamio_scope' => ['name' => $scope['name'], 'access' => $access]]);
+        $archived = ['aamio_scope' => ['name' => $scope['name'], 'access' => $access]];
+        // A partner bound to a transport gets it there, as every message to it goes, and never over HTTPS instead.
+        // Under a readable profile it does not go at all: everyone who hears the medium would read the key, and the
+        // partner's runtime takes a scope only when it comes sealed.
+        $bound = $this->boundPartner($partner['key']);
+        if ($bound !== null) {
+            $profile = $this->transportService()->profileFor(Codec::unb64url($bound['key']));
+            if ($profile['mode'] !== 'sealed') {
+                throw new CodedInvalidArgument('scope_needs_sealed', $bound['name'] . ' is bound to a transport under a readable profile, and a scope is only shared sealed: everyone who hears the medium would read it, and ' . $bound['name'] . '\'s aamio takes a scope only when it comes sealed. Bind ' . $bound['name'] . ' under a sealed profile first: aamio transport unbind, then aamio transport bind');
+            }
+            $sent = $this->sendCarried($bound, $text, ['aamio_scope' => $share], null, $archived);
+
+            return $sent + ['scope' => $scope['name'], 'access' => $access];
+        }
+        [$w, $key] = $this->addressFor($partner['name']);
+        $sent = $this->sendSealed($w, $key, $partner['name'], $text, ['aamio_scope' => $share], null, $archived);
 
         return $sent + ['scope' => $scope['name'], 'access' => $access];
     }
@@ -4688,17 +4703,14 @@ final class Runtime
         $carried = $this->carriedService();
         $collected = [];
         $online = true;
+        // What came over a transport is on this machine already, so its byte budget is kept here, for each
+        // transport as for each channel: what this read has handed over of each so far, across its waits.
+        $carriedBudget = ['max_bytes' => $maxBytes, 'used' => [], 'taken' => [], 'full' => []];
         if ($carried !== null) {
             if ($wait > 0) {
                 $carried->start();
             }
-            $ready = $this->carriedReady($this->carriedEntries($carried));
-            foreach (array_slice($ready, 0, $limit) as $entry) {
-                $collected[] = $entry;
-            }
-            if (count($ready) > $limit) {
-                $this->noteTrouble('read', 'more_carried', (count($ready) - $limit) . ' more that came over a transport wait for the next read, in the order they came.');
-            }
+            $this->carriedTake($this->carriedReady($this->carriedEntries($carried)), $collected, $limit, $carriedBudget);
             try {
                 $this->ensureInbox();
                 $this->publishPresence();
@@ -4784,20 +4796,14 @@ final class Runtime
                 }
                 $piece = max(1, min(self::CARRIED_SLICE, (int) $left));
                 $state = $answered !== [] ? $ask($answered[0], $piece, $notAskedAfter) : null;
-                if ($state !== 'ok' && $state !== 'gone') {
-                    $carried->wait(static fn (): bool => $carried->carry()->pending() !== [], hrtime(true) / 1e9 + min($left, $piece));
-                } else {
-                    $carried->pump(0.0);
-                }
+                $this->carriedPump($carried, $state !== 'ok' && $state !== 'gone' ? hrtime(true) / 1e9 + min($left, $piece) : null);
                 $taken = [];
                 foreach ($collected as $entry) {
                     if (isset($entry['mark'])) {
                         $taken[$entry['mark']] = true;
                     }
                 }
-                foreach (array_slice($this->carriedReady($this->carriedEntries($carried, $taken)), 0, max(0, $limit - count($collected))) as $entry) {
-                    $collected[] = $entry;
-                }
+                $this->carriedTake($this->carriedReady($this->carriedEntries($carried, $taken)), $collected, $limit, $carriedBudget);
             }
             foreach (array_slice($answered, 1) as $channel) {
                 $ask($channel, 0, $notAskedAfter);
@@ -4863,6 +4869,8 @@ final class Runtime
     ];
 
     private ?TransportService $transports = null;
+    /** When pumpTransports pumps again after a round that failed, on the monotonic clock. */
+    private float $transportsRestUntil = 0.0;
 
     /** The transports of this home, made at first use. */
     public function transportService(): ?TransportService
@@ -4910,8 +4918,12 @@ final class Runtime
         return $this->transportService()->config->routes($partner['key']) !== [] ? $partner : null;
     }
 
-    /** A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier. */
-    private function sendCarried(array $partner, ?string $text, mixed $data, ?string $answers): array
+    /**
+     * A message to a partner bound to a transport: the body HTTPS carries, without reply_to, and sealed by the carrier.
+     * $archivedData stands in for $data in the archive, as it does over HTTPS: a scope shared this way left its key in
+     * the archive of the one who shared it (the follow-up check of 15 November 2026).
+     */
+    private function sendCarried(array $partner, ?string $text, mixed $data, ?string $answers, ?array $archivedData = null): array
     {
         $body = ['from' => $this->keys->hashPrefix];
         if ($text !== null) {
@@ -4929,7 +4941,7 @@ final class Runtime
         $sent['note'] = strtr(self::CARRIED_NOTES[$result['status']], ['%via' => $result['via'], '%wait' => (string) $wait]);
         try {
             $this->archive('sent', ['kind' => 'sent', 'at' => time(), 'to' => $partner['name'], 'via' => $result['via'], 'profile' => $result['profile'],
-                'mark' => $result['mark'], 'status' => $result['status'], 'body' => $body]);
+                'mark' => $result['mark'], 'status' => $result['status'], 'body' => $archivedData === null ? $body : ['data' => $archivedData] + $body]);
         } catch (\Throwable $error) {
             $sent['archive_error'] = $error->getMessage();
             $this->logged('archive sent ' . $result['mark'] . ': ' . $error->getMessage());
@@ -4955,11 +4967,23 @@ final class Runtime
         return false;
     }
 
-    /** One round of the transports, for a caller that waits on something else: serve between its lines. */
+    /**
+     * One round of the transports, for a caller that waits on something else: serve between its lines. Also while no
+     * transport runs: one no partner is bound to any more was stopped in a round like this, and one bound again is
+     * started in one. Nothing pumps behind the caller here, so a round that fails, as with the carrier state closed
+     * after a write that failed, is said in the log and tried again a second later, as aamio-python's loop does,
+     * rather than thrown into whatever the caller waits on.
+     */
     public function pumpTransports(float $timeout = 0.05): void
     {
-        if ($this->transports !== null && $this->transports->running !== []) {
+        if ($this->transports === null || !$this->transports->started || hrtime(true) / 1e9 < $this->transportsRestUntil) {
+            return;
+        }
+        try {
             $this->transports->pump($timeout);
+        } catch (\RuntimeException | \InvalidArgumentException $error) {
+            $this->logged('transports: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage());
+            $this->transportsRestUntil = hrtime(true) / 1e9 + 1.0;
         }
     }
 
@@ -4976,24 +5000,59 @@ final class Runtime
         }
     }
 
-    /** The transport service when a partner is bound to a transport, else null; a binding file that cannot be read is said. */
+    /**
+     * For the transport service: what a carrier has to tell the user, as a message that is not sent again, in attention
+     * under the transport's name, added to what waits there unread.
+     */
+    public function notSentAgain(string $transport, string $text): void
+    {
+        $earlier = $this->attention[$transport . '|not_sent_again'] ?? null;
+        $this->noteTrouble($transport, 'not_sent_again', $earlier === null ? $text : $earlier['what'] . ' ' . $text);
+    }
+
+    /**
+     * The transport service when a partner is bound to a transport or something that came over one waits to be read,
+     * else null; a binding file or a carrier state that cannot be read is said.
+     *
+     * What has come is read whatever is bound now: asked only whether a partner was bound, a message that came before
+     * the last unbind was not read, while unbind said it still would be (the follow-up check of 15 November 2026).
+     */
     private function carriedService(): ?TransportService
     {
         $service = $this->transportService();
         try {
-            return $service->bound() ? $service : null;
+            $bound = $service->bound();
         } catch (\RuntimeException $error) {
             $this->noteTrouble('transports', 'unreadable', $error->getMessage() . '. What came over a transport waits in the home until then.');
 
             return null;
         }
+        try {
+            return $bound || $service->hasPending() ? $service : null;
+        } catch (\RuntimeException $error) {
+            $this->noteTrouble('transports', 'carry_unreadable', $error->getMessage() . '. What came over a transport waits in the home until then.');
+
+            return null;
+        }
     }
 
-    /** @param array<string, true> $skip */
+    /**
+     * What came over a transport, as read hands it over: archived is said when it is handed over. A carrier state
+     * closed after a write that failed answers nothing from memory: said, and the rest of the read goes on.
+     *
+     * @param array<string, true> $skip
+     */
     private function carriedEntries(TransportService $service, array $skip = []): array
     {
+        try {
+            $found = $service->entries($skip);
+        } catch (\RuntimeException $error) {
+            $this->noteTrouble('transports', 'carry_unreadable', $error->getMessage() . '. What came over a transport waits in the home until then.');
+
+            return [];
+        }
         $entries = [];
-        foreach ($service->entries($skip) as $entry) {
+        foreach ($found as $entry) {
             $entry['archived'] = false;
             if (!$this->archiveEnabled) {
                 $entry['archive_off'] = true;
@@ -5004,12 +5063,111 @@ final class Runtime
         return $entries;
     }
 
+    /**
+     * The transports pumped for a read that waits: until something has come over one or $until passes, or for one
+     * round when $until is null. Nothing pumps behind a read here, so what a carrier could not do comes to the read
+     * that pumps it, as with the carrier state closed after a write that failed. It is said in the log, as
+     * aamio-python's loop says it, and the rest of the wait is waited out: the read goes on with what it can still reach.
+     */
+    private function carriedPump(TransportService $service, ?float $until): void
+    {
+        try {
+            if ($until === null) {
+                $service->pump(0.0);
+
+                return;
+            }
+            $service->wait(static function () use ($service): bool {
+                // A carrier state closed after a write that failed has nothing to say: the wait runs out, and the read says why.
+                try {
+                    return $service->carry()->pending() !== [];
+                } catch (\RuntimeException) {
+                    return false;
+                }
+            }, $until);
+        } catch (\RuntimeException | \InvalidArgumentException $error) {
+            $this->logged('transports: ' . (new \ReflectionClass($error))->getShortName() . ': ' . $error->getMessage());
+            $left = $until === null ? 0.0 : $until - hrtime(true) / 1e9;
+            if ($left > 0) {
+                usleep((int) ($left * 1e6));
+            }
+        }
+    }
+
+    /**
+     * A scope in a message that came over a transport, taken as one over HTTPS is: kept when it came sealed from a
+     * partner in the address book, and its key out of the message either way, before the message is weighed, shown or
+     * archived. Once for each entry: what it leaves in the message is no share to take again.
+     */
+    private function carriedScope(array &$entry, bool $weigh = false): void
+    {
+        $this->takeScopeShare($entry, $this->partnerByKey($entry['from_key']) !== null, $weigh);
+    }
+
+    /** The bytes of a carried message as this read would hand it over, on a copy and keeping nothing: compact JSON in UTF-8, as a message over HTTPS is weighed. */
+    private function carriedWeight(array $entry): int
+    {
+        $this->carriedScope($entry, true);
+
+        return strlen(Codec::json($entry));
+    }
+
+    /**
+     * Carried messages into a read's answer in the order they came, within its limit and its byte budget for each
+     * transport.
+     *
+     * Only what goes into the answer is taken; the rest stays in the home for the next read. Whole messages: one that
+     * is larger than the whole budget and first on its transport is handed over on its own and said, as a message
+     * already on this machine is everywhere else, rather than kept back for ever. Three messages of 600 characters came
+     * whole on a budget of 512, and nothing said so (the follow-up check of 15 November 2026).
+     *
+     * @param array{max_bytes: ?int, used: array<string, int>, taken: array<string, int>, full: list<string>} $budget
+     */
+    private function carriedTake(array $ready, array &$collected, int $limit, array &$budget): void
+    {
+        $maxBytes = $budget['max_bytes'];
+        $pastLimit = 0;
+        foreach ($ready as $entry) {
+            $where = (string) $entry['channel'];
+            if (count($collected) >= $limit) {
+                $pastLimit++;
+                continue;
+            }
+            if ($maxBytes !== null) {
+                if (in_array($where, $budget['full'], true)) {
+                    continue;
+                }
+                $weight = $this->carriedWeight($entry);
+                $first = ($budget['taken'][$where] ?? 0) === 0;
+                if (!$first && ($budget['used'][$where] ?? 0) + $weight > $maxBytes) {
+                    $budget['full'][] = $where;
+                    continue;
+                }
+                if ($first && $weight > $maxBytes) {
+                    $this->noteTrouble($where, 'over_budget', 'a message that came over ' . $where . ' is ' . $weight . ' bytes as handed over here, larger than the whole byte budget of ' . $maxBytes . ' this read asked for. It was already on this machine, so it is handed over on its own rather than kept back for ever, and this read is over its budget on purpose.');
+                }
+                $budget['used'][$where] = ($budget['used'][$where] ?? 0) + $weight;
+                $budget['taken'][$where] = ($budget['taken'][$where] ?? 0) + 1;
+            }
+            $this->carriedScope($entry);
+            $collected[] = $entry;
+        }
+        if ($pastLimit > 0) {
+            $this->noteTrouble('read', 'more_carried', $pastLimit . ' more that came over a transport wait for the next read, in the order they came.');
+        }
+        if ($budget['full'] !== []) {
+            $this->noteTrouble('read', 'more_carried_bytes', 'this read stopped at the byte budget it asked for on ' . implode(', ', array_values(array_unique($budget['full']))) . ', ' . $maxBytes . ' bytes of messages for each transport. The rest waits in the home in the order it came, and the next read hands it over; nothing was dropped.');
+        }
+    }
+
     /** What may be handed over: a message from a key that has left the address book is not, and that is said. */
     private function carriedReady(array $entries): array
     {
         $ready = [];
         foreach ($entries as $entry) {
             if ($this->partnerByKey($entry['from_key']) === null) {
+                // The key of a scope in it comes out before it goes to the archive, and nothing is kept from it.
+                $this->carriedScope($entry);
                 $this->carriedWithheld($entry);
             } else {
                 $ready[] = $entry;

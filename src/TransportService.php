@@ -11,7 +11,8 @@ namespace Aamio;
  * behind the caller's back: whoever waits pumps. A send waits for its challenge and its receipt by pumping, a read
  * that waits pumps between its short waits on the inbox, and aamio serve pumps while it waits for the next line. A
  * transport that stops is started again after 1, 5 and 30 seconds, and left down after three stops in ten minutes;
- * every transport stops with the owner. The same as aamio-python's transports.Service.
+ * one no partner in the address book is bound to any more is stopped, and one bound meanwhile is started; every
+ * transport stops with the owner. The same as aamio-python's transports.Service.
  */
 final class TransportService
 {
@@ -19,6 +20,8 @@ final class TransportService
     private ?CarryState $state = null;
     /** @var array<string, array{manifest: ?AddonTransport, process: ?TransportProcess, carrier: ?Carrier, crashes: list<float>, next: float, down: ?string}> */
     public array $running = [];
+    /** Whether start has been called and stop has not since: pumped from then on, also while no transport runs for a time. */
+    public bool $started = false;
     /** The environment a transport's variables are read from: getenv(), unless a test or an embedder says otherwise. */
     public ?array $environ = null;
     private float $knownAt = 0.0;
@@ -63,6 +66,12 @@ final class TransportService
         }
 
         return false;
+    }
+
+    /** Whether something came over a transport and waits for a read, whatever is bound now: an unbind leaves it to be read. */
+    public function hasPending(): bool
+    {
+        return file_exists($this->config->statePath()) && $this->carry()->pending() !== [];
     }
 
     /** @return list<string> every transport a partner in the address book is bound to, in the order first named */
@@ -113,19 +122,74 @@ final class TransportService
     /** Every transport that is bound and enabled, started. */
     public function start(): self
     {
-        $manifests = $this->manifests();
-        foreach ($this->wanted() as $name) {
-            if (!isset($this->running[$name])) {
-                $this->running[$name] = ['manifest' => $manifests[$name] ?? null, 'process' => null, 'carrier' => null, 'crashes' => [], 'next' => 0.0, 'down' => null];
-                if (!isset($manifests[$name])) {
-                    $this->running[$name]['down'] = $name . ' is bound to a partner and is not an enabled transport here: aamio addon enable ' . $name;
-                    $this->runtime->logged('transport ' . $name . ': ' . $this->running[$name]['down']);
-                }
-            }
-        }
+        $this->add($this->wanted());
         $this->startDue();
+        $this->started = true;
 
         return $this;
+    }
+
+    /**
+     * Transports to run, each once, with the manifests read only when one is new.
+     *
+     * @param list<string> $names
+     */
+    private function add(array $names): void
+    {
+        $manifests = null;
+        foreach ($names as $name) {
+            if (isset($this->running[$name])) {
+                continue;
+            }
+            $manifests ??= $this->manifests();
+            $this->running[$name] = ['manifest' => $manifests[$name] ?? null, 'process' => null, 'carrier' => null, 'crashes' => [], 'next' => 0.0, 'down' => null];
+            if (!isset($manifests[$name])) {
+                $this->running[$name]['down'] = $name . ' is bound to a partner and is not an enabled transport here: aamio addon enable ' . $name;
+                $this->runtime->logged('transport ' . $name . ': ' . $this->running[$name]['down']);
+            }
+        }
+    }
+
+    /**
+     * Who each running carrier takes messages from, read again; a transport no partner is bound to any more is stopped,
+     * so it no longer holds its port and is not started again after a crash, and one bound meanwhile is started (the
+     * follow-up check of 15 November 2026).
+     */
+    private function refresh(): void
+    {
+        try {
+            $wanted = $this->wanted();
+            $known = [];
+            foreach ($wanted as $name) {
+                $known[$name] = $this->knownFor($name);
+            }
+        } catch (\RuntimeException $error) {
+            // Whom to take messages from is not known while the bindings cannot be read: no one, then, and nothing stopped.
+            foreach ($this->running as $entry) {
+                if ($entry['carrier'] !== null) {
+                    $entry['carrier']->known = [];
+                }
+            }
+            $this->runtime->logged('transports: ' . $error->getMessage());
+
+            return;
+        }
+        foreach ($this->running as $name => $entry) {
+            if (in_array((string) $name, $wanted, true)) {
+                continue;
+            }
+            unset($this->running[$name]);
+            if ($entry['process'] !== null) {
+                $entry['process']->stop();
+            }
+            $this->runtime->logged('transport ' . $name . ': stopped, since no partner in the address book is bound to it any more');
+        }
+        $this->add($wanted);
+        foreach ($this->running as $name => $entry) {
+            if ($entry['carrier'] !== null) {
+                $entry['carrier']->known = $known[$name] ?? [];
+            }
+        }
     }
 
     public function isRunning(): bool
@@ -152,12 +216,19 @@ final class TransportService
                 fn (string $line) => $this->runtime->logged($line));
             try {
                 $process->start(Http::VERSION, 'php', $folder);
-                $this->running[$name]['carrier'] = new Carrier($this->carry(), $process, fn (string $pk): array => $this->profileFor($pk), $this->knownFor($name));
+                $this->running[$name]['carrier'] = new Carrier($this->carry(), $process, fn (string $pk): array => $this->profileFor($pk), $this->knownFor($name),
+                    note: fn (string $text) => $this->runtime->notSentAgain((string) $name, $text));
                 $this->running[$name]['process'] = $process;
                 $this->runtime->logged('transport ' . $name . ': up');
             } catch (TransportFailed $error) {
                 $process->stop();
                 $this->crashed($name, $error);
+            } catch (\RuntimeException | \InvalidArgumentException $error) {
+                // Not the transport: the carrier state is closed after a write failed, or a profile cannot be read. It
+                // stays down with the reason rather than start again every second.
+                $process->stop();
+                $this->running[$name]['down'] = rtrim($error->getMessage(), '.') . '. It stays down until that is put right and aamio starts again';
+                $this->runtime->logged('transport ' . $name . ': down: ' . $this->running[$name]['down']);
             }
         }
     }
@@ -185,23 +256,13 @@ final class TransportService
         $this->runtime->logged('transport ' . $name . ': down: ' . $error->getMessage() . ', started again in ' . $after . ' seconds');
     }
 
-    /** One round: every carrier pumped, and transports that are due started again. */
+    /** One round: what is bound read again when that is due, every carrier pumped, and transports that are due started again. */
     public function pump(float $timeout = 0.02): void
     {
         $now = self::now();
         if ($now - $this->knownAt >= Transports::KNOWN_REFRESH) {
             $this->knownAt = $now;
-            foreach ($this->running as $name => $entry) {
-                if ($entry['carrier'] !== null) {
-                    try {
-                        $entry['carrier']->known = $this->knownFor($name);
-                    } catch (\RuntimeException $error) {
-                        // Whom to take messages from is not known while the bindings cannot be read: no one, then.
-                        $entry['carrier']->known = [];
-                        $this->runtime->logged('transport ' . $name . ': ' . $error->getMessage());
-                    }
-                }
-            }
+            $this->refresh();
         }
         foreach ($this->running as $name => $entry) {
             if ($entry['carrier'] === null) {
@@ -261,6 +322,7 @@ final class TransportService
             }
         }
         $this->running = [];
+        $this->started = false;
     }
 
     /** @return array<string, string> */
