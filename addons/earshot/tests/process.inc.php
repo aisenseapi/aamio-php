@@ -23,6 +23,7 @@ use Aamio\McpServer;
 use Aamio\Runtime;
 use Aamio\Earshot\Audio;
 use Aamio\Earshot\BadRecording;
+use Aamio\Earshot\Card;
 use Aamio\Earshot\Codec;
 use Aamio\Earshot\NothingHeard;
 use Aamio\Earshot\Process;
@@ -116,6 +117,40 @@ echo "earshot: the process\n";
     $check($said['exit_code'] === 0 && $said['result']['card'] === 'aamio:scope/' . $address . '?n=rom-42&t=' . ($now + 3600) && $said['result']['bytes'] === 54 && $said['result']['expires_at'] === $now + 3600 && $w->encoded === [], 'card makes the text without sound or network, good for an hour');
     $said = Process::handle($request('command', 'card', ['address' => $address, 'valid_for' => '0']), $world()->seams());
     $check(($said['result']['card'] ?? null) === 'aamio:scope/' . $address && array_key_exists('expires_at', $said['result']) && $said['result']['expires_at'] === null, 'and 0 is a card with no end');
+
+    // The card of 0.5.0 through the process, as in aamio-python.
+    $key = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
+    $otherKey = '5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA';
+    $said = Process::handle($request('command', 'card', ['address' => $address, 'name' => 'rom-42', 'via' => 'lan,internet', 'key' => $key]), $world()->seams());
+    $check(($said['result']['card'] ?? null) === 'aamio:scope/' . $address . '?n=rom-42&t=' . ($now + 3600) . '&v=lan,internet&k=' . $key && str_contains($said['result']['note'], 'lan, then internet')
+        && str_contains($said['result']['note'], '0.5.0') && str_contains($said['result']['note'], 'public key'), 'the card command puts the media and the key given on the card');
+    $said = Process::handle($request('command', 'card', ['address' => $address, 'name' => 'rom-42']), $world()->seams());
+    $check(!str_contains($said['result']['note'], '0.5.0'), 'and a card without them is said as it was');
+    $said = Process::handle($request('command', 'card', ['address' => $address, 'via' => 'lan']), $world()->seams());
+    $check($said['exit_code'] === 2 && ($said['result']['reason'] ?? null) === 'key_needed' && str_contains($said['result']['fix'], 'aamio whoami'), 'a medium beside internet with no key is refused');
+    $tool = static fn (array $arguments, ?string $own = null): array => ['own_key' => $own] + $request('tool', 'aamio_addon_earshot_broadcast', $arguments);
+    $w = $world();
+    $said = Process::handle($tool(['address' => $address, 'via' => ['lan', 'internet']], $key), $w->seams());
+    $check($said['exit_code'] === 0 && end($w->encoded)[0] === 'aamio:scope/' . $address . '?t=' . ($now + 3600) . '&v=lan,internet&k=' . $key && str_contains($said['result']['note'], 'everyone within earshot hears it'),
+        'over MCP the key on a card is the runtime\'s own');
+    Process::handle($tool(['address' => $address, 'via' => ['sound'], 'key' => $otherKey], $key), $w->seams());
+    $check(str_ends_with(end($w->encoded)[0], '&v=sound&k=' . $key), 'and a key given in the call is never the one a tool puts on the card');
+    Process::handle($tool(['address' => $address], $key), $w->seams());
+    $plain = end($w->encoded)[0];
+    Process::handle($tool(['address' => $address, 'via' => ['internet']], $key), $w->seams());
+    $check($plain === 'aamio:scope/' . $address . '?t=' . ($now + 3600) && end($w->encoded)[0] === $plain, 'without a medium beside internet the card is today\'s, own key or not');
+    $said = Process::handle($tool(['address' => $address, 'via' => ['lan']]), $world()->seams());
+    $check($said['exit_code'] === 2 && ($said['result']['reason'] ?? null) === 'key_needed', 'and with no key of its own a tool refuses a medium beside internet');
+    $heard = Card::make($address, 'rom-42', $now + 3600, 'lan,internet', $key);
+    $said = Process::handle($request('command', 'listen'), $world($heard)->seams());
+    $result = $said['result'];
+    $check($said['exit_code'] === 0 && ($result['card']['via'] ?? null) === ['lan', 'internet'] && ($result['card']['key'] ?? null) === $key
+        && str_contains($result['bind'] ?? '', 'aamio partner add rom-42 ' . $key) && str_contains($result['bind'] ?? '', 'aamio transport bind rom-42 TRANSPORT') && str_contains($result['bind'] ?? '', 'the medium lan')
+        && str_contains($result['bind'] ?? '', 'not signed') && str_contains($result['next'], 'aamio scope add rom-42'), 'a card heard with media and a key says how to bind, and binds nothing');
+    $said = Process::handle($request('tool', 'aamio_addon_earshot_listen'), $world('aamio:scope/' . $address . '?n=rom-42&v=lan')->seams());
+    $check(str_contains($said['result']['bind'] ?? '', 'carries no key'), 'a card that names a medium and carries no key binds nothing');
+    $said = Process::handle($request('tool', 'aamio_addon_earshot_listen'), $world('aamio:scope/' . $address . '?n=rom-42')->seams());
+    $check(!array_key_exists('bind', $said['result']) && !array_key_exists('via', $said['result']['card']), 'and a card of 0.4.0 is heard as it was');
 
     // Broadcast.
     $w = $world();

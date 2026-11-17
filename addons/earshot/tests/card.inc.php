@@ -57,6 +57,40 @@ echo "earshot: the card\n";
     }
     $check($badTimes === 6, 'a time that is not Unix seconds is refused');
 
+    // The card of 0.5.0, the same cases as aamio-python's test_earshot_process.py.
+    $key = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
+    $made = Card::make($address, 'rom-42', $now + 3600, 'lan,internet', $key);
+    $check($made === 'aamio:scope/' . $address . '?n=rom-42&t=' . ($now + 3600) . '&v=lan,internet&k=' . $key && strlen($made) === 115
+        && Card::read($made) === ['kind' => 'scope', 'address' => $address, 'name' => 'rom-42', 'expires_at' => $now + 3600, 'via' => ['lan', 'internet'], 'key' => $key]
+        && Card::make($address, 'rom-42', $now + 3600, ['lan', 'internet'], $key) === $made, 'a card of 0.5.0 says the media and carries the key, and reads back');
+    $check(Card::make($address, 'rom-42', $now, 'internet') === Card::make($address, 'rom-42', $now) && Card::make($address, 'rom-42', $now, []) === Card::make($address, 'rom-42', $now)
+        && Card::read(Card::make($address, 'rom-42', $now)) === ['kind' => 'scope', 'address' => $address, 'name' => 'rom-42', 'expires_at' => $now]
+        && Card::read(Card::make($address, null, null, null, $key)) === ['kind' => 'scope', 'address' => $address, 'name' => null, 'expires_at' => null, 'key' => $key], 'without via and key the card is the one of 0.4.0');
+    $check(Card::read('aamio:scope/' . $address . '?v=ble,internet&k=' . $key)['via'] === ['ble', 'internet'] && Card::read('aamio:scope/' . $address . '?k=' . $key . '&v=sound&t=' . $now)['via'] === ['sound'],
+        'a medium this earshot has no transport for is read, in any order');
+    $error = $refusedFor(static fn () => Card::make($address, 'R' . str_repeat('x', 31), $now, 'lan,sound,internet', $key));
+    $check($error !== null && $error->reason === 'card_too_long' && str_contains($error->fix, '147 bytes'), 'a card that would not fit one sound is refused, with its size');
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    $flipped = substr($key, 0, -1) . $alphabet[strpos($alphabet, substr($key, -1)) ^ 1];
+    $wrongs = [['lan', null, 'key_needed'], [['sound', 'internet'], null, 'key_needed'], ['lan', 'abcdefghijklmnopqrstuvwxyz', 'a_key_not_a_public_key'],
+        ['lan', str_repeat('a1', 32), 'a_key_not_a_public_key'], ['lan', str_repeat('a', 43), 'a_key_not_a_public_key'], [null, '0123456789abcdefghijklmnop', 'a_key_not_a_public_key'],
+        ['lan', substr($key, 0, -1), 'invalid_key'], ['lan', $key . 'A', 'invalid_key'], ['lan', $flipped, 'invalid_key'], ['lan', str_repeat('!', 43), 'invalid_key'], ['lan', 12345, 'invalid_key'],
+        ['LAN', $key, 'invalid_via'], ['lan,lan', $key, 'invalid_via'], ['a,b,c,d', $key, 'invalid_via'], [',lan', $key, 'invalid_via'], ['lan,', $key, 'invalid_via'], ['lan sound', $key, 'invalid_via'],
+        [['lan', 5], $key, 'invalid_via'], [5, $key, 'invalid_via']];
+    $right = 0;
+    foreach ($wrongs as [$via, $given, $reason]) {
+        $error = $refusedFor(static fn () => Card::make($address, 'rom-42', $now, $via, $given));
+        $right += $error !== null && $error->reason === $reason ? 1 : 0;
+    }
+    $check($right === count($wrongs), 'a card that names a medium beside internet carries a public key, and never a secret');
+    $unread = ['v=' => 'invalid_via', 'v=LAN' => 'invalid_via', 'v=lan,lan' => 'invalid_via', 'v=a,b,c,d' => 'invalid_via', 'k=short' => 'invalid_key',
+        'k=' . str_repeat('a', 43) => 'invalid_key', 'k=abcdefghijklmnopqrstuvwxyz' => 'invalid_key', 'k=' . $flipped => 'invalid_key', 'v=lan&v=lan' => 'not_this_version', 'v=lan&x=1' => 'not_this_version'];
+    $right = 0;
+    foreach ($unread as $query => $reason) {
+        $right += $notUnderstood('aamio:scope/' . $address . '?' . $query) === $reason ? 1 : 0;
+    }
+    $check($right === count($unread), 'a card of 0.5.0 that is not one is not read in part');
+
     $cases = [
         ['abcdefghijklmnopqrstuvwxyz', 'a_key_not_an_address'],
         [str_repeat('a1', 32), 'a_key_not_an_address'],
