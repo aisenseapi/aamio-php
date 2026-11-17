@@ -365,7 +365,8 @@ try {
     $to->close();
 
     // The release check of 17 November 2026, point 2: what came over a transport is read whole and once when the trace and
-    // the archive cannot be written, and the read says what it could not write.
+    // the archive cannot be written, and the read says what it could not write. This held before the check was written,
+    // and the check is here so that it stays so.
     [$from, $to] = $tHomes('point-2');
     $tTakeIn($from, $to, [['text' => 'uten spor']]);
     mkdir($to->home . DIRECTORY_SEPARATOR . 'trace.json.tmp');
