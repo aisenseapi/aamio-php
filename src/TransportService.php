@@ -458,7 +458,9 @@ final class TransportService
             return false;
         };
         if (!$this->wait($opened, $until)) {
-            throw new CodedRuntime('carry_not_sent', 'the partner did not answer on ' . $name . ' within ' . (int) ($until - $began) . ' seconds, so nothing was sent. Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ' . $name);
+            $hint = $stretch ? '' : $this->notSentHint($name, $pk, $content, $until - $began);
+            throw new CodedRuntime('carry_not_sent', 'the partner did not answer on ' . $name . ' within ' . (int) ($until - $began) . ' seconds, so nothing was sent.' . $hint
+                . ' Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ' . $name);
         }
         $carrier = $this->carrierOf($name);
         try {
@@ -479,6 +481,27 @@ final class TransportService
 
         return ['via' => $name, 'profile' => $route['profile'], 'mark' => $key, 'status' => $outcome, 'sha256' => $written['sha256'],
             'bytes' => strlen($envelope), 'sealed' => ord($envelope[strlen(Carry::MAGIC)]) === Carry::SEALED, 'waited' => (int) ($until - $began)];
+    }
+
+    /**
+     * What carry_not_sent adds when the wait was shorter than a send takes on the medium, as over MCP, where it is the work
+     * budget: the ask goes on in the background, and a send after its answer came uses the session it opened. Empty
+     * otherwise.
+     */
+    private function notSentHint(string $name, string $pk, string $content, float $waited): string
+    {
+        try {
+            $carrier = $this->carrierOf($name);
+        } catch (CodedRuntime) {
+            return '';
+        }
+        if ($carrier === null || $waited >= $carrier->patience(strlen($content))) {
+            return '';
+        }
+        $due = $carrier->askDue($pk);
+
+        return $due === null ? '' : ' The ask for a session is still under way on ' . $name . ', and its answer is due in about ' . max(5, (int) $due)
+            . ' seconds: send again then, and that send uses the session it opens.';
     }
 
     /** @return list<array{mark: string, outcome: string}> what was sent over a transport, as aamio transport list shows it, oldest first */

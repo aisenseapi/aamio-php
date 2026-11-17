@@ -759,6 +759,48 @@ $check($near($slowCarrier->handshakeSeconds(), 2 * 16.3 * 4) && $near($slowCarri
     && $near($slowCarrier->patience(12), 2 * 16.3 * (4 * 2 + 2)) && [$fastCarrier->handshakeSeconds(), $fastCarrier->windowForOpens(), $fastCarrier->patience(12)] === [0.0, 0.0, 0.0],
     'what a slow medium needs for a session and a send is measured in its frames: over sound 130.4, 456.4 and 326 seconds, and on a medium that gives no rate nothing');
 
+// Decided 17 November 2026. B started again takes A's session as expired (A6.8) and refuses what comes in it without a
+// word over the medium (A7). Once a message in it has gone three tries without a receipt, the next asks for a new session.
+$clock = clone $fakeClock;
+$stateB = new CarryState($carryB);
+$wire = $fastByHand($clock);
+$carrier = new Carrier(new CarryState($carryA), $wire, $sealedProfile, [$carryB->publicRaw()], $clock, static fn (): int => $T);
+$session = $carrier->open($carryB->publicRaw());
+$pumpAnswered($carrier, $wire);
+[, $challenge] = $stateB->deliver(Carry::reassemble($givenFrames($wire)), [$carryA->publicRaw()], $sealedProfile, 0.0, $T);
+$hearByHand($wire, $challenge);
+$pumpAnswered($carrier, $wire);
+$answered = $carrier->usableSession($carryB->publicRaw(), 3600) === $session;
+$key = $carrier->send($carryB->publicRaw(), $session, 'hei');
+$pumpAnswered($carrier, $wire);
+$clock->now += 2.1;
+$pumpAnswered($carrier, $wire);
+$twoTries = $carrier->usableSession($carryB->publicRaw(), 3600) === $session;
+$clock->now += 2.1;
+$pumpAnswered($carrier, $wire);
+$threeTries = $carrier->outcome($key) === 'waiting' && $carrier->usableSession($carryB->publicRaw(), 3600) === null;
+// B never had the open, so the message opens the session there as well (A6.2 point 6).
+[, $receipt] = $stateB->deliver($carrier->messages[$key]['envelope'], [$carryA->publicRaw()], $sealedProfile, 10.0, $T);
+$hearByHand($wire, $receipt);
+$pumpAnswered($carrier, $wire);
+$check($answered && $twoTries && $threeTries && $carrier->confirmed($key) && $carrier->usableSession($carryB->publicRaw(), 3600) === $session,
+    'a session a message went three tries in without a receipt takes no new message, and a receipt that comes after all makes it usable again');
+
+// Decided 17 November 2026: a bound message whose open was lost opens its session, and the challenge goes no more.
+$clock = clone $fakeClock;
+$stateA = new CarryState($carryA);
+$wire = $fastByHand($clock);
+$carrier = new Carrier(new CarryState($carryB), $wire, $sealedProfile, [$carryA->publicRaw()], $clock, static fn (): int => $T);
+[$session, $ask] = $stateA->ask($carryB->publicRaw(), $sealedProfile, 0.0);
+$hearByHand($wire, $ask);
+$pumpAnswered($carrier, $wire);
+$challenging = array_column($controlOf->getValue($carrier), 'kind') === ['challenge'];
+$stateA->deliver(Carry::reassemble($givenFrames($wire)), [$carryB->publicRaw()], $sealedProfile, 0.0, $T);
+$hearByHand($wire, $stateA->send($carryB->publicRaw(), $session, 'hei uten open', $sealedProfile));
+$pumpAnswered($carrier, $wire);
+$check($challenging && array_column($carrier->inbox(), 3) === ['hei uten open'] && $controlOf->getValue($carrier) === [],
+    'a bound message whose open was lost opens its session, and the challenge is not sent again');
+
 // Two homes over the simulated radio, in this one process.
 $simRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-carry-sim-' . bin2hex(random_bytes(4));
 $freePort = static function (): int {

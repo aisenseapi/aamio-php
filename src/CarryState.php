@@ -575,6 +575,33 @@ final class CarryState
         return true;
     }
 
+    /**
+     * Whether a message of this party's in its session with the partner went $tries tries without a receipt, or ran out of
+     * them, while no later message in the session has one: then the partner may no longer have the session, as after a
+     * restart, where it is taken as expired (A6.8) and nothing it refuses is answered over the medium (A7).
+     */
+    public function unanswered(string $partnerPk, string $session, int $tries): bool
+    {
+        $this->check();
+        $prefix = self::pair($partnerPk, $session) . ':';
+        $confirmed = 0;
+        $silent = 0;
+        foreach ($this->durable['outbox'] as $key => $entry) {
+            $key = (string) $key;
+            if (!str_starts_with($key, $prefix)) {
+                continue;
+            }
+            $counter = (int) substr($key, strlen($prefix));
+            if ($entry['receipt']) {
+                $confirmed = max($confirmed, $counter);
+            } elseif ($entry['envelope'] === null || $entry['tries'] >= $tries) {
+                $silent = max($silent, $counter);
+            }
+        }
+
+        return $silent > $confirmed;
+    }
+
     /** @return list<array{0: string, 1: string, 2: string, 3: int, 4: string}> what waits for its receipt, oldest first */
     public function unconfirmed(): array
     {
@@ -641,11 +668,38 @@ final class CarryState
 
     // ---------------------------------------------------------- receiving --
 
-    private function bindingFor(string $pk, string $session): ?string
+    /**
+     * N for a bound message: its session's, or, where the session is not opened, that of a challenge given for it that
+     * waits unused in its window, which the message then opens as an open would (A6.2 point 6).
+     */
+    private function bindingFor(string $pk, string $session, ?float $mono = null): ?string
     {
-        $record = $this->durable['incoming'][self::pair($pk, $session)] ?? null;
+        $pair = self::pair($pk, $session);
+        $record = $this->durable['incoming'][$pair] ?? null;
+        if ($record !== null) {
+            return $record['challenged'] ? hex2bin($record['nonce']) : null;
+        }
+        $entry = $this->waiting[$pair] ?? null;
+        if ($entry !== null && $mono !== null && !$entry['used'] && $mono - $entry['t0'] <= $entry['window']) {
+            return $entry['nonce'];
+        }
 
-        return $record !== null && $record['challenged'] ? hex2bin($record['nonce']) : null;
+        return null;
+    }
+
+    /** The session the challenge for $pair was given for, opened: by its open, or by a bound message that came first. */
+    private function opened(string $pk, string $pair, array $profile, int $t): array
+    {
+        $entry = $this->waiting[$pair];
+        $this->room($pk);
+        $this->waiting[$pair]['used'] = true;
+        // The lifetime goes with the session: a profile changed later can shorten it, never lengthen it (A6.6.4).
+        $this->durable['incoming'][$pair] = ['challenged' => true, 'nonce' => bin2hex($entry['nonce']), 'highest' => 0, 'closed' => false,
+            'deadline' => null, 'opened' => $t, 'closed_at' => null, 'lifetime' => $profile['lifetime']];
+        $this->save();
+        $this->anchors[$pair] = $entry['t0'];
+
+        return $this->durable['incoming'][$pair];
     }
 
     /**
@@ -701,7 +755,7 @@ final class CarryState
     private function take(string $envelope, array $known, array|\Closure $profile, float $mono, int $now, ?string $rnd, ?string $sealRnd): array
     {
         $t = $this->tick($now);
-        $got = Carry::read($envelope, $this->keys, $known, fn (string $pk, string $session): ?string => $this->bindingFor($pk, $session));
+        $got = Carry::read($envelope, $this->keys, $known, fn (string $pk, string $session): ?string => $this->bindingFor($pk, $session, $mono));
         if ($profile instanceof \Closure) {
             $profile = $profile($got['sender']);
         }
@@ -789,13 +843,7 @@ final class CarryState
                 if ($mono - $entry['t0'] > $entry['window']) {
                     throw new CarryRefused('carry_nonce_expired');
                 }
-                $this->room($pk);
-                $this->waiting[$pair]['used'] = true;
-                // The lifetime goes with the session: a profile changed later can shorten it, never lengthen it (A6.6.4).
-                $this->durable['incoming'][$pair] = ['challenged' => true, 'nonce' => bin2hex($entry['nonce']), 'highest' => 0, 'closed' => false,
-                    'deadline' => null, 'opened' => $t, 'closed_at' => null, 'lifetime' => $profile['lifetime']];
-                $this->save();
-                $this->anchors[$pair] = $entry['t0'];
+                $this->opened($pk, $pair, $profile, $t);
 
                 return ['accepted', null, $got];
 
@@ -869,6 +917,12 @@ final class CarryState
         $record = $this->durable['incoming'][$pair] ?? null;
         $new = false;
         $bound = (bool) ($got['flags'] & Carry::BOUND);
+        if ($bound && $record === null) {
+            // Carry::read found N in a challenge that waits in its window, and the message is signed over it as an open
+            // is: it opens the session as the open would, with the same t0 (A6.2 point 6, decided 17 November 2026).
+            // Over sound the open was lost in collisions, and the session with it, while the messages behind it came.
+            $record = $this->opened($pk, $pair, $profile, $t);
+        }
         if (!$bound && isset($this->durable['outgoing'][$pair])) {
             throw new CarryRefused('carry_wrong_direction');
         }

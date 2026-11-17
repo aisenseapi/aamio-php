@@ -51,6 +51,12 @@ final class Carrier
      * has to be read before it is answered.
      */
     public const SLACK = 2.0;
+    /**
+     * A session a message went this many tries in without a receipt, with no later message in it confirmed, takes no new
+     * message: the partner may have started again and taken it as expired (A6.8), and what it refuses is never answered
+     * over the medium (A7), so every message after would be lost in it too. The next one asks for a new session.
+     */
+    public const UNANSWERED_TRIES = 3;
 
     private CarryReassembly $reassembly;
     private int $frameLimit;
@@ -286,7 +292,11 @@ final class Carrier
         return $found;
     }
 
-    /** The newest session of this party's with the partner whose challenge came less than $seconds ago, or null. */
+    /**
+     * The newest session of this party's with the partner whose challenge came less than $seconds ago, or null. Null too
+     * when a message in it went UNANSWERED_TRIES tries without a receipt and nothing later in it was confirmed (A7): the
+     * next message asks for a new session.
+     */
     public function usableSession(string $partnerPk, float $seconds): ?string
     {
         $found = null;
@@ -296,8 +306,24 @@ final class Carrier
                 $found = $session;
             }
         }
+        if ($found !== null && $this->state->unanswered($partnerPk, $found, self::UNANSWERED_TRIES)) {
+            return null;
+        }
 
         return $found;
+    }
+
+    /** Seconds until the answer to the ask under way with the partner is due on this medium, or null without one. */
+    public function askDue(string $partnerPk): ?float
+    {
+        $due = [];
+        foreach ($this->asks as $entry) {
+            if ($entry['pk'] === $partnerPk) {
+                $due[] = $entry['next'];
+            }
+        }
+
+        return $due === [] ? null : max(0.0, min($due) - ($this->clock)());
     }
 
     /** A message in an open session, sent again with the same bytes until its receipt comes: its mark. */
@@ -448,6 +474,9 @@ final class Carrier
 
                 return;
         }
+        // A message: its receipt goes back. A bound one may have opened its session itself, its open lost (A6.2 point 6), so
+        // the challenge is not sent again either.
+        $this->settled($pair, 'challenge');
         if ($reply !== null) {
             $this->queue($reply, $source);
         }

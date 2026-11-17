@@ -103,6 +103,22 @@ try {
         && str_contains($windowNotes[0]['what'], 'aamio transport profile add sealed-slow --window 480 --lifetime 3600')
         && str_contains($windowNotes[0]['what'], 'aamio transport bind d lan --profile sealed-slow'),
         'a profile whose window is too short for a slow medium is said in attention, with a window that gives an open three tries');
+    // Over MCP, decided 17 November 2026: a send whose wait ran out before a session could open on a slow medium says
+    // that the ask goes on and when its answer is due. A carrier over sound stands in for the running transport.
+    $service = $made['c']->transportService();
+    $askingWire = new TransportProcess('lan', '0.1.0', [], null, []);
+    $askingWire->properties = ['max_frame_up' => 128, 'max_frame_down' => 128, 'rate_up' => 128 / 16.3, 'rate_down' => 128 / 16.3];
+    $askingCarrier = new Carrier(new CarryState($made['c']->keys), $askingWire, CarryState::profile('sealed'), [$made['d']->keys->publicRaw()]);
+    $askingCarrier->open($made['d']->keys->publicRaw());
+    $runningBefore = $service->running;
+    $service->running['lan'] = ['manifest' => null, 'process' => $askingWire, 'carrier' => $askingCarrier, 'crashes' => [], 'next' => 0.0, 'down' => null];
+    $hintOf = new ReflectionMethod(TransportService::class, 'notSentHint');
+    $hint = $hintOf->invoke($service, 'lan', $made['d']->keys->publicRaw(), 'hei', 5.0);
+    $afterPatience = $hintOf->invoke($service, 'lan', $made['d']->keys->publicRaw(), 'hei', 400.0);
+    $service->running = $runningBefore;
+    $check(str_contains($hint, 'The ask for a session is still under way on lan') && preg_match('/due in about (\d+) seconds: send again then/', $hint, $due) === 1
+        && (int) $due[1] >= 125 && (int) $due[1] <= 200 && $afterPatience === '',
+        'over MCP a send whose wait ran out before a session could open says that the ask goes on and when its answer is due');
     $code = static function (callable $try): ?string {
         try {
             $try();
