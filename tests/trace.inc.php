@@ -477,6 +477,19 @@ $check(
     'a send over a transport is matched by the sha256 of its envelope, and said in words of its own',
     json_encode($tvSeen)
 );
+// A runtime from before the transports keeps only the fields it knows when it writes the trace again: via is gone, and the
+// mark the send is known by says it went over a transport (the release check of 17 November 2026).
+$tvStripped = $tvView->invoke(null, ['sent' => array_map(static fn (array $row): array => array_diff_key($row, ['via' => true]), [$tvCarried(1), $tvNamed, $tvCarried(3, 'handed_over')]),
+    'received' => [['at' => 1794852100, 'channel' => 'lan', 'sha256' => hash('sha256', '10'), 'seen' => $tvNamed['sha256'], 'encrypted' => true, 'format' => 'json',
+    'fields' => ['from', 'seen', 'text']]], 'last_read' => null], 50);
+$tvOver = new \ReflectionMethod(\Aamio\Runtime::class, 'sentOver');
+$check(
+    array_map(static fn (array $row): ?bool => $row['seen_by_them'], $tvStripped['sent']) === [null, true, null] && $tvStripped['no_read_claim'] === $tvSeen['no_read_claim']
+        && $tvStripped['note'] === $tvSeen['note'] && $tvOver->invoke(null, array_diff_key($tvCarried(1), ['via' => true])) === 'transport'
+        && $tvOver->invoke(null, ['message_id' => 'm-0123456789abcdef', 'status' => 201]) === null && $tvOver->invoke(null, $tvCarried(1)) === 'lan',
+    'a send over a transport that an older runtime wrote again without via is still known by its mark',
+    json_encode($tvStripped)
+);
 $tvNothing = $tvView->invoke(null, ['sent' => [$tvCarried(1, 'unknown', false)], 'received' => [], 'last_read' => null], 50)['note'];
 $tvUnnamed = $tvView->invoke(null, ['sent' => [$tvCarried(1, 'confirmed', false)], 'received' => [], 'last_read' => null], 50)['note'];
 $tvSealed = $tvView->invoke(null, ['sent' => [$tvCarried(1)], 'received' => [], 'last_read' => null], 50)['note'];

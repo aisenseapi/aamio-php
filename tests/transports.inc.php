@@ -364,6 +364,28 @@ try {
     $from->close();
     $to->close();
 
+    // The release check of 17 November 2026, point 2: what came over a transport is read whole and once when the trace and
+    // the archive cannot be written, and the read says what it could not write.
+    [$from, $to] = $tHomes('point-2');
+    $tTakeIn($from, $to, [['text' => 'uten spor']]);
+    mkdir($to->home . DIRECTORY_SEPARATOR . 'trace.json.tmp');
+    $archiveFolder = $to->home . DIRECTORY_SEPARATOR . 'archive';
+    if (!is_dir($archiveFolder)) {
+        file_put_contents($archiveFolder, 'not a folder');
+    } else {
+        // What came over lan is archived under the label transport-lan.
+        mkdir($archiveFolder . DIRECTORY_SEPARATOR . 'transport-lan.jsonl');
+    }
+    $answer = (new McpServer($to))->dispatch('aamio_read', ['wait' => 0]);
+    $got = $answer['structuredContent']['messages'] ?? [];
+    $again = (new McpServer($to))->dispatch('aamio_read', ['wait' => 0]);
+    $check(($answer['isError'] ?? null) === false && $tTexts($got) === ['uten spor'] && ($got[0]['archived'] ?? null) === false
+        && ($answer['structuredContent']['attention'] ?? []) !== [] && ($again['structuredContent']['messages'] ?? null) === [],
+        'what came over a transport is read whole and once when the trace and the archive cannot be written, and the read says so',
+        json_encode([$answer['structuredContent'] ?? null, $again['structuredContent']['messages'] ?? null]));
+    $from->close();
+    $to->close();
+
     // Finding 1: under a readable profile everyone who hears the medium would read the key, so it does not go; and a
     // message that carries one all the same has it taken out, and nothing is kept from it.
     [$from, $to] = $tHomes('scope-readable');

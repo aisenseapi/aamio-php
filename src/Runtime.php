@@ -4420,12 +4420,23 @@ final class Runtime
         return $note;
     }
 
-    /** The transport a send in the trace went over, or null for a send over HTTPS. */
+    /**
+     * The transport a send in the trace went over, or null for a send over HTTPS.
+     *
+     * A runtime from before the transports keeps only the fields it knows when it writes the trace again, so via is gone
+     * from a row it has written. The row is still known by its message id, which over a transport is the mark: the
+     * partner's key, the session and the counter, never taken for the "m-" and 16 hex digits of a send over HTTPS (the
+     * release check of 17 November 2026: old and new clients on one home).
+     */
     private static function sentOver(array $row): ?string
     {
         $via = $row['via'] ?? null;
+        if (is_string($via) && $via !== '') {
+            return $via;
+        }
+        $id = $row['message_id'] ?? null;
 
-        return is_string($via) && $via !== '' ? $via : null;
+        return is_string($id) && preg_match('/^[0-9a-f]{64}:[0-9a-f]{16}:[0-9]+$/D', $id) === 1 ? 'transport' : null;
     }
 
     /** The record for one key, made when first needed and kept to a bound. */
