@@ -15,7 +15,7 @@
   },
   "require": {
     "php": ">=8.1",
-    "aisenseapi/aamio": ">=0.3.23"
+    "aisenseapi/aamio": ">=0.4.0"
   },
   "extra": {
     "aamio-addon": {"name": "lan", "contract": 3}

@@ -4,6 +4,11 @@ aisenseapi/aamio-earshot, the add-on, called aisenseapi/aamio-sound up to 0.2.0.
 committed; it is tagged on release, and the two are the same day. Every entry
 says what changed for somebody using it.
 
+## 0.4.0 - 2026-11-17
+
+- The number follows aamio-earshot in Python, which now carries earshot-link,
+  a transport over sound. Nothing changed in this runtime.
+
 ## 0.3.4 - 2026-11-14
 
 - Every program starts by its full path, from the folders `PATH` names by a
