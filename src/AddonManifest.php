@@ -122,11 +122,11 @@ final class AddonManifest implements Addon
                 $wrong('runtime on the command ' . $command . ' is not true or false');
             }
             $needs = $spec['needs'] ?? [];
-            if (!is_array($needs) || array_filter($needs, static fn ($need): bool => $need !== 'own_key') !== []) {
-                $wrong('needs on the command ' . $command . ' names something other than own_key');
+            if (!is_array($needs) || array_filter($needs, static fn ($need): bool => !in_array($need, AddonProcess::NEEDS, true)) !== []) {
+                $wrong('needs on the command ' . $command . ' names something other than own_key and here');
             }
             if ($needs !== [] && ($spec['runtime'] ?? true) === false) {
-                $wrong('the command ' . $command . ' needs own_key and says it runs without a runtime');
+                $wrong('the command ' . $command . ' needs ' . implode(' and ', $needs) . ' and says it runs without a runtime');
             }
             $this->checkArguments($command, $spec, $wrong);
         }
@@ -174,8 +174,8 @@ final class AddonManifest implements Addon
                 }
             }
             $needs = $spec['needs'] ?? [];
-            if (!is_array($needs) || array_filter($needs, static fn ($need): bool => $need !== 'own_key') !== []) {
-                $wrong('needs on the tool ' . $spec['name'] . ' names something other than own_key');
+            if (!is_array($needs) || array_filter($needs, static fn ($need): bool => !in_array($need, AddonProcess::NEEDS, true)) !== []) {
+                $wrong('needs on the tool ' . $spec['name'] . ' names something other than own_key and here');
             }
             if (isset($spec['annotations']) && !is_array($spec['annotations'])) {
                 $wrong('annotations on the tool ' . $spec['name'] . ' is not an object');

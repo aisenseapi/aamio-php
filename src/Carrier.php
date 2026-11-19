@@ -33,6 +33,16 @@ namespace Aamio;
  * The challenge and the open are sent again with the same bytes through the
  * challenge window, since on a medium that loses frames one try is not enough;
  * an ask no challenge answers is asked again with a new session.
+ *
+ * Where a partner is reached is learned only from what shows it is fresh: a
+ * challenge to an ask of this party's, an open to a challenge of its own, or a
+ * new message. An ask can be played again from anywhere, and a copy of a message
+ * or a receipt can be sent again by anyone who heard it, so neither moves where
+ * the partner is said to be: a replayed ask could otherwise lead every message
+ * to a machine in range that never answers. An address known from before, as
+ * the home keeps it, is where the first ask goes; when it has stopped answering,
+ * every second ask goes to nobody in particular, as one did before anything was
+ * known. The same as aamio-python's carrier.
  */
 final class Carrier
 {
@@ -83,7 +93,8 @@ final class Carrier
     private array $asks = [];
     /** @var array<string, array{0: string, 1: string, 2: float}> pair => [partner pk, session, when its challenge came], in that order */
     public array $answered = [];
-    private array $addresses = [];
+    /** @var array<string, string> bin2hex of a partner's key => the transport address it was last heard from fresh, or the home kept from before */
+    public array $addresses = [];
     /** @var list<string> */
     public array $refused = [];
     private float $budget = self::UNVERIFIED_PER_SECOND;
@@ -95,20 +106,39 @@ final class Carrier
     private $wall;
     /** @var callable(string): void what the user is to hear, as a message that is not sent again */
     private $note;
+    /** @var callable(string, string): void told where a partner was heard from, fresh: its key and the address */
+    private $heard;
+    /** @var callable(list<string>): void told where the transport says it is reached */
+    private $onHere;
+    /** @var callable(string): string a partner as the user knows it, from its key, for the line that says a message came in */
+    private $nameOf;
+    /** @var callable(string): void where the owner keeps its log */
+    private $log;
 
     /**
      * @param array|\Closure(string): array $profile one profile for every partner, or a function from a partner's key to its own
      * @param ?callable(string): void $note where the user hears what a carrier has to say: the runtime keeps it in attention
+     * @param ?array<string, string> $addresses where partners are reached, as the home keeps it: bin2hex of a key => address
      */
     public function __construct(private CarryState $state, private TransportProcess $process, array|\Closure $profile, public array $known,
         ?callable $clock = null, ?callable $wall = null, private float $retrySeconds = 2.0, private float $askRetrySeconds = 5.0, private int $tries = CarryState::TRIES_DEFAULT,
-        ?callable $note = null)
+        ?callable $note = null, ?array $addresses = null, ?callable $heard = null, ?callable $nameOf = null, ?callable $onHere = null, ?callable $log = null)
     {
         $this->profileOf = $profile instanceof \Closure ? $profile : static fn (string $pk): array => $profile;
         $this->clock = $clock ?? static fn (): float => hrtime(true) / 1e9;
         $this->wall = $wall ?? static fn (): int => time();
         $this->note = $note ?? static function (string $text): void {
         };
+        // Told where a partner was heard from, fresh, so the home can keep it; told where the transport says it is reached.
+        $this->heard = $heard ?? static function (string $pk, string $address): void {
+        };
+        $this->onHere = $onHere ?? static function (array $here): void {
+        };
+        // A partner as the user knows it, for the line that says a message came in.
+        $this->nameOf = $nameOf ?? static fn (string $pk): string => substr(bin2hex($pk), 0, 8);
+        $this->log = $log ?? static function (string $line): void {
+        };
+        $this->addresses = $addresses ?? [];
         $rateDown = $process->properties['rate_down'] ?? null;
         $frameDown = $process->properties['max_frame_down'] ?? null;
         $slow = (is_int($rateDown) || is_float($rateDown)) && $rateDown > 0 && is_int($frameDown);
@@ -400,6 +430,8 @@ final class Carrier
         foreach ($this->process->poll($timeout) as $event) {
             if ($event[0] === 'received') {
                 $this->received($event[1], $event[2]);
+            } elseif ($event[0] === 'here') {
+                ($this->onHere)($event[1]);
             }
         }
         $this->resend();
@@ -436,8 +468,13 @@ final class Carrier
 
             return;
         }
-        if ($source !== null) {
-            $this->addresses[bin2hex($got['sender'])] = $source;
+        if ($source !== null && $result === 'accepted' && in_array($got['kind'], [Carry::CHALLENGE, Carry::OPEN, Carry::MESSAGE], true)) {
+            // Fresh: a challenge answers an ask of ours, an open a challenge of ours, and a new message has a counter
+            // never taken before. The address it came from is where the partner is now.
+            if (($this->addresses[bin2hex($got['sender'])] ?? null) !== $source) {
+                $this->addresses[bin2hex($got['sender'])] = $source;
+                ($this->heard)($got['sender'], $source);
+            }
         }
         $pair = self::pair($got['sender'], $got['session']);
         switch ($got['kind']) {
@@ -479,6 +516,11 @@ final class Carrier
         $this->settled($pair, 'challenge');
         if ($reply !== null) {
             $this->queue($reply, $source);
+        }
+        if ($result === 'accepted' && $got['kind'] === Carry::MESSAGE) {
+            // Said where the owner keeps its log, as aamio serve's window: it said nothing when a message came, and a
+            // test between two machines had nothing to look at until the read (19 November 2026).
+            ($this->log)('transport ' . $this->process->name . ': a message came in from ' . ($this->nameOf)($got['sender']));
         }
     }
 
@@ -531,7 +573,9 @@ final class Carrier
             }
             $this->control[$key]['tries']++;
             $this->control[$key]['next'] = $now + $this->turn($entry['envelope'], $this->retrySeconds);
-            $this->queue($entry['envelope'], $this->addresses[bin2hex($entry['pk'])] ?? $entry['to']);
+            // Back where what it answers came from: a challenge to where the ask came from, an open to where the
+            // challenge did. An ask moves no address (see above), so the address known may be another machine's.
+            $this->queue($entry['envelope'], $entry['to'] ?? ($this->addresses[bin2hex($entry['pk'])] ?? null));
         }
         foreach ($this->asks as $pair => $entry) {
             if ($now < $entry['next']) {
@@ -540,8 +584,11 @@ final class Carrier
             unset($this->asks[$pair]);
             if ($entry['tries'] < $this->tries) {
                 [$session, $envelope] = $this->state->ask($entry['pk'], ($this->profileOf)($entry['pk']), $now);
-                $this->asks[self::pair($entry['pk'], $session)] = ['pk' => $entry['pk'], 'session' => $session, 'next' => $now + $this->turn($envelope, $this->askRetrySeconds), 'tries' => $entry['tries'] + 1];
-                $this->queue($envelope, $this->addresses[bin2hex($entry['pk'])] ?? null);
+                $tries = $entry['tries'] + 1;
+                $this->asks[self::pair($entry['pk'], $session)] = ['pk' => $entry['pk'], 'session' => $session, 'next' => $now + $this->turn($envelope, $this->askRetrySeconds), 'tries' => $tries];
+                // A known address that has stopped answering, as a machine with a Bluetooth address of another day, is
+                // not asked for good: every second ask goes to nobody in particular, as AAMIO_LAN_PEERS or a broadcast.
+                $this->queue($envelope, $tries % 2 === 1 ? ($this->addresses[bin2hex($entry['pk'])] ?? null) : null);
             }
         }
     }

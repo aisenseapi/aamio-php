@@ -952,6 +952,7 @@ require __DIR__ . '/unfit-json.inc.php';
 require __DIR__ . '/release-check-2026-11-14.inc.php';
 require __DIR__ . '/per-key.inc.php';
 require __DIR__ . '/transports.inc.php';
+require __DIR__ . '/transport-here.inc.php';
 $a->close();
 $b->close();
 Http::$override = null;

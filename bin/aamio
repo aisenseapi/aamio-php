@@ -34,8 +34,11 @@ declare(strict_types=1);
  *   addon enable NAME            (let an installed add-on run here; disable takes it out again)
  *   addon NAME ...               (an add-on's commands: aamio addon domain --help with Domain Keys)
  *   transport list | transport profile add NAME [--readable] [--lifetime N] [--window N] [--max-content N]
- *   transport profile remove NAME | transport bind PARTNER TRANSPORT [--profile NAME] | transport unbind PARTNER [TRANSPORT]
- *   (a partner bound to a transport, as lan, is sent to over it and never over HTTPS instead)
+ *   transport profile remove NAME | transport bind PARTNER TRANSPORT [--profile NAME] [--address ADDR] | transport unbind PARTNER [TRANSPORT]
+ *   transport here TRANSPORT     (where an enabled transport is reached, from a start of a moment when it does not run, kept for cards)
+ *   (a partner bound to a transport, as lan, is sent to over it and never over HTTPS instead; --address is where the
+ *   partner is reached on the transport, as its card or aamio transport here on its machine says it, as
+ *   lan:192.168.2.22:47474. Also for a partner bound already)
  */
 
 // Diagnostics to stderr from here on, so stdout carries the JSON and nothing
@@ -249,7 +252,8 @@ if ($command !== 'addon') {
         'archive' => [['policy'], 1, ['max-mb'], ['all']],
         'transport list' => [[], 0, [], []],
         'transport profile' => [['action', 'name'], 0, ['lifetime', 'window', 'max-content'], ['readable']],
-        'transport bind' => [['partner', 'transport'], 0, ['profile'], []],
+        'transport here' => [['transport'], 0, [], []],
+        'transport bind' => [['partner', 'transport'], 0, ['profile', 'address'], []],
         'transport unbind' => [['partner', 'transport'], 1, [], []],
     ];
     $used = in_array($command, ['partner', 'outbox', 'board', 'scope', 'channel', 'transport'], true) ? trim($command . ' ' . (string) ($args[1] ?? '')) : (string) $command;
@@ -755,8 +759,11 @@ try {
                     isset($opts['window']) ? (int) $opts['window'] : null, isset($opts['max-content']) ? (int) $opts['max-content'] : null));
             } elseif ($action === 'profile') {
                 out(Transports::profileRemove($runtime, (string) $args[3]));
+            } elseif ($action === 'here') {
+                out(Transports::here($runtime, (string) $args[2]));
             } elseif ($action === 'bind') {
-                out(Transports::bind($runtime, (string) $args[2], (string) $args[3], isset($opts['profile']) ? (string) $opts['profile'] : null));
+                out(Transports::bind($runtime, (string) $args[2], (string) $args[3], isset($opts['profile']) ? (string) $opts['profile'] : null,
+                    isset($opts['address']) ? (string) $opts['address'] : null));
             } else {
                 out(Transports::unbind($runtime, (string) $args[2], isset($args[3]) ? (string) $args[3] : null));
             }

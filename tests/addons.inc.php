@@ -16,6 +16,7 @@ declare(strict_types=1);
  * Included by tests/runtime.php, with $root, $check, $childPhp and $cliRun in scope.
  */
 
+use Aamio\AddonManifest;
 use Aamio\AddonProcess;
 use Aamio\Addons;
 use Aamio\Channel;
@@ -475,6 +476,7 @@ return new ThrowsInCommands();
                 'ping' => ['help' => 'answers pong', 'arguments' => [['name' => '--word', 'help' => 'a word to carry']]],
                 'check' => ['help' => 'a website and a partner', 'arguments' => [['name' => 'site', 'help' => 'the website', 'host' => true], ['name' => '--partner', 'help' => 'a name in the address book', 'required' => true, 'subject' => 'partner']]],
                 'file' => ['help' => "the runtime's own key", 'needs' => ['own_key']],
+                'where' => ['help' => "where this machine's transports are reached", 'needs' => ['here']],
                 'local' => ['help' => 'no home needed', 'runtime' => false, 'arguments' => [['name' => 'path']]],
                 'sleep' => ['help' => 'never answers'],
                 'crash' => ['help' => 'dies'],
@@ -529,7 +531,7 @@ if ($short === "spill") { echo str_repeat("x", 5000); exit(0); }
 if ($short === "grumble") { fwrite(STDERR, str_repeat("y", 5000)); echo json_encode(["result" => ["pong" => true]]); exit(0); }
 if ($short === "mutter") { fwrite(STDERR, str_repeat("y", 500)); echo json_encode(["result" => ["pong" => true]]); exit(0); }
 $env = static fn (string $key) => getenv($key) === false ? null : getenv($key);
-echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "arguments" => $request["arguments"], "subject" => $request["subject"], "own_key" => $request["own_key"], "state_dir" => $request["state_dir"], "home_env" => $env("AAMIO_HOME"), "addon_env" => $env("AAMIO_ADDON"), "secret_env" => $env("AAMIO_TEST_SECRET"), "passthru_env" => $env("AAMIO_TEST_PASSTHRU"), "path_env" => getenv("PATH") !== false, "no_current_directory" => $env("NoDefaultCurrentDirectoryInExePath")]]);
+echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "arguments" => $request["arguments"], "subject" => $request["subject"], "own_key" => $request["own_key"], "here" => array_key_exists("here", $request) ? $request["here"] : "absent", "state_dir" => $request["state_dir"], "home_env" => $env("AAMIO_HOME"), "addon_env" => $env("AAMIO_ADDON"), "secret_env" => $env("AAMIO_TEST_SECRET"), "passthru_env" => $env("AAMIO_TEST_PASSTHRU"), "path_env" => getenv("PATH") !== false, "no_current_directory" => $env("NoDefaultCurrentDirectoryInExePath")]]);
 ');
 
         return ['package' => $package, 'version' => $version, 'path' => $path];
@@ -562,7 +564,7 @@ echo json_encode(["result" => ["pong" => true, "name" => $request["name"], "argu
     $commands = $row['commands'];
     sort($commands);
     $check($ran('demo2') === "probe probe\n", 'enable asked the process who it is, and nothing else of it ran');
-    $check($row['enabled'] === true && $row['contract'] === 2 && $commands === ['allow', 'bytes', 'check', 'crash', 'fail', 'file', 'flood', 'forget', 'garbage', 'grumble', 'list', 'local', 'mutter', 'noisy', 'ping', 'sleep', 'spill'] && $row['mcp_tools'] === ['aamio_addon_demo2_ping', 'aamio_addon_demo2_check', 'aamio_addon_demo2_sleep', 'aamio_addon_demo2_flood', 'aamio_addon_demo2_noisy', 'aamio_addon_demo2_spill', 'aamio_addon_demo2_grumble', 'aamio_addon_demo2_mutter'], "the manifest's commands and the three the core gives an add-on with hosts, and its tools");
+    $check($row['enabled'] === true && $row['contract'] === 2 && $commands === ['allow', 'bytes', 'check', 'crash', 'fail', 'file', 'flood', 'forget', 'garbage', 'grumble', 'list', 'local', 'mutter', 'noisy', 'ping', 'sleep', 'spill', 'where'] && $row['mcp_tools'] === ['aamio_addon_demo2_ping', 'aamio_addon_demo2_check', 'aamio_addon_demo2_sleep', 'aamio_addon_demo2_flood', 'aamio_addon_demo2_noisy', 'aamio_addon_demo2_spill', 'aamio_addon_demo2_grumble', 'aamio_addon_demo2_mutter'], "the manifest's commands and the three the core gives an add-on with hosts, and its tools");
     $check(str_contains($said['note'], 'a process of its own') && str_contains($said['note'], "never the home's key") && $enabledFile() === ['enabled' => ['acme/demo2']], 'the note says what it means, and the choice is recorded by package');
     $again = Addons::enable('demo2');
     $check(str_contains($again['note'], 'nothing of it ran now') && !str_contains($again['note'], 'just now') && $ran('demo2') === "probe probe\n", 'enabling it again runs no probe, and says so');
@@ -603,6 +605,26 @@ if (!class_exists(InstalledVersions::class, false)) {
     $runtime->close();
     [$code, $out] = $cli(['addon', 'demo2', 'file']);
     $check($code === 0 && (json_decode($out, true)['own_key'] ?? null) === $own, 'needs own_key gives the public key, and nothing else of the key');
+    $got = json_decode($out, true) ?? [];
+    $check(array_key_exists('here', $got) && $got['here'] === null, 'here only where a call asks for it', $out);
+    [$code, $out] = $cli(['addon', 'demo2', 'where']);
+    $got = json_decode($out, true) ?? [];
+    $check($code === 0 && ($got['here'] ?? null) === [] && array_key_exists('own_key', $got) && $got['own_key'] === null,
+        "needs here: where this machine's transports are reached, none here, and no key with it", $out);
+    $needsWrong = [];
+    foreach ([[['here', 'own_key', 'home_key'], true, 'needs on the command spot names something other than own_key and here'],
+        [['own_key', 'here'], false, 'the command spot needs own_key and here and says it runs without a runtime']] as [$needs, $runs, $said]) {
+        try {
+            new AddonManifest(null, $folder, $folder . DIRECTORY_SEPARATOR . 'aamio-addon.json', ['aamio_addon' => 2, 'name' => 'spot', 'version' => '0.0.1', 'process' => ['php' => 'process.php'],
+                'commands' => ['spot' => ['help' => 'x', 'needs' => $needs, 'runtime' => $runs]]], 'uninstall it');
+            $needsWrong[] = 'taken: ' . json_encode($needs);
+        } catch (\RuntimeException $error) {
+            if (!str_contains($error->getMessage(), $said)) {
+                $needsWrong[] = $error->getMessage();
+            }
+        }
+    }
+    $check($needsWrong === [], 'a manifest may need own_key and here, and nothing else, and only with a runtime', implode(' | ', $needsWrong));
     [$code, $out, $err] = $cli(['addon', 'demo2', 'fail']);
     $check($code === 3 && json_decode($out, true) === ['status' => 'no', 'fix' => 'x'] && str_contains($err, 'a note from the add-on'), "the add-on's result, code and note come back as they are");
     [$code, $out] = $cli(['addon', 'demo2', 'bytes']);

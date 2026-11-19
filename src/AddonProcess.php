@@ -44,6 +44,11 @@ final class AddonProcess
     public static int $maxStderrBytes = self::MAX_STDERR_BYTES;
     /** How long a stopped process gets to go away before it is given up on. */
     public const STOP_WAIT = 5.0;
+    /**
+     * What a command or a tool may ask the core for: the runtime's public key, and where this machine's transports are
+     * reached (here), for a card that says it. Never a partner's address, and never the home's key.
+     */
+    public const NEEDS = ['own_key', 'here'];
     /** Names an add-on may not ask for in its environment list. */
     public const NEVER_PASSED = ['AAMIO_HOME', 'AAMIO_ADDONS', 'AAMIO_ADDON'];
     /** The consent list lives beside the add-on's own directory, not in it: the add-on's process must not be able to widen what it may read. */
@@ -454,9 +459,10 @@ final class AddonProcess
      * or raw, exit_code and is_error.
      *
      * @param array<string, mixed> $arguments
+     * @param list<array{transport: string, medium: string, here: list<string>, at: int}>|null $here where this machine's transports are reached, for a call that needs it
      * @return array<string, mixed>
      */
-    public static function run(AddonManifest $manifest, string $kind, string $name, array $arguments, ?array $subject = null, ?string $ownKey = null, ?string $stateDir = null, ?callable $stderr = null, ?int $deadline = null, bool $declared = true): array
+    public static function run(AddonManifest $manifest, string $kind, string $name, array $arguments, ?array $subject = null, ?string $ownKey = null, ?string $stateDir = null, ?callable $stderr = null, ?int $deadline = null, bool $declared = true, ?array $here = null): array
     {
         $deadline ??= $manifest->deadline;
         $request = [
@@ -466,6 +472,7 @@ final class AddonProcess
             'arguments' => $arguments === [] ? new \stdClass() : $arguments,
             'subject' => $subject,
             'own_key' => $ownKey,
+            'here' => $here,
             'state_dir' => $stateDir,
             'deadline_seconds' => $deadline,
             'aamio' => ['version' => Http::VERSION, 'runtime' => 'php'],
@@ -556,13 +563,15 @@ final class AddonProcess
         if (strlen($err) > self::$maxStderrBytes) {
             return self::failure($manifest, 'addon_failed', 'the add-on ' . $manifest->name . ' wrote more than ' . self::$maxStderrBytes . ' bytes to standard error. ' . $stop);
         }
-        if ($stderr !== null && $err !== '') {
-            $stderr($err);
+        // UTF-8, or the system's code page, as aamio-python reads it: an add-on's own words stay readable.
+        $text = TransportProcess::textOf($err);
+        if ($stderr !== null && $text !== '') {
+            $stderr($text);
         }
         $answer = json_decode($out, true);
         if (!is_array($answer) || array_is_list($answer) && $answer !== []) {
-            $lines = array_values(array_filter(array_map('trim', explode("\n", $err)), static fn (string $line): bool => $line !== ''));
-            $said = $lines !== [] ? ': ' . substr($lines[count($lines) - 1], 0, 200) : '';
+            $lines = array_values(array_filter(array_map('trim', explode("\n", $text)), static fn (string $line): bool => $line !== ''));
+            $said = $lines !== [] ? ': ' . TransportProcess::cut($lines[count($lines) - 1], 200) : '';
 
             return self::failure($manifest, 'addon_failed', 'the add-on ' . $manifest->name . ' exited with code ' . json_encode($exit) . ' and gave no answer this aamio can read' . $said . '. ' . $stop);
         }
@@ -635,10 +644,28 @@ final class AddonProcess
             : 'It was enabled already, and nothing of it ran now.';
 
         return $package . ' runs here from now on, in a process of its own for each call. ' . $ran . ' '
-            . 'A call gets its arguments, a key aamio resolved for it, the runtime\'s public key where a '
-            . 'command asks for it, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, '
+            . 'A call gets its arguments, a key aamio resolved for it, the runtime\'s public key and where this machine\'s transports are reached '
+            . 'where a call asks for them, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, '
             . 'the locale, the interpreter\'s own settings, TLS roots and the proxy variables, which can carry credentials of their own' . $asked . ', and never the '
             . 'home\'s key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions.';
+    }
+
+    /**
+     * What a call that needs here gets: for each enabled transport its name, medium, where it is reached and since when,
+     * as TransportService::hereForAddons finds it. A transport that runs says it; one that does not is started for a
+     * moment when the home keeps nothing of it. An empty list when no transport is enabled.
+     *
+     * @return list<array{transport: string, medium: string, here: list<string>, at: int}>
+     */
+    public static function hereOfTransports(Runtime $runtime): array
+    {
+        try {
+            $service = $runtime->transportService() ?? throw new CodedRuntime('transport_down', 'this runtime has no home of its own, so it has no transports');
+
+            return $service->hereForAddons();
+        } catch (\RuntimeException | \InvalidArgumentException $error) {
+            throw new AddonRefused('here_unknown', 'Where this machine\'s transports are reached could not be read: ' . $error->getMessage() . '. aamio transport list shows them.', 'unreachable');
+        }
     }
 
     /** A directory of the add-on's own under the home, made on first use, private to the user. */
@@ -823,6 +850,7 @@ final class AddonProcess
     {
         $subject = null;
         $ownKey = null;
+        $here = null;
         $host = null;
         try {
             foreach ($spec['arguments'] ?? [] as $argument) {
@@ -839,6 +867,9 @@ final class AddonProcess
             }
             if (in_array('own_key', $spec['needs'] ?? [], true) && $runtime !== null) {
                 $ownKey = $runtime->keys->public;
+            }
+            if (in_array('here', $spec['needs'] ?? [], true) && $runtime !== null) {
+                $here = self::hereOfTransports($runtime);
             }
         } catch (AddonRefused $refused) {
             self::out(self::refusal($refused, $host, $subject));
@@ -860,7 +891,7 @@ final class AddonProcess
         try {
             $answer = self::run($manifest, 'command', $name, $arguments, $subject, $ownKey, $directory, static function (string $text): void {
                 fwrite(STDERR, $text);
-            });
+            }, here: $here);
         } finally {
             self::giveBack($manifest->name);
         }
@@ -926,6 +957,7 @@ final class AddonProcess
         $host = null;
         $subject = null;
         $ownKey = null;
+        $here = null;
         try {
             if (isset($spec['host']) && ($arguments[$spec['host']] ?? null) !== null) {
                 $host = $arguments[$spec['host']] = self::normaliseHost($arguments[$spec['host']]);
@@ -950,6 +982,9 @@ final class AddonProcess
             if (in_array('own_key', $spec['needs'] ?? [], true)) {
                 $ownKey = $runtime->keys->public;
             }
+            if (in_array('here', $spec['needs'] ?? [], true)) {
+                $here = self::hereOfTransports($runtime);
+            }
             if ($host !== null && !in_array($host, self::allowedHosts($runtime, $manifest), true)) {
                 $answer = self::consent($manifest, $runtime, $name, $host, $subject, $arguments, $ask);
                 if ($answer !== null) {
@@ -968,7 +1003,7 @@ final class AddonProcess
             return McpServer::resultOf(self::refusal(new AddonRefused($busy, 'At most ' . self::MAX_AT_ONCE . ' calls of the add-on ' . $manifest->name . ' run at once and ' . self::MAX_PER_WINDOW . ' start per minute here. Nothing was done. Try again shortly.', 'unreachable'), $host), true);
         }
         try {
-            $answer = self::run($manifest, 'tool', $name, $arguments, $subject, $ownKey, $directory);
+            $answer = self::run($manifest, 'tool', $name, $arguments, $subject, $ownKey, $directory, here: $here);
         } finally {
             self::giveBack($manifest->name);
         }

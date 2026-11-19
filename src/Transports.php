@@ -13,6 +13,10 @@ namespace Aamio;
  * HTTPS instead. Only the process that owns the home runs a transport (B2): aamio serve for as long as it serves, and a
  * send or a read that waits, on the command line, for as long as it runs. TransportService runs them. The same as
  * aamio-python's transports.py, over the same files.
+ *
+ * Two files beside them are hints, and never stop a send: here.json, where each transport said it is reached, for cards
+ * that say it; and addresses.json, where each bound partner is reached on each transport, as the user gave it to bind or
+ * as a fresh envelope from the partner showed it.
  */
 final class Transports
 {
@@ -20,6 +24,10 @@ final class Transports
     public const DEFAULT_PROFILE = 'sealed';
     public const CRASH_WINDOW = 600;
     public const CRASHES_MOST = 3;
+    /** How long a start of a moment waits for a transport's first ready, to learn where it is reached (B2). */
+    public const LEARN_SECONDS = 10;
+    /** Where an address a partner is reached at came from: given to bind, or shown by a fresh envelope. */
+    public const ADDRESS_FROM = ['you', 'heard'];
     /** What a carried message is filed under when the partner it came from is no longer bound to a transport. */
     public const UNBOUND_CHANNEL = 'carry';
     /** How often a running carrier's list of whom it takes messages from is read again. */
@@ -152,10 +160,23 @@ final class Transports
         $service = self::service($runtime);
         $enabled = $service->manifests();
         $stored = $service->config->profiles();
+        $kept = $service->config->here();
+        $addresses = $service->config->addresses();
         $rows = [];
         foreach ($service->config->bindings() as $key => $routes) {
             $partner = $runtime->partnerByKey((string) $key);
-            $rows[] = ['partner' => $partner['name'] ?? null, 'key' => (string) $key, 'in_address_book' => $partner !== null, 'routes' => $routes];
+            $row = ['partner' => $partner['name'] ?? null, 'key' => (string) $key, 'in_address_book' => $partner !== null, 'routes' => $routes];
+            $reached = [];
+            foreach ($addresses[(string) $key] ?? [] as $transport => $entry) {
+                if (array_filter($routes, static fn (array $route): bool => $route['transport'] === (string) $transport) !== []) {
+                    $reached[(string) $transport] = $entry;
+                }
+            }
+            if ($reached !== []) {
+                // Where the partner is reached on each transport: given to bind ("you") or shown by a fresh envelope ("heard").
+                $row['addresses'] = $reached;
+            }
+            $rows[] = $row;
         }
         $transports = [];
         foreach ($enabled as $name => $manifest) {
@@ -165,7 +186,16 @@ final class Transports
                     $partners[] = $row['partner'] ?? $row['key'];
                 }
             }
-            $transports[] = ['name' => $name, 'version' => $manifest->version, 'medium' => $manifest->medium, 'permissions' => $manifest->permissions, 'partners' => $partners];
+            $item = ['name' => $name, 'version' => $manifest->version, 'medium' => $manifest->medium, 'permissions' => $manifest->permissions, 'partners' => $partners];
+            $said = $kept[$name] ?? null;
+            if ($said !== null && $said['medium'] === $manifest->medium) {
+                $item['here'] = $said['here'];
+                $item['here_at'] = $said['at'];
+            } else {
+                $item['here'] = null;
+                $item['here_fix'] = 'aamio transport here ' . $name . ' starts it for a moment and says where it is reached, for a card';
+            }
+            $transports[] = $item;
         }
         $profiles = [];
         if (!isset($stored[self::DEFAULT_PROFILE])) {
@@ -212,19 +242,83 @@ final class Transports
         return ['removed' => $name];
     }
 
-    public static function bind(Runtime $runtime, string $which, string $transport, ?string $profile = null): array
+    /** aamio transport here NAME: where an enabled transport is reached, from the running one or a start of a moment. */
+    public static function here(Runtime $runtime, string $name): array
+    {
+        $service = self::service($runtime);
+        $manifests = $service->manifests();
+        if (!isset($manifests[$name])) {
+            throw new CodedRuntime('transport_unknown', 'no enabled transport is called ' . $name . '. aamio addon list shows what is installed, and aamio addon enable ' . $name . ' lets it run here');
+        }
+        [$found, $how] = $service->learnHere($name);
+        $medium = $manifests[$name]->medium;
+        if ($how === 'starting') {
+            return ['transport' => $name, 'medium' => $medium, 'here' => null,
+                'note' => $name . ' is starting in this process and has not said it is ready yet: ask again in a moment.'];
+        }
+        if ($how === 'not_ready') {
+            return ['transport' => $name, 'medium' => $medium, 'here' => null,
+                'note' => $name . ' did not say it was ready within ' . self::LEARN_SECONDS . ' seconds, as when its medium is off or another program holds it, so nothing was learned. '
+                    . 'The lines it wrote above say why.'];
+        }
+        // Nothing said and an empty list say the same: a card names the medium alone, and there is no address to name.
+        if ($found === null || $found === []) {
+            return ['transport' => $name, 'medium' => $medium, 'here' => $found,
+                'note' => $name . ' says nothing of where it is reached: a version from before here (contract 3, B3), or a medium without addresses. '
+                    . 'A card can name the medium ' . $medium . ' without an address.'];
+        }
+        $started = $how === 'running' ? 'It runs, and said so itself.' : 'It was started for a moment to say this, and stopped again.';
+
+        return ['transport' => $name, 'medium' => $medium, 'here' => $found,
+            'note' => $started . ' ' . implode(', ', $found) . ' is kept in the home for cards: over MCP an Earshot card that names ' . $medium . ' carries it by itself, and on the command line '
+                . 'aamio addon earshot card ADDRESS --via ' . $found[0] . ' --key KEY does. A partner binds it with aamio transport bind NAME TRANSPORT --address ' . $found[0] . '.'];
+    }
+
+    /** A partner bound to a transport, or the address it is reached at there, for a partner bound to it already. */
+    public static function bind(Runtime $runtime, string $which, string $transport, ?string $profile = null, ?string $address = null): array
     {
         $partner = self::partner($runtime, $which);
         $service = self::service($runtime);
-        if (!isset($service->manifests()[$transport])) {
+        $manifests = $service->manifests();
+        if (!isset($manifests[$transport])) {
             throw new CodedRuntime('transport_unknown', 'no enabled transport is called ' . $transport . '. aamio addon list shows what is installed, and aamio addon enable ' . $transport . ' lets it run here');
         }
-        $routes = $service->config->bind($partner['key'], $transport, $profile ?? self::DEFAULT_PROFILE);
-        $first = $routes[0]['transport'];
+        $medium = $manifests[$transport]->medium;
+        if ($address !== null && TransportProcess::hereOf([$address], $medium) === null) {
+            throw new CodedInvalidArgument('transport_address_invalid', 'an address on ' . $transport . ' is ' . $medium . ': and then where the partner is reached, as its card or aamio transport here on its machine '
+                . 'says it, at most 128 characters of printable ASCII without spaces');
+        }
+        $bound = null;
+        foreach ($service->config->routes($partner['key']) as $route) {
+            if ($route['transport'] === $transport) {
+                $bound = $route;
+                break;
+            }
+        }
+        if ($bound !== null && ($address === null || ($profile !== null && $profile !== $bound['profile']))) {
+            throw new CodedInvalidArgument('transport_already_bound', $transport . ' is bound to that partner already' . ($address !== null
+                ? ', under the profile ' . $bound['profile'] . ': aamio transport unbind first to bind it under another'
+                : '. With --address, bind says where the partner is reached on it'));
+        }
+        $routes = $bound !== null ? $service->config->routes($partner['key']) : $service->config->bind($partner['key'], $transport, $profile ?? self::DEFAULT_PROFILE);
+        $answer = ['partner' => $partner['name'], 'key' => $partner['key'], 'routes' => $routes];
+        if ($address !== null) {
+            $service->config->setAddress($partner['key'], $transport, $address, 'you', time());
+            $answer['address'] = $address;
+        }
+        if ($bound !== null) {
+            $answer['note'] = 'The first ask to ' . $partner['name'] . ' on ' . $transport . ' goes to ' . $address . ' from now on; when it stops answering there, every second ask goes to nobody in particular, '
+                . 'and a fresh envelope from ' . $partner['name'] . ' moves the address to where it came from.';
 
-        return ['partner' => $partner['name'], 'key' => $partner['key'], 'routes' => $routes,
-            'note' => 'Messages to ' . $partner['name'] . ' go over ' . $first . ' from now on, and never over HTTPS instead, and ' . $first . ' takes messages from ' . $partner['name'] . '. '
-                . $partner['name'] . ' binds your key to ' . $transport . ' the same way. Only the process that owns this home runs the transport: aamio serve, or aamio send and aamio read --wait while they run.'];
+            return $answer;
+        }
+        $reached = $address !== null ? ' The first ask goes to ' . $address . '; when it stops answering there, every second ask goes to nobody in particular, and a fresh envelope from ' . $partner['name']
+            . ' moves the address to where it came from.' : '';
+        $first = $routes[0]['transport'];
+        $answer['note'] = 'Messages to ' . $partner['name'] . ' go over ' . $first . ' from now on, and never over HTTPS instead, and ' . $first . ' takes messages from ' . $partner['name'] . '.' . $reached . ' '
+            . $partner['name'] . ' binds your key to ' . $transport . ' the same way. Only the process that owns this home runs the transport: aamio serve, or aamio send and aamio read --wait while they run.';
+
+        return $answer;
     }
 
     public static function unbind(Runtime $runtime, string $which, ?string $transport = null): array

@@ -13,6 +13,10 @@ namespace Aamio;
  * transport that stops is started again after 1, 5 and 30 seconds, and left down after three stops in ten minutes;
  * one no partner in the address book is bound to any more is stopped, and one bound meanwhile is started; every
  * transport stops with the owner. The same as aamio-python's transports.Service.
+ *
+ * Where things are reached is kept in the home as hints (TransportConfig): where a transport says it is reached, for
+ * cards, and where a partner is reached on it, as bind was given it or a fresh envelope showed it. A carrier starts with
+ * what the home keeps of its partners, and takes in what changes there while it runs.
  */
 final class TransportService
 {
@@ -185,11 +189,151 @@ final class TransportService
             $this->runtime->logged('transport ' . $name . ': stopped, since no partner in the address book is bound to it any more');
         }
         $this->add($wanted);
+        $addresses = $this->config->addresses();
         foreach ($this->running as $name => $entry) {
             if ($entry['carrier'] !== null) {
                 $entry['carrier']->known = $known[$name] ?? [];
+                // Given to bind meanwhile, or learned by another owner of this home: what the home keeps is the newest.
+                $entry['carrier']->addresses = $this->addressesFor((string) $name, $addresses) + $entry['carrier']->addresses;
             }
         }
+    }
+
+    // ------------------------------------------------------------ where things are reached --
+
+    /**
+     * Where each partner bound to the transport is reached on it, as the home keeps it.
+     *
+     * @param array<string, array<string, array{address: string, from: string, at: int}>>|null $addresses
+     * @return array<string, string> bin2hex of the partner's key => address
+     */
+    private function addressesFor(string $name, ?array $addresses = null): array
+    {
+        // Only for the partners bound to it: a hint left behind for one no longer bound, or no longer in the address book, is never used.
+        $bound = array_flip(array_map(static fn (string $pk): string => Codec::b64url($pk), $this->knownFor($name)));
+        $found = [];
+        foreach ($addresses ?? $this->config->addresses() as $key => $by) {
+            if (isset($by[$name]) && isset($bound[(string) $key])) {
+                $found[bin2hex(Codec::unb64url((string) $key))] = $by[$name]['address'];
+            }
+        }
+
+        return $found;
+    }
+
+    /** A fresh envelope from the partner came from $address: kept, so the next owner of the home asks there first. */
+    private function heardFrom(string $name, string $pk, string $address): void
+    {
+        try {
+            $this->config->setAddress(Codec::b64url($pk), $name, $address, 'heard', time());
+        } catch (\RuntimeException $error) {
+            $this->runtime->logged('transport ' . $name . ': where a partner was heard from could not be kept: ' . $error->getMessage());
+        }
+    }
+
+    /**
+     * The transport said where it is reached, or said nothing of it (an empty list): kept for cards, as an add-on that
+     * needs here gets it, with the version that said it.
+     *
+     * @param list<string> $here
+     */
+    private function keepHere(string $name, string $medium, array $here, ?string $version = null): void
+    {
+        try {
+            $this->config->setHere($name, $medium, $here, time(), $version);
+        } catch (\RuntimeException $error) {
+            $this->runtime->logged('transport ' . $name . ': where it is reached could not be kept: ' . $error->getMessage());
+        }
+    }
+
+    /** A partner as the user knows it: its name, or the start of its key. */
+    private function nameOf(string $pk): string
+    {
+        $key = Codec::b64url($pk);
+
+        return $this->runtime->partnerByKey($key)['name'] ?? 'the key ' . substr($key, 0, 8);
+    }
+
+    /**
+     * Where an enabled transport is reached: [addresses or null, how it is known], how being running, learned or
+     * not_ready.
+     *
+     * The running one says it on its ready. One that does not run is started for a moment, as B2 allows for this alone,
+     * with a hello like any other, and stopped at its first ready: the ready says where it is reached, or that it says
+     * nothing of it.
+     *
+     * @return array{0: ?list<string>, 1: string}
+     */
+    public function learnHere(string $name, float $seconds = Transports::LEARN_SECONDS): array
+    {
+        $process = $this->running[$name]['process'] ?? null;
+        if ($process !== null) {
+            // Never a second one beside it: the two would fight over the medium, as a port or a channel.
+            return [$process->here, $process->readied ? 'running' : 'starting'];
+        }
+        $manifest = $this->manifests()[$name] ?? null;
+        if ($manifest === null) {
+            throw new CodedRuntime('transport_unknown', 'no enabled transport is called ' . $name . '. aamio addon list shows what is installed, and aamio addon enable ' . $name . ' lets it run here');
+        }
+        $folder = Transports::workingFolder($this->runtime->home, $name);
+        $process = new TransportProcess($name, $manifest->version, $manifest->startCommand(), $folder, Transports::environmentFor($manifest, $this->environ), null,
+            fn (string $line) => $this->runtime->logged($line));
+        try {
+            $process->start(Http::VERSION, 'php', $folder);
+            $until = self::now() + $seconds;
+            while (!$process->readied && self::now() < $until) {
+                $process->poll(0.1);
+            }
+        } catch (TransportFailed $error) {
+            throw new CodedRuntime('transport_down', $name . ' did not start to say where it is reached: ' . $error->getMessage());
+        } finally {
+            $process->stop();
+        }
+        if (!$process->readied) {
+            return [null, 'not_ready'];
+        }
+        // Said nothing is kept too, as an empty list, so a transport over a medium without addresses is not started again
+        // for every card: the microphone of a transport over sound opened each time (the review of 19 November 2026).
+        $this->keepHere($name, $manifest->medium, $process->here ?? [], $manifest->version);
+
+        return [$process->here, 'learned'];
+    }
+
+    /**
+     * What an add-on that needs here gets: each enabled transport's medium and where it is reached, as the running one
+     * says it, else as the home keeps it from this version of the transport, else learned now by a start of a moment, at
+     * most once per version. Never a partner's. A transport that said nothing of it is left out.
+     *
+     * @return list<array{transport: string, medium: string, here: list<string>, at: int}>
+     */
+    public function hereForAddons(): array
+    {
+        $kept = $this->config->here();
+        $out = [];
+        foreach ($this->manifests() as $name => $manifest) {
+            $name = (string) $name;
+            $process = $this->running[$name]['process'] ?? null;
+            $running = $process !== null && $process->readied ? $process->here : null;
+            $said = $kept[$name] ?? null;
+            if ($running !== null) {
+                [$here, $at] = [$running, time()];
+            } elseif ($said !== null && $said['medium'] === $manifest->medium && ($said['version'] === null || $said['version'] === $manifest->version)) {
+                [$here, $at] = [$said['here'], $said['at']];
+            } else {
+                try {
+                    [$here] = $this->learnHere($name);
+                } catch (CodedRuntime $error) {
+                    $this->runtime->logged('transport ' . $name . ': ' . $error->getMessage());
+                    $here = null;
+                }
+                $at = time();
+            }
+            if ($here !== null && $here !== []) {
+                $out[] = ['transport' => $name, 'medium' => $manifest->medium, 'here' => array_values($here), 'at' => $at];
+            }
+        }
+
+        return $out;
     }
 
     public function isRunning(): bool
@@ -217,7 +361,10 @@ final class TransportService
             try {
                 $process->start(Http::VERSION, 'php', $folder);
                 $this->running[$name]['carrier'] = new Carrier($this->carry(), $process, fn (string $pk): array => $this->profileFor($pk), $this->knownFor($name),
-                    note: fn (string $text) => $this->runtime->notSentAgain((string) $name, $text));
+                    note: fn (string $text) => $this->runtime->notSentAgain((string) $name, $text), addresses: $this->addressesFor((string) $name),
+                    heard: fn (string $pk, string $address) => $this->heardFrom((string) $name, $pk, $address), nameOf: fn (string $pk): string => $this->nameOf($pk),
+                    onHere: fn (array $here) => $this->keepHere((string) $name, $manifest->medium, $here, $manifest->version),
+                    log: fn (string $line) => $this->runtime->logged($line));
                 $this->running[$name]['process'] = $process;
                 $this->runtime->logged('transport ' . $name . ': up');
                 $this->checkWindows((string) $name, $this->running[$name]['carrier']);
@@ -460,7 +607,7 @@ final class TransportService
         if (!$this->wait($opened, $until)) {
             $hint = $stretch ? '' : $this->notSentHint($name, $pk, $content, $until - $began);
             throw new CodedRuntime('carry_not_sent', 'the partner did not answer on ' . $name . ' within ' . (int) ($until - $began) . ' seconds, so nothing was sent.' . $hint
-                . ' Its aamio has to run on the same network, as aamio serve or aamio read --wait, with this key bound to ' . $name);
+                . ' Its aamio has to be within reach of ' . $name . ' and running, as aamio serve or aamio read --wait, with this key bound to ' . $name . $this->transportSaid($name, $began));
         }
         $carrier = $this->carrierOf($name);
         try {
@@ -481,6 +628,20 @@ final class TransportService
 
         return ['via' => $name, 'profile' => $route['profile'], 'mark' => $key, 'status' => $outcome, 'sha256' => $written['sha256'],
             'bytes' => strlen($envelope), 'sealed' => ord($envelope[strlen(Carry::MAGIC)]) === Carry::SEALED, 'waited' => (int) ($until - $began)];
+    }
+
+    /**
+     * What the transport said of the latest frame it could not send since the send began, for carry_not_sent, or an empty
+     * string. It knows the medium: a Bluetooth address nobody answers on, a network that is down.
+     */
+    private function transportSaid(string $name, float $since): string
+    {
+        $said = ($this->running[$name]['process'] ?? null)?->lastError;
+        if ($said === null || $said[0] < $since || $said[2] === null || $said[2] === '') {
+            return '';
+        }
+
+        return '. ' . $name . ' said of the last frame it could not send: ' . rtrim($said[2], '.');
     }
 
     /**

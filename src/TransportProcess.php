@@ -26,6 +26,13 @@ namespace Aamio;
  * another line. A frame's deadline runs from when it is given. A send line not yet
  * begun when its deadline comes is withdrawn and not sent, and the room it held
  * comes back; one begun or written is unknown.
+ *
+ * A ready may say where others reach the transport now (B3: here). The latest is
+ * kept, and said as an event only when it changed; one that cannot be taken is
+ * logged and left out, and never stops a transport that moves frames. What the
+ * transport said of the last frame it could not send is kept as well, for a send
+ * that ends without an answer. Standard error is read as UTF-8, as contract 3
+ * asks, or else in the system's own code page where PHP can read it.
  */
 final class TransportProcess
 {
@@ -38,6 +45,10 @@ final class TransportProcess
     public const WRITE_PIECE = 8192;
     /** A frame that settled is kept this long past its deadline, for a late answer and for status, and then forgotten. */
     public const FORGET_SECONDS = 600;
+    /** here on a ready (B3): where others reach this transport now, at most this many addresses. */
+    public const HERE_MOST = 4;
+    /** An address in here is printable ASCII without spaces, as a card can carry it: medium:rest. */
+    public const HERE_ADDRESS = '/\A[\x21-\x7e]{1,128}\z/';
 
     /** @var resource|null */
     private $process = null;
@@ -73,6 +84,12 @@ final class TransportProcess
     private int $said = 0;
     /** @var list<string> the last lines it wrote on standard error */
     private array $lastWords = [];
+    /** @var list<string>|null where others reach it now, as its latest ready said, or null while it has said nothing */
+    public ?array $here = null;
+    /** A ready has come since the start. */
+    public bool $readied = false;
+    /** @var array{0: float, 1: string, 2: ?string}|null the clock, code and message of the latest error it gave for a frame */
+    public ?array $lastError = null;
 
     public function __construct(public readonly string $name, public readonly string $version, private array $command, private ?string $cwd, private array $env, ?callable $clock = null, ?callable $log = null)
     {
@@ -99,6 +116,64 @@ final class TransportProcess
         $env['AAMIO_ADDON'] = '3';
 
         return $env;
+    }
+
+    /**
+     * Bytes a process wrote, as text: UTF-8, as contract 3 asks, or else the system's own code page.
+     *
+     * Python on Windows writes standard error to a pipe in the ANSI code page, so the system's own words for an error,
+     * as Norwegian ones, came out as replacement characters (the field test over Bluetooth of 19 November 2026). This
+     * PHP has no mbstring or iconv to count on: on Windows the ANSI code page is read with sapi_windows_cp_conv, and where
+     * that cannot be had, what is not UTF-8 becomes U+FFFD, as aamio-python reads it where its code page is UTF-8.
+     */
+    public static function textOf(string $raw): string
+    {
+        if (preg_match('//u', $raw) === 1) {
+            return $raw;
+        }
+        if (PHP_OS_FAMILY === 'Windows' && function_exists('sapi_windows_cp_get') && function_exists('sapi_windows_cp_conv')) {
+            try {
+                $page = sapi_windows_cp_get('ansi');
+                $text = $page !== 65001 ? sapi_windows_cp_conv($page, 65001, $raw) : null;
+            } catch (\Throwable) {
+                $text = null;
+            }
+            if (is_string($text) && preg_match('//u', $text) === 1) {
+                return $text;
+            }
+        }
+        $text = json_decode((string) json_encode($raw, JSON_INVALID_UTF8_SUBSTITUTE));
+
+        return is_string($text) ? $text : '';
+    }
+
+    /**
+     * The addresses in a ready's here, or null when they cannot be taken: a list of at most HERE_MOST addresses, each
+     * medium:rest in printable ASCII without spaces, at most 128 characters, each once.
+     *
+     * @return list<string>|null
+     */
+    public static function hereOf(mixed $value, ?string $medium): ?array
+    {
+        if (!is_array($value) || !array_is_list($value) || count($value) > self::HERE_MOST || $medium === null) {
+            return null;
+        }
+        foreach ($value as $address) {
+            if (!is_string($address) || preg_match(self::HERE_ADDRESS, $address) !== 1 || !str_starts_with($address, $medium . ':') || strlen($address) === strlen($medium) + 1) {
+                return null;
+            }
+        }
+        if (count(array_unique($value)) !== count($value)) {
+            return null;
+        }
+
+        return $value;
+    }
+
+    /** The first $most characters of UTF-8 text, as Python cuts a string: a cut by bytes can split a letter in two, and JSON then refuses all of it. */
+    public static function cut(string $text, int $most): string
+    {
+        return preg_match('/\A.{0,' . $most . '}/su', $text, $found) === 1 ? $found[0] : substr($text, 0, $most);
     }
 
     /** B4: what describe says about the medium, inside its bounds, or TransportFailed. */
@@ -396,8 +471,9 @@ final class TransportProcess
 
     /**
      * What the transport said since last time, waiting up to $timeout seconds for
-     * the first line: a list of ['received', from, frame], ['answer', id] and
-     * ['status', state, reason].
+     * the first line: a list of ['received', from, frame], ['answer', id],
+     * ['status', state, reason] and ['here', addresses] when where it can be
+     * reached changed.
      */
     public function poll(float $timeout = 0.0): array
     {
@@ -461,8 +537,8 @@ final class TransportProcess
     {
         $this->errors .= $chunk;
         while (($at = strpos($this->errors, "\n")) !== false) {
-            $words = rtrim(substr($this->errors, 0, $at));
-            $this->lastWords = array_slice([...$this->lastWords, substr($words, 0, 200)], -3);
+            $words = rtrim(self::textOf(substr($this->errors, 0, $at)));
+            $this->lastWords = array_slice([...$this->lastWords, self::cut($words, 200)], -3);
             ($this->log)('transport ' . $this->name . ': ' . $words);
             $this->errors = substr($this->errors, $at + 1);
         }
@@ -502,14 +578,31 @@ final class TransportProcess
                 $before = $this->room();
                 $this->credit = $credit;
                 $this->sendsRead = $sendsRead;
+                $this->readied = true;
                 if ($this->downSince === null) {
                     $this->afterDown = false;
                 }
                 if ($this->room() > max($before, 0)) {
                     $this->waitingForRoomSince = null;
                 }
+                if (!array_key_exists('here', $message)) {
+                    return [];
+                }
+                // Where others reach it is a hint for cards and bindings, never a reason to stop a transport that moves
+                // frames: one that cannot be taken is said and left out, and the one said before stands.
+                $here = self::hereOf($message['here'], $this->medium);
+                if ($here === null) {
+                    ($this->log)('transport ' . $this->name . ': here is not taken: it is a list of at most ' . self::HERE_MOST . ' addresses, each '
+                        . $this->medium . ':... in printable ASCII without spaces, at most 128 characters');
 
-                return [];
+                    return [];
+                }
+                if ($here === $this->here) {
+                    return [];
+                }
+                $this->here = $here;
+
+                return [['here', $here]];
             case 'sent':
             case 'error':
             case 'link_ack':
@@ -579,6 +672,10 @@ final class TransportProcess
         } else {
             $entry['status'] = 'not_sent';
             $entry['reason'] = (string) ($message['code'] ?? 'error');
+            // What the transport said, kept for a send that ends without an answer: its words name the medium's own
+            // trouble, as a Bluetooth address no machine answers on, which the core cannot know (19 November 2026).
+            $said = $message['message'] ?? null;
+            $this->lastError = [($this->clock)(), $entry['reason'], is_string($said) ? self::cut($said, 300) : null];
         }
 
         return $id;
