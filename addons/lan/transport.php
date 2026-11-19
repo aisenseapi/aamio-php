@@ -14,7 +14,9 @@ declare(strict_types=1);
  *
  * The port is opened after hello, and never when hello says probe: enable then only sees that this starts and
  * describes itself. A port that cannot be opened, as one another program holds, is said as down and tried again every
- * two seconds, and said as up with room once it opens.
+ * two seconds, and said as up with room once it opens. Each ready says where this machine is reached, here: the address
+ * it listens on, or with 0.0.0.0 its own addresses on the network, as they were when the port opened, at most four, so
+ * a card can carry one and a partner can bind it. Standard error is UTF-8, as contract 3 asks.
  *
  * One stream_select waits on the core and the network alike. On Windows a process cannot wait on its standard input
  * that way: stream_select never wakes for it, and a read that does not block never returns anything. So there this
@@ -29,17 +31,77 @@ declare(strict_types=1);
  */
 
 const LAN_NAME = 'lan';
-const LAN_VERSION = '0.1.0';
+const LAN_VERSION = '0.2.0';
 const LAN_MAGIC = 'AL1';
 const LAN_CREDIT = 32;
 const LAN_MAX_FRAME = 1200;
 const LAN_RETRY_SECONDS = 2.0;
+const LAN_HERE_MOST = 4;
 
 function lan_env(string $name, string $default): string
 {
     $value = getenv($name);
 
     return $value === false ? $default : $value;
+}
+
+/**
+ * A line on standard error, in UTF-8 as contract 3 asks. PHP's own words are in its default charset, UTF-8 unless an ini
+ * says otherwise: on Windows they are read from the code page PHP uses, and what still is not UTF-8 becomes U+FFFD.
+ */
+function lan_complain(string $line): void
+{
+    if (preg_match('//u', $line) !== 1 && function_exists('sapi_windows_cp_conv') && function_exists('sapi_windows_cp_get')) {
+        try {
+            $page = sapi_windows_cp_get();
+            $converted = $page !== 65001 ? sapi_windows_cp_conv($page, 65001, $line) : null;
+        } catch (\Throwable) {
+            $converted = null;
+        }
+        $line = is_string($converted) ? $converted : $line;
+    }
+    if (preg_match('//u', $line) !== 1) {
+        $line = (string) json_decode((string) json_encode($line, JSON_INVALID_UTF8_SUBSTITUTE));
+    }
+    fwrite(STDERR, $line . "\n");
+}
+
+/**
+ * Where this machine is reached: the address the port is bound to, or with 0.0.0.0 its own IPv4 addresses, the one a
+ * route out would use first, without loopback and link-local ones, at most LAN_HERE_MOST, as lan:<ip>:<port>.
+ *
+ * @return list<string>
+ */
+function lan_addresses(string $bind, int $port): array
+{
+    if (!in_array($bind, ['0.0.0.0', ''], true)) {
+        return ['lan:' . $bind . ':' . $port];
+    }
+    $found = [];
+    // Nothing goes: connect on UDP only picks the interface a route would take.
+    $probe = @stream_socket_client('udp://10.254.254.254:9', $errno, $errstr, 1);
+    if ($probe !== false) {
+        $name = (string) stream_socket_get_name($probe, false);
+        fclose($probe);
+        $at = strrpos($name, ':');
+        if ($at !== false) {
+            $found[] = substr($name, 0, $at);
+        }
+    }
+    $host = gethostname();
+    $named = is_string($host) ? @gethostbynamel($host) : false;
+    if (is_array($named)) {
+        array_push($found, ...$named);
+    }
+    $mine = [];
+    foreach ($found as $ip) {
+        if (in_array($ip, $mine, true) || $ip === '0.0.0.0' || str_starts_with($ip, '127.') || str_starts_with($ip, '169.254.')) {
+            continue;
+        }
+        $mine[] = $ip;
+    }
+
+    return array_map(static fn (string $ip): string => 'lan:' . $ip . ':' . $port, array_slice($mine, 0, LAN_HERE_MOST));
 }
 
 function lan_say(array $message): void
@@ -62,7 +124,7 @@ $relay = getenv('AAMIO_LAN_RELAY');
 if (PHP_OS_FAMILY === 'Windows' && $relay === false) {
     $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
     if ($server === false) {
-        fwrite(STDERR, 'aamio-lan: no socket on 127.0.0.1 for the second process: ' . $errstr . "\n");
+        lan_complain('aamio-lan: no socket on 127.0.0.1 for the second process: ' . $errstr);
         exit(1);
     }
     $token = bin2hex(random_bytes(16));
@@ -82,7 +144,7 @@ if (PHP_OS_FAMILY === 'Windows' && $relay === false) {
     }
     fclose($server);
     if ($conn === false) {
-        fwrite(STDERR, "aamio-lan: the second process did not start\n");
+        lan_complain('aamio-lan: the second process did not start');
         if ($worker !== false) {
             proc_terminate($worker);
         }
@@ -107,7 +169,7 @@ if ($relay !== false) {
     [$relayAddress, $relayToken] = array_pad(explode('/', $relay, 2), 2, '');
     $in = @stream_socket_client('tcp://' . $relayAddress, $errno, $errstr, 10);
     if ($in === false) {
-        fwrite(STDERR, 'aamio-lan: the first process could not be reached: ' . $errstr . "\n");
+        lan_complain('aamio-lan: the first process could not be reached: ' . $errstr);
         exit(1);
     }
     fwrite($in, $relayToken . "\n");
@@ -115,7 +177,7 @@ if ($relay !== false) {
 
 $portText = lan_env('AAMIO_LAN_PORT', '47474');
 if (preg_match('/\A[0-9]{1,5}\z/', $portText) !== 1 || (int) $portText < 1 || (int) $portText > 65535) {
-    fwrite(STDERR, 'aamio-lan: AAMIO_LAN_PORT is no port: ' . $portText . "\n");
+    lan_complain('aamio-lan: AAMIO_LAN_PORT is no port: ' . $portText);
     exit(1);
 }
 $port = (int) $portText;
@@ -133,7 +195,7 @@ foreach (explode(',', lan_env('AAMIO_LAN_PEERS', '')) as $part) {
     $peerPort = $at === false ? '' : substr($part, $at + 1);
     $ip = $host === '' ? false : gethostbyname($host);
     if ($ip === false || preg_match('/\A[0-9]{1,5}\z/', $peerPort) !== 1 || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
-        fwrite(STDERR, 'aamio-lan: ' . json_encode($part) . " is no host:port, and is left out\n");
+        lan_complain('aamio-lan: ' . json_encode($part, JSON_INVALID_UTF8_SUBSTITUTE) . ' is no host:port, and is left out');
         continue;
     }
     $peers[] = [$ip, (int) $peerPort];
@@ -145,10 +207,22 @@ $saidDown = false;
 $nextTry = 0.0;
 $sendsRead = 0;
 $pending = '';
+/** @var list<string> where this machine is reached, as it was when the port opened */
+$here = [];
 
 $now = static fn (): float => hrtime(true) / 1e9;
 
-$open = static function () use (&$socket, &$saidDown, &$nextTry, &$sendsRead, $bind, $port, $now): void {
+/** Room, and once the port is open, where this machine is reached (contract 3, B3). */
+$readyLine = static function () use (&$socket, &$here, &$sendsRead): array {
+    $said = ['t' => 'ready', 'credit' => LAN_CREDIT, 'sends_read' => $sendsRead];
+    if ($socket !== null && $here !== []) {
+        $said['here'] = $here;
+    }
+
+    return $said;
+};
+
+$open = static function () use (&$socket, &$saidDown, &$nextTry, &$here, $readyLine, $bind, $port, $now): void {
     // PHP sets SO_REUSEADDR on the sockets it binds, so another program that does the same, and on Windows any other
     // program, can hold this port too, each getting some of what comes: a message a partner sent would reach the other
     // one and be refused there, with nothing said. so_reuseaddr false asks PHP not to, where it knows the option; the
@@ -167,11 +241,12 @@ $open = static function () use (&$socket, &$saidDown, &$nextTry, &$sendsRead, $b
         return;
     }
     stream_set_blocking($made, false);
+    $here = lan_addresses($bind, $port);
     $socket = $made;
     if ($saidDown) {
         lan_say(['t' => 'status', 'state' => 'up', 'reason' => 'port ' . $port . ' is open']);
     }
-    lan_say(['t' => 'ready', 'credit' => LAN_CREDIT, 'sends_read' => $sendsRead]);
+    lan_say($readyLine());
 };
 
 $targets = static function (?string $to) use (&$peers, $broadcast, $port): ?array {
@@ -217,7 +292,7 @@ $send = static function (array $message) use (&$socket, $me, $targets): array {
         if (@stream_socket_sendto($socket, $datagram, 0, $host . ':' . $peerPort) === strlen($datagram)) {
             $sent++;
         } else {
-            fwrite(STDERR, 'aamio-lan: a frame to ' . $host . ':' . $peerPort . " did not go\n");
+            lan_complain('aamio-lan: a frame to ' . $host . ':' . $peerPort . ' did not go');
         }
     }
     if ($sent === 0) {
@@ -289,7 +364,7 @@ while (true) {
             } elseif ($kind === 'send') {
                 $sendsRead++;
                 lan_say($send($message));
-                lan_say(['t' => 'ready', 'credit' => LAN_CREDIT, 'sends_read' => $sendsRead]);
+                lan_say($readyLine());
             } elseif ($kind === 'stop') {
                 $stop = true;
                 break;

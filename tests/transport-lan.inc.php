@@ -19,6 +19,8 @@ use Aamio\TransportProcess;
 echo "carry: the local network\n";
 
 $lanScript = dirname(__DIR__) . '/addons/lan/transport.php';
+// The version the transport describes itself as, read where it is set: describe must name the manifest's.
+$lanVersion = (string) (json_decode((string) file_get_contents(dirname(__DIR__) . '/addons/lan/aamio-addon.json'), true)['version'] ?? '');
 $lanFreePorts = static function (int $count): array {
     $holders = [];
     $ports = [];
@@ -39,11 +41,11 @@ foreach (['PATH', 'SYSTEMROOT', 'TEMP', 'TMP'] as $name) {
         $lanBase[$name] = (string) getenv($name);
     }
 }
-$lanProcess = static function (int $port, int $peer) use ($lanScript, $lanBase): TransportProcess {
+$lanProcess = static function (int $port, int $peer) use ($lanScript, $lanBase, $lanVersion): TransportProcess {
     $env = TransportProcess::environment(['AAMIO_LAN_PORT', 'AAMIO_LAN_BIND', 'AAMIO_LAN_BROADCAST', 'AAMIO_LAN_PEERS'], $lanBase + [
         'AAMIO_LAN_PORT' => (string) $port, 'AAMIO_LAN_BIND' => '127.0.0.1', 'AAMIO_LAN_BROADCAST' => 'none', 'AAMIO_LAN_PEERS' => '127.0.0.1:' . $peer]);
 
-    return new TransportProcess('lan', '0.1.0', [PHP_BINARY, $lanScript], sys_get_temp_dir(), $env);
+    return new TransportProcess('lan', $lanVersion, [PHP_BINARY, $lanScript], sys_get_temp_dir(), $env);
 };
 /** Events until $condition holds of them, all of them kept; null when it did not within $seconds. */
 $lanWaitFor = static function (TransportProcess $process, callable $condition, float $seconds = 10.0): ?array {

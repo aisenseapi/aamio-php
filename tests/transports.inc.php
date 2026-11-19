@@ -63,7 +63,7 @@ try {
     putenv('AAMIO_ADDONS');
     $enableHome = $tRoot . DIRECTORY_SEPARATOR . 'enable';
     Addons::useHome($enableHome);
-    Addons::useInstalled([['package' => 'aisenseapi/aamio-lan', 'version' => '0.1.0', 'path' => $lanDir]]);
+    Addons::useInstalled([['package' => 'aisenseapi/aamio-lan', 'version' => json_decode((string) file_get_contents($lanDir . DIRECTORY_SEPARATOR . 'aamio-addon.json'), true)['version'], 'path' => $lanDir]]);
     $row = Addons::describe()['addons'][0] ?? [];
     $check(($row['name'] ?? null) === 'lan' && ($row['contract'] ?? null) === 3 && ($row['enabled'] ?? null) === false && ($row['medium'] ?? null) === 'lan'
         && ($row['permissions'] ?? null) === ['network_local'] && ($row['environment'] ?? null) === ['AAMIO_LAN_PORT', 'AAMIO_LAN_BIND', 'AAMIO_LAN_BROADCAST', 'AAMIO_LAN_PEERS'],
