@@ -548,3 +548,69 @@ echo "qrcast: the process\n";
         json_encode([$named, $odd])
     );
 })();
+
+// The card of 0.2.0, earshot's, with the media where they are reached and the key, as aamio-python's
+// test_qrcast_process.py says it.
+require_once dirname(__DIR__, 2) . '/earshot/autoload.php';
+
+(static function () use ($root, $check): void {
+    $address = 'k7rq2m4xw5tbz3yd6ena';
+    $key = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
+    $now = 1794150000;
+    $btHere = 'bt:8C:1D:55:03:7B:53';
+    $hereSaid = [['transport' => 'bt', 'medium' => 'bt', 'here' => [$btHere], 'at' => $now]];
+    $request = static fn (string $kind, string $call, array $arguments = []): array => ['aamio_addon' => 2, 'kind' => $kind, 'name' => $call, 'arguments' => $arguments, 'subject' => null, 'own_key' => null, 'here' => null, 'state_dir' => null, 'deadline_seconds' => 90, 'aamio' => ['version' => '0.4.1', 'runtime' => 'php']];
+    $tool = static fn (array $arguments): array => ['own_key' => $key, 'here' => $hereSaid] + $request('tool', 'aamio_addon_qrcast_show', $arguments);
+    $shown = [];
+    $seen = [];
+    $seams = [
+        'display' => static function (string $path) use (&$shown): string {
+            $shown[] = $path;
+
+            return 'fake-viewer';
+        },
+        'read_local' => static function (string $data) use (&$seen): array {
+            return $seen;
+        },
+        'clock' => static fn (): int => $now,
+    ];
+
+    $made = Process::handle($request('command', 'card', ['address' => $address, 'via' => $btHere . ',internet', 'key' => $key]), $seams)['result'];
+    $check(($made['card'] ?? null) === 'aamio:scope/' . $address . '?t=' . ($now + 3600) . '&v=' . $btHere . ',internet&k=' . $key
+        && $made['card'] === \Aamio\Earshot\Card::make($address, null, $now + 3600, [$btHere, 'internet'], $key)
+        && str_contains($made['note'] ?? '', 'everyone who sees the code') && str_contains($made['note'] ?? '', '0.2.0'),
+        'the card of 0.2.0 is earshot\'s, with the media where they are reached and the key: a card seen and a card heard are one thing', json_encode($made));
+    $said = Process::handle($request('command', 'card', ['address' => $address, 'via' => 'bt']), $seams);
+    $check($said['exit_code'] === 2 && ($said['result']['reason'] ?? null) === 'key_needed', 'a medium beside internet with no key is refused');
+
+    $said = Process::handle($tool(['address' => $address, 'via' => ['bt']]), $seams);
+    $check($said['exit_code'] === 0 && ($said['result']['card'] ?? null) === 'aamio:scope/' . $address . '?t=' . ($now + 3600) . '&v=' . $btHere . '&k=' . $key,
+        'over MCP show puts the runtime\'s key and where this machine is reached on the card', json_encode($said['result']));
+    $said = Process::handle($tool(['address' => $address, 'via' => ['lan']]), $seams);
+    $check(str_ends_with($said['result']['card'] ?? '', '&v=lan&k=' . $key) && str_contains($said['result']['note'] ?? '', 'without where you are reached on it'),
+        'a medium no transport says where it is reached on goes alone, and the note says so', json_encode($said['result']));
+    $before = count($shown);
+    $said = Process::handle($tool(['address' => $address, 'via' => [$btHere]]), $seams);
+    $check($said['exit_code'] === 2 && ($said['result']['reason'] ?? null) === 'invalid_via' && count($shown) === $before, 'and an entry with an address from the model is refused, and nothing is shown');
+    foreach ($shown as $path) {
+        Programs::clean(dirname($path));
+    }
+
+    $folder = $root . DIRECTORY_SEPARATOR . 'qrcast-here';
+    @mkdir($folder, 0700, true);
+    $picture = $folder . DIRECTORY_SEPARATOR . 'seen.png';
+    file_put_contents($picture, "\x89PNG\r\n\x1a\n" . str_repeat("\0", 32));
+    $seen = [\Aamio\Earshot\Card::make($address, 'stue-tv', $now + 3600, [$btHere], $key)];
+    $said = Process::handle($request('command', 'read', ['file' => $picture]), $seams);
+    $check(($said['result']['status'] ?? null) === 'seen' && ($said['result']['card']['via'] ?? null) === [$btHere]
+        && str_contains($said['result']['bind'] ?? '', 'aamio transport bind stue-tv TRANSPORT --address ' . $btHere) && str_contains($said['result']['bind'] ?? '', 'in front of the camera'),
+        'a card seen with where a medium is reached says the bind, and binds nothing', json_encode($said['result']));
+
+    // A bad address is said before a bad via, as before 0.2.0, on the command line and over MCP alike.
+    $said = [];
+    foreach ([['command', 'card'], ['tool', 'aamio_addon_qrcast_show']] as [$kind, $call]) {
+        $answer = Process::handle($request($kind, $call, ['address' => 'not-an-address', 'via' => 'x y', 'key' => $key]), $seams);
+        $said[] = [$answer['exit_code'], $answer['result']['reason'] ?? null];
+    }
+    $check($said === [[2, 'not_a_write_address'], [2, 'not_a_write_address']], 'a bad address is said before a bad via, as before 0.2.0', json_encode($said));
+})();

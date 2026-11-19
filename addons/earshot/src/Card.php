@@ -23,13 +23,26 @@ namespace Aamio\Earshot;
  * version does not read is not understood rather than read in part. The
  * longest card is 80 bytes. The same as aamio-python's aamio_earshot.card.
  *
- * From 0.5.0 a card may say more, when the one who plays it asks: v, the media
- * they prefer answers over, in order, at most three (internet, or a transport's
- * medium as its manifest names it, lan or sound today), and k, their public
- * key, which a listener binds a transport to; a card that names a medium other
- * than internet carries it. A medium a listener has no transport for is said
- * rather than refused. Such a card is up to 128 bytes, and only earshot 0.5.0
- * and newer reads it. k refuses the shape of a scope's key or a read key.
+ * From 0.5.0 a card may say more, when the one who plays it asks:
+ *
+ *     aamio:scope/k7rq2m4xw5tbz3yd6ena?n=rom-42&t=1794200000&v=lan,internet&k=KEY
+ *     aamio:scope/k7rq2m4xw5tbz3yd6ena?t=1794200000&v=bt:8C:1D:55:03:7B:53&k=KEY
+ *
+ * v is the media they prefer answers over, in order, at most three, each once:
+ * internet, the scope over aamio.at as a card without v means, or the medium of
+ * a transport as its manifest names it, as lan, bt or sound. A transport's
+ * medium may carry where they are reached on it, as the transport says it
+ * (contract 3, B3: here): the medium, a colon, and 1 to 64 characters of
+ * letters, digits, dots, colons, underscores and dashes, as
+ * bt:8C:1D:55:03:7B:53 or lan:192.168.2.22:47474. That is the transport's own
+ * address, which a listener's core binds to with aamio transport bind NAME
+ * TRANSPORT --address. Nothing here knows what a medium is: a transport made
+ * tomorrow is carried the same way. k is their public key, which a listener
+ * binds a transport to; a card that names a medium other than internet carries
+ * it. A medium a listener has no transport for is said rather than refused.
+ * Such a card is up to 128 bytes, and only earshot 0.5.0 and newer reads it. k
+ * refuses the shape of a scope's key or a read key. The same card goes in a QR
+ * code, and aisenseapi/aamio-qrcast reads it.
  */
 final class Card
 {
@@ -41,14 +54,26 @@ final class Card
     /** Unix seconds, as a card carries them: nine to eleven digits. */
     public const EXPIRY = '/^[0-9]{9,11}$/D';
     public const MAX_BYTES = 128;
-    /** The media a card may ask answers over: internet, or a transport's medium as its manifest names it. */
+    /**
+     * The media a card may ask answers over: internet, or a transport's medium as its manifest names it, each alone or
+     * with where it is reached, as the transport says it: medium:address.
+     */
     public const MEDIUM = '/^[a-z0-9][a-z0-9_-]{0,31}$/D';
+    public const ENTRY = '/^([a-z0-9][a-z0-9_-]{0,31})(?::([A-Za-z0-9._:-]{1,64}))?$/D';
     public const INTERNET = 'internet';
     public const VIA_MOST = 3;
     /** A public key as aamio prints it: 32 bytes of Ed25519 in base64url without padding. */
     public const PUBLIC_KEY = '/^[A-Za-z0-9_-]{43}$/D';
-    public const VIA_FIX = 'via is the media you prefer answers over, in order, at most three and each once: internet, the scope over aamio.at, or the medium of a transport, lan or sound. As text they are separated by commas, as lan,internet.';
+    public const VIA_FIX = 'via is the media you prefer answers over, in order, at most three and each once: internet, the scope over aamio.at, '
+        . 'or the medium of a transport, as lan or bt, alone or with where you are reached on it as aamio transport here shows it, '
+        . 'as bt:8C:1D:55:03:7B:53. As text they are separated by commas, as bt:8C:1D:55:03:7B:53,internet.';
     public const KEY_FIX = 'key is your public key, the 43 characters aamio whoami shows as key. A card that names a medium other than internet carries it, and everyone within earshot hears it.';
+
+    /** The medium of a via entry: bt for bt:8C:1D:55:03:7B:53, internet for internet. */
+    public static function mediumOf(string $entry): string
+    {
+        return explode(':', $entry, 2)[0];
+    }
 
     public static function checkAddress(mixed $address): string
     {
@@ -73,27 +98,37 @@ final class Card
     }
 
     /**
-     * The media in a v, or null when the text is not one.
+     * The entries in a v, each a medium or medium:address, or null when the text is not one: at most VIA_MOST, each
+     * medium once, and internet never with an address.
      *
      * @return list<string>|null
      */
     private static function media(string $via): ?array
     {
-        $media = explode(',', $via);
-        if (count($media) > self::VIA_MOST || count(array_unique($media)) !== count($media)) {
+        $entries = explode(',', $via);
+        if (count($entries) > self::VIA_MOST) {
             return null;
         }
-        foreach ($media as $medium) {
-            if (preg_match(self::MEDIUM, $medium) !== 1) {
+        foreach ($entries as $entry) {
+            if (preg_match(self::ENTRY, $entry) !== 1) {
+                return null;
+            }
+        }
+        $media = array_map([self::class, 'mediumOf'], $entries);
+        if (count(array_unique($media)) !== count($media)) {
+            return null;
+        }
+        foreach ($entries as $entry) {
+            if ($entry !== self::INTERNET && self::mediumOf($entry) === self::INTERNET) {
                 return null;
             }
         }
 
-        return $media;
+        return $entries;
     }
 
     /**
-     * The media a card asks answers over, or null. internet alone is what a card without v says, so it adds nothing.
+     * The entries a card asks answers over, or null. internet alone is what a card without v says, so it adds nothing.
      *
      * @return list<string>|null
      */
@@ -105,12 +140,12 @@ final class Card
         if (is_array($via) && array_is_list($via) && array_filter($via, 'is_string') === $via) {
             $via = implode(',', $via);
         }
-        $media = is_string($via) ? self::media($via) : null;
-        if ($media === null) {
+        $entries = is_string($via) ? self::media($via) : null;
+        if ($entries === null) {
             throw new Refused('invalid_via', self::VIA_FIX);
         }
 
-        return $media === [self::INTERNET] ? null : $media;
+        return $entries === [self::INTERNET] ? null : $entries;
     }
 
     /** Whether $key is a public key as aamio prints it, and not a secret of the shape a card refuses. */
@@ -156,7 +191,7 @@ final class Card
             }
             $parts[] = 't=' . $expires;
         }
-        $beside = $media === null ? [] : array_values(array_filter($media, static fn (string $medium): bool => $medium !== self::INTERNET));
+        $beside = $media === null ? [] : array_values(array_filter(array_map([self::class, 'mediumOf'], $media), static fn (string $medium): bool => $medium !== self::INTERNET));
         if ($beside !== [] && $key === null) {
             throw new Refused('key_needed', 'A card that asks for answers over ' . implode(', ', $beside) . ' carries the public key a listener binds that medium to. ' . self::KEY_FIX);
         }
@@ -168,14 +203,16 @@ final class Card
         }
         $text = self::PREFIX . $address . ($parts !== [] ? '?' . implode('&', $parts) : '');
         if (strlen($text) > self::MAX_BYTES) {
-            throw new Refused('card_too_long', 'The card would be ' . strlen($text) . ' bytes, and one sound carries ' . self::MAX_BYTES . ': shorten the name or leave it out, or name fewer media.');
+            throw new Refused('card_too_long', 'The card would be ' . strlen($text) . ' bytes, and one sound carries ' . self::MAX_BYTES . ': shorten the name or leave it out, or name fewer media. '
+                . 'Where a medium is reached takes room too: bt with its Bluetooth address is 18 bytes longer than bt alone.');
         }
 
         return $text;
     }
 
     /**
-     * The card in what was heard, with via and key when it carries them, or NotUnderstood.
+     * The card in what was heard, with via and key when it carries them, or NotUnderstood. via is the entries as the card
+     * has them: a medium, or medium:address.
      *
      * @return array<string, mixed>
      */

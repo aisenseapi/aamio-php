@@ -216,6 +216,8 @@ require dirname(__DIR__) . '/addons/earshot/tests/card.inc.php';
 
 require dirname(__DIR__) . '/addons/qrcast/tests/symbol.inc.php';
 
+require __DIR__ . '/card-vectors.inc.php';
+
 require __DIR__ . '/carry.inc.php';
 
 echo "sources\n";

@@ -593,3 +593,81 @@ echo "earshot: the process\n";
         json_encode([$named, $odd])
     );
 })();
+
+// Where a medium is reached (contract 3, B3: here), as aamio-python's test_earshot_process.py says it: over MCP a bare
+// medium gets this machine's address on it from the core, and a model names no machine; on the command line the
+// address is given, and a medium without one says how to find it.
+(static function () use ($check): void {
+    $address = 'k7rq2m4xw5tbz3yd6ena';
+    $key = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
+    $now = 1794150000;
+    $btHere = 'bt:8C:1D:55:03:7B:53';
+    $hereSaid = [['transport' => 'bt', 'medium' => 'bt', 'here' => [$btHere], 'at' => $now],
+        ['transport' => 'lan', 'medium' => 'lan', 'here' => ['lan:10.0.0.7:47474', 'lan:10.0.0.8:47474'], 'at' => $now]];
+    $request = static fn (string $kind, string $call, array $arguments = []): array => ['aamio_addon' => 2, 'kind' => $kind, 'name' => $call, 'arguments' => $arguments, 'subject' => null, 'own_key' => null, 'here' => null, 'state_dir' => null, 'deadline_seconds' => 90, 'aamio' => ['version' => '0.4.1', 'runtime' => 'php']];
+    $tool = static fn (array $arguments): array => ['own_key' => $key, 'here' => $hereSaid] + $request('tool', 'aamio_addon_earshot_broadcast', $arguments);
+    $encoded = [];
+    $sound = \Aamio\Earshot\Codec::wav(str_repeat("\0\0", 4800));
+    $heardText = null;
+    $seams = [
+        'encode' => static function (string $card, string $mode) use (&$encoded, $sound): string {
+            $encoded[] = $card;
+
+            return $sound;
+        },
+        'decode' => static function (string $recording, string $mode) use (&$heardText): array {
+            return ['data_base64' => '', 'byte_length' => strlen((string) $heardText), 'text' => $heardText, 'protocol' => 'aisense-audio-v2', 'corrected_bits' => 0, 'mode' => 'audible'];
+        },
+        'play' => static fn (string $path): string => 'fake-player',
+        'record' => static function (int $seconds, string $path) use ($sound): string {
+            file_put_contents($path, $sound);
+
+            return 'fake-recorder';
+        },
+        'pause' => static function (float $seconds): void {
+        },
+        'clock' => static fn (): int => $now,
+    ];
+
+    $said = Process::handle($tool(['address' => $address, 'via' => ['bt']]), $seams);
+    $check($said['exit_code'] === 0 && end($encoded) === 'aamio:scope/' . $address . '?t=' . ($now + 3600) . '&v=' . $btHere . '&k=' . $key
+        && !str_contains($said['result']['note'] ?? '', 'without where you are reached') && str_contains($said['result']['note'] ?? '', $btHere),
+        'over MCP a bare medium gets where this machine is reached on it, as the core says it, and the runtime\'s key', json_encode([$said, end($encoded)]));
+    Process::handle($tool(['address' => $address, 'via' => ['lan', 'internet']]), $seams);
+    $check(str_ends_with((string) end($encoded), '&v=lan:10.0.0.7:47474,internet&k=' . $key), 'the first address the transport said', (string) end($encoded));
+    $said = Process::handle($tool(['address' => $address, 'via' => ['sound']]), $seams);
+    $check(str_ends_with((string) end($encoded), '&v=sound&k=' . $key) && str_contains($said['result']['note'] ?? '', 'without where you are reached on it')
+        && str_contains($said['result']['note'] ?? '', 'aamio transport list'), 'a medium no transport says where it is reached on goes alone, and the note says so', json_encode($said['result']));
+    $sent = count($encoded);
+    $said = Process::handle($tool(['address' => $address, 'via' => [$btHere]]), $seams);
+    $check($said['exit_code'] === 2 && ($said['result']['reason'] ?? null) === 'invalid_via' && str_contains($said['result']['fix'] ?? '', 'another machine') && count($encoded) === $sent,
+        'over MCP an entry with an address is refused before anything is sent: a model names no machine', json_encode($said['result']));
+    $said = Process::handle($tool(['address' => $address, 'name' => 'rom-42', 'via' => ['bt', 'internet']]), $seams);
+    $check($said['exit_code'] === 2 && ($said['result']['reason'] ?? null) === 'card_too_long' && str_contains($said['result']['fix'] ?? '', '18 bytes'),
+        'a card that the address makes too long is refused, and says what the address costs', json_encode($said['result']));
+
+    $said = Process::handle($request('command', 'card', ['address' => $address, 'via' => $btHere . ',internet', 'key' => $key]), $seams);
+    $check($said['exit_code'] === 0 && str_ends_with($said['result']['card'] ?? '', '&v=' . $btHere . ',internet&k=' . $key) && !str_contains($said['result']['note'] ?? '', 'aamio transport here'),
+        'on the command line the address is the one given', json_encode($said['result']));
+    $said = Process::handle($request('command', 'card', ['address' => $address, 'via' => 'bt', 'key' => $key]), $seams);
+    $check($said['exit_code'] === 0 && str_contains($said['result']['note'] ?? '', 'aamio transport here bt') && str_contains($said['result']['note'] ?? '', '--via bt:ADDRESS'),
+        'and a medium without one says how to find it', json_encode($said['result']));
+
+    $heardText = Card::make($address, 'rom-42', $now + 3600, [$btHere], $key);
+    $heard = Process::handle($request('command', 'listen'), $seams)['result'];
+    $check(($heard['status'] ?? null) === 'heard' && ($heard['card']['via'] ?? null) === [$btHere] && ($heard['card']['key'] ?? null) === $key
+        && str_contains($heard['bind'] ?? '', 'aamio partner add rom-42 ' . $key . ', then aamio transport bind rom-42 TRANSPORT --address ' . $btHere)
+        && str_contains($heard['bind'] ?? '', 'medium bt') && str_contains($heard['bind'] ?? '', 'user\'s choice'),
+        'a card heard with where a medium is reached says the bind with the address, and binds nothing', json_encode($heard));
+    $heardText = Card::make($address, 'rom-42', $now + 3600, ['bt'], $key);
+    $bare = Process::handle($request('command', 'listen'), $seams)['result'];
+    $check(!str_contains($bare['bind'] ?? '--address', '--address') && str_contains($bare['bind'] ?? '', 'nobody in particular'), 'and one without the address says the first ask goes to nobody in particular', json_encode($bare));
+
+    // A bad address is said before a bad via, as before 0.5.0, on the command line and over MCP alike.
+    $said = [];
+    foreach ([['command', 'card'], ['tool', 'aamio_addon_earshot_broadcast']] as [$kind, $call]) {
+        $answer = Process::handle($request($kind, $call, ['address' => 'not-an-address', 'via' => 'x y', 'key' => $key]), $seams);
+        $said[] = [$answer['exit_code'], $answer['result']['reason'] ?? null];
+    }
+    $check($said === [[2, 'not_a_write_address'], [2, 'not_a_write_address']], 'a bad address is said before a bad via, as before 0.5.0', json_encode($said));
+})();
