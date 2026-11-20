@@ -252,6 +252,10 @@ final class Transports
         }
         [$found, $how] = $service->learnHere($name);
         $medium = $manifests[$name]->medium;
+        if ($how === 'stopping') {
+            return ['transport' => $name, 'medium' => $medium, 'here' => null,
+                'note' => 'This runtime is letting go of the home, so ' . $name . ' was not started and nothing was learned. Ask again from the aamio that owns it now.'];
+        }
         if ($how === 'starting') {
             return ['transport' => $name, 'medium' => $medium, 'here' => null,
                 'note' => $name . ' is starting in this process and has not said it is ready yet: ask again in a moment.'];

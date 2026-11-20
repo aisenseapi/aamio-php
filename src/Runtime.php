@@ -4964,7 +4964,16 @@ final class Runtime
     /** The transports of this home, made at first use. */
     public function transportService(): ?TransportService
     {
-        return $this->transports ??= new TransportService($this);
+        if ($this->transports === null) {
+            $this->transports = new TransportService($this);
+            if ($this->homeReleased) {
+                // Made first after close let go of the home: stopped from the start, so a lookup through it starts nothing
+                // in a home another runtime may own now (a review of 20 November 2026).
+                $this->transports->stop();
+            }
+        }
+
+        return $this->transports;
     }
 
     /**

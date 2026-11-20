@@ -565,6 +565,66 @@ while (($line = fgets(STDIN)) !== false) {
             'an add-on that needs here gets a running transport that said nothing with an empty list, and none for one not ready yet', json_encode([$starting, $running]));
         $a->close();
 
+        // After the stop nothing starts, not even for a moment: in aamio-js a lookup that began before a close started a
+        // transport after the next owner held the home (a review of 20 November 2026). This runtime has no threads, so its
+        // lookups never overlap; a lookup on a runtime that was closed, and one from inside another, follow the rules of
+        // aamio-python all the same.
+        $starts = (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started');
+        [$a, $b] = $homes('stopped');
+        Transports::bind($a, 'b', 'mute');
+        $service = $a->transportService();
+        $service->stop();
+        $service->start();
+        $said = Transports::here($a, 'mute');
+        $check($service->learnHere('mute') === [null, 'stopping'] && $service->hereForAddons() === [] && $service->running === [] && array_key_exists('here', $said) && $said['here'] === null
+            && ($said['note'] ?? null) === 'This runtime is letting go of the home, so mute was not started and nothing was learned. Ask again from the aamio that owns it now.'
+            && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $starts && (new TransportConfig($a->home))->here() === [],
+            'after the stop nothing starts, not even for a moment, and transport here says why', json_encode([$said, $service->running]));
+        $a->close();
+        $b->close();
+
+        // The ordinary start passes over a transport while it starts for a moment, and a second lookup from inside the
+        // first starts none beside it.
+        [$a, $b] = $homes('learning');
+        Transports::bind($a, 'b', 'mute');
+        $service = $a->transportService();
+        $service->learning['mute'] = new TransportProcess('mute', '0.3.0', [], null, []);
+        $service->start();
+        $nested = $service->learnHere('mute');
+        $check(isset($service->running['mute']) && $service->running['mute']['process'] === null && $nested === [null, 'starting'] && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $starts,
+            'the ordinary start passes over a transport while it starts for a moment, and a second lookup starts none beside it', json_encode([$nested, array_keys($service->running)]));
+        $service->learning = [];
+        $a->close();
+        $b->close();
+
+        // A stop while a transport starts for a moment ends it, and keeps nothing in a home its owner lets go of. Nothing
+        // runs beside a lookup here, so the stop comes from inside it: from the log, at the line the transport writes on
+        // standard error as it starts.
+        @mkdir($hRoot . DIRECTORY_SEPARATOR . 'stop-inside', 0700, true);
+        $letGo = null;
+        $a = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'stop-inside' . DIRECTORY_SEPARATOR . 'a', $nowhere, null, true, static function (string $line) use (&$letGo): void {
+            if ($letGo !== null && str_starts_with($line, 'transport mute: ')) {
+                $letGo->stop();
+            }
+        });
+        $letGo = $a->transportService();
+        $inside = $letGo->learnHere('mute');
+        $check($inside === [null, 'stopping'] && $letGo->learning === [] && (new TransportConfig($a->home))->here() === []
+            && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $starts . "0.3.0\n",
+            'a stop while a transport starts for a moment ends it, and keeps nothing of where it is reached', json_encode($inside));
+        $letGo = null;
+        $a->close();
+
+        // A transport service made for the first time after the close starts out stopped: made fresh there, a lookup through
+        // it could still start a transport in a home another runtime may own now (a review of 20 November 2026).
+        @mkdir($hRoot . DIRECTORY_SEPARATOR . 'closed-first', 0700, true);
+        $a = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'closed-first' . DIRECTORY_SEPARATOR . 'a', $nowhere, null, true, $quietly);
+        $a->close();
+        $after = $a->transportService();
+        $check($after->learnHere('mute') === [null, 'stopping'] && $after->start()->running === []
+            && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $starts . "0.3.0\n" && (new TransportConfig($a->home))->here() === [],
+            'a transport service made first after the close is stopped from the start, and a lookup through it starts nothing', json_encode($after->running));
+
         // An empty list says the same as nothing said: transport here answers it alike, and names no address.
         $blank = $hRoot . DIRECTORY_SEPARATOR . 'blank';
         $package($blank, 'blank', '0.1.0', []);

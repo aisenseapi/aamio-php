@@ -46,6 +46,38 @@ function lan_env(string $name, string $default): string
 }
 
 /**
+ * A port from 1 to 65535, from its decimal digits, or null: the rule of port_of in aamio-python. Out of range, a port
+ * went to the socket, which kept its last sixteen bits, so a frame to 65536 more than a port went to that port and said
+ * sent (a review of 20 November 2026). Port 0 asks the system to choose, and here would then name a port nobody can
+ * reach.
+ */
+function lan_port(string $text): ?int
+{
+    if (preg_match('/\A[0-9]+\z/', $text) !== 1) {
+        return null;
+    }
+    // Leading zeros are digits as well, as Python reads them; more than five digits after them is past 65535.
+    $digits = ltrim($text, '0');
+    $port = strlen($digits) <= 5 ? (int) $digits : 0;
+
+    return $port >= 1 && $port <= 65535 ? $port : null;
+}
+
+/** Text as Python's repr writes it, for the ASCII in it: the line is aamio-python's, and stays one line. */
+function lan_repr(string $text): string
+{
+    $quote = str_contains($text, "'") && !str_contains($text, '"') ? '"' : "'";
+
+    return $quote . preg_replace_callback('/[\x00-\x1f\x7f\\\\' . $quote . ']/', static fn (array $found): string => match ($found[0]) {
+        "\t" => '\t',
+        "\n" => '\n',
+        "\r" => '\r',
+        '\\', $quote => '\\' . $found[0],
+        default => sprintf('\x%02x', ord($found[0])),
+    }, $text) . $quote;
+}
+
+/**
  * A line on standard error, in UTF-8 as contract 3 asks. PHP's own words are in its default charset, UTF-8 unless an ini
  * says otherwise: on Windows they are read from the code page PHP uses, and what still is not UTF-8 becomes U+FFFD.
  */
@@ -120,6 +152,15 @@ function lan_unb64url(string $text): string|false
     return base64_decode(strtr($text, '-_', '+/') . str_repeat('=', (4 - strlen($text) % 4) % 4), true);
 }
 
+// The port is read first, and on Windows before the second process is started, so one that is not a port stops the
+// transport before it starts, with exit code 1 from the process the host started (a review of 20 November 2026). The
+// space Python's strip takes off around it is taken off here too.
+$port = lan_port(trim(lan_env('AAMIO_LAN_PORT', '47474'), " \t\n\r\v\f\x1c\x1d\x1e\x1f"));
+if ($port === null) {
+    lan_complain('aamio-lan: AAMIO_LAN_PORT must be a port from 1 to 65535');
+    exit(1);
+}
+
 $relay = getenv('AAMIO_LAN_RELAY');
 if (PHP_OS_FAMILY === 'Windows' && $relay === false) {
     $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
@@ -175,12 +216,6 @@ if ($relay !== false) {
     fwrite($in, $relayToken . "\n");
 }
 
-$portText = lan_env('AAMIO_LAN_PORT', '47474');
-if (preg_match('/\A[0-9]{1,5}\z/', $portText) !== 1 || (int) $portText < 1 || (int) $portText > 65535) {
-    lan_complain('aamio-lan: AAMIO_LAN_PORT is no port: ' . $portText);
-    exit(1);
-}
-$port = (int) $portText;
 $bind = lan_env('AAMIO_LAN_BIND', '0.0.0.0');
 $broadcastSetting = trim(lan_env('AAMIO_LAN_BROADCAST', '255.255.255.255'));
 $broadcast = in_array(strtolower($broadcastSetting), ['', 'none'], true) ? null : $broadcastSetting;
@@ -192,13 +227,13 @@ foreach (explode(',', lan_env('AAMIO_LAN_PEERS', '')) as $part) {
     }
     $at = strrpos($part, ':');
     $host = $at === false ? '' : substr($part, 0, $at);
-    $peerPort = $at === false ? '' : substr($part, $at + 1);
-    $ip = $host === '' ? false : gethostbyname($host);
-    if ($ip === false || preg_match('/\A[0-9]{1,5}\z/', $peerPort) !== 1 || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
-        lan_complain('aamio-lan: ' . json_encode($part, JSON_INVALID_UTF8_SUBSTITUTE) . ' is no host:port, and is left out');
+    $peerPort = $at === false ? null : lan_port(substr($part, $at + 1));
+    $ip = $host === '' || $peerPort === null ? false : gethostbyname($host);
+    if ($ip === false || $peerPort === null || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+        lan_complain('aamio-lan: ' . lan_repr($part) . ' is no host:port with a port from 1 to 65535, and is left out');
         continue;
     }
-    $peers[] = [$ip, (int) $peerPort];
+    $peers[] = [$ip, $peerPort];
 }
 $me = random_bytes(8);
 $socket = null;
@@ -251,12 +286,15 @@ $open = static function () use (&$socket, &$saidDown, &$nextTry, &$here, $readyL
 
 $targets = static function (?string $to) use (&$peers, $broadcast, $port): ?array {
     if ($to !== null) {
-        $parts = explode(':', $to);
-        if (count($parts) !== 3 || $parts[0] !== 'lan' || $parts[1] === '' || preg_match('/\A[0-9]{1,5}\z/', $parts[2]) !== 1) {
+        // Checked here, in the process that sends, before anything reaches the socket: a port out of range went to
+        // another port there.
+        $parts = explode(':', $to, 3);
+        $peerPort = lan_port($parts[2] ?? '');
+        if ($parts[0] !== 'lan' || ($parts[1] ?? '') === '' || $peerPort === null) {
             return null;
         }
 
-        return [[$parts[1], (int) $parts[2]]];
+        return [[$parts[1], $peerPort]];
     }
     $found = $peers;
     if ($broadcast !== null) {
@@ -279,9 +317,10 @@ $send = static function (array $message) use (&$socket, $me, $targets): array {
         return ['t' => 'error', 'id' => $id, 'code' => 'too_large', 'message' => 'the frame is larger than ' . LAN_MAX_FRAME . ' bytes'];
     }
     $to = $message['to'] ?? null;
-    $found = $targets(is_string($to) ? $to : null);
+    // A to that is not a string is no address either, as in aamio-python, and never a frame to nobody in particular.
+    $found = $to === null || is_string($to) ? $targets($to) : null;
     if ($found === null) {
-        return ['t' => 'error', 'id' => $id, 'code' => 'bad_address', 'message' => 'an address is lan:<ip>:<port>'];
+        return ['t' => 'error', 'id' => $id, 'code' => 'bad_address', 'message' => 'an address is lan:<ip>:<port>, with a port from 1 to 65535'];
     }
     if ($found === []) {
         return ['t' => 'error', 'id' => $id, 'code' => 'nowhere', 'message' => 'no broadcast and no peers: a frame to nobody in particular has nowhere to go'];

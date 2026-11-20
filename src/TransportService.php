@@ -26,6 +26,13 @@ final class TransportService
     public array $running = [];
     /** Whether start has been called and stop has not since: pumped from then on, also while no transport runs for a time. */
     public bool $started = false;
+    /** stop has been called: the service stops once, with its owner, and nothing starts after it, not even for a moment. */
+    private bool $stopped = false;
+    /**
+     * @var array<string, TransportProcess> a start of a moment under way, by transport name: one at a time per transport,
+     * never beside its ordinary start, and none after the stop (a review of 20 November 2026)
+     */
+    public array $learning = [];
     /** The environment a transport's variables are read from: getenv(), unless a test or an embedder says otherwise. */
     public ?array $environ = null;
     private float $knownAt = 0.0;
@@ -126,6 +133,10 @@ final class TransportService
     /** Every transport that is bound and enabled, started. */
     public function start(): self
     {
+        if ($this->stopped) {
+            // Stopped with its owner, and for good: a send on a runtime that has let go of its home starts nothing in it.
+            return $this;
+        }
         $this->add($this->wanted());
         $this->startDue();
         $this->started = true;
@@ -255,39 +266,58 @@ final class TransportService
     }
 
     /**
-     * Where an enabled transport is reached: [addresses or null, how it is known], how being running, learned or
-     * not_ready.
+     * Where an enabled transport is reached: [addresses or null, how it is known], how being running, starting, learned,
+     * not_ready or stopping.
      *
      * The running one says it on its ready. One that does not run is started for a moment, as B2 allows for this alone,
      * with a hello like any other, and stopped at its first ready: the ready says where it is reached, or that it says
-     * nothing of it.
+     * nothing of it. Never after the stop: an owner that has let go of the home starts nothing in it and keeps nothing
+     * there.
+     *
+     * This runtime has no threads, so a lookup never overlaps another one, the ordinary start or the stop, as two lookups
+     * did in aamio-js (a review of 20 November 2026). Only a call from inside a lookup, as from the log, comes while one
+     * runs, and it follows the same rules.
      *
      * @return array{0: ?list<string>, 1: string}
      */
     public function learnHere(string $name, float $seconds = Transports::LEARN_SECONDS): array
     {
+        $manifest = $this->manifests()[$name] ?? null;
+        if ($manifest === null) {
+            throw new CodedRuntime('transport_unknown', 'no enabled transport is called ' . $name . '. aamio addon list shows what is installed, and aamio addon enable ' . $name . ' lets it run here');
+        }
+        if ($this->stopped) {
+            // Its owner has let go of the home, or is letting go of it: nothing starts any more, not even for a moment.
+            return [null, 'stopping'];
+        }
         $process = $this->running[$name]['process'] ?? null;
         if ($process !== null) {
             // Never a second one beside it: the two would fight over the medium, as a port or a channel.
             return [$process->here, $process->readied ? 'running' : 'starting'];
         }
-        $manifest = $this->manifests()[$name] ?? null;
-        if ($manifest === null) {
-            throw new CodedRuntime('transport_unknown', 'no enabled transport is called ' . $name . '. aamio addon list shows what is installed, and aamio addon enable ' . $name . ' lets it run here');
+        if (isset($this->learning[$name])) {
+            // One start of a moment per transport. A second lookup comes from inside the first here, and cannot wait for it.
+            return [null, 'starting'];
         }
         $folder = Transports::workingFolder($this->runtime->home, $name);
         $process = new TransportProcess($name, $manifest->version, $manifest->startCommand(), $folder, Transports::environmentFor($manifest, $this->environ), null,
             fn (string $line) => $this->runtime->logged($line));
+        $this->learning[$name] = $process;
         try {
             $process->start(Http::VERSION, 'php', $folder);
             $until = self::now() + $seconds;
-            while (!$process->readied && self::now() < $until) {
+            while (!$process->readied && !$this->stopped && self::now() < $until) {
                 $process->poll(0.1);
             }
         } catch (TransportFailed $error) {
             throw new CodedRuntime('transport_down', $name . ' did not start to say where it is reached: ' . $error->getMessage());
         } finally {
             $process->stop();
+            unset($this->learning[$name]);
+        }
+        if ($this->stopped) {
+            // Stopped while it started: an owner that has let go of the home writes nothing into it.
+            return [null, 'stopping'];
         }
         if (!$process->readied) {
             return [null, 'not_ready'];
@@ -379,6 +409,10 @@ final class TransportService
         $now = self::now();
         foreach ($this->running as $name => $entry) {
             if ($entry['carrier'] !== null || $entry['manifest'] === null || $entry['down'] !== null || $now < $entry['next']) {
+                continue;
+            }
+            if (isset($this->learning[$name])) {
+                // Started for a moment just now, to say where it is reached: the ordinary start waits for that one to end.
                 continue;
             }
             $manifest = $entry['manifest'];
@@ -483,6 +517,10 @@ final class TransportService
     /** One round: what is bound read again when that is due, every carrier pumped, and transports that are due started again. */
     public function pump(float $timeout = 0.02): void
     {
+        if ($this->stopped) {
+            // No round after the stop: one could add a transport and start it with nobody left to stop it.
+            return;
+        }
         $now = self::now();
         if ($now - $this->knownAt >= Transports::KNOWN_REFRESH) {
             $this->knownAt = $now;
@@ -540,6 +578,8 @@ final class TransportService
 
     public function stop(): void
     {
+        // From here on nothing is added or started, not even for a moment (a review of 20 November 2026).
+        $this->stopped = true;
         foreach ($this->running as $entry) {
             if ($entry['process'] !== null) {
                 $entry['process']->stop();

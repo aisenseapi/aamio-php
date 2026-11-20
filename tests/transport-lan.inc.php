@@ -7,8 +7,8 @@ declare(strict_types=1);
  *
  * Two carriers, each with its own lan transport on a UDP port of its own and the other named as its peer, broadcast
  * off so nothing leaves 127.0.0.1. A probe opens no port, a port another program holds is down until it opens, and
- * then up with room; a message goes each way with its receipt, readable and sealed; and a datagram of another kind is
- * dropped.
+ * then up with room; a message goes each way with its receipt, readable and sealed; a datagram of another kind is
+ * dropped; and a port out of range, in an address, a peer or the settings, is refused before the socket.
  */
 
 use Aamio\Carrier;
@@ -185,3 +185,108 @@ try {
 } finally {
     $noisy->stop();
 }
+
+// A port out of range went to the socket, which kept its last sixteen bits: a frame to 65536 more than a port went to
+// that port and said sent (a review of 20 November 2026). Now it is refused before the socket, as in aamio-python, and
+// the transport goes on. The listener is on a port of the low range, where a frame to 65536 more than its port went.
+$lanListener = null;
+for ($i = 0; $i < 50 && $lanListener === null; $i++) {
+    $lanListener = @stream_socket_server('udp://127.0.0.1:' . random_int(20000, 34463), $errno, $errstr, STREAM_SERVER_BIND) ?: null;
+}
+$lanListener ??= stream_socket_server('udp://127.0.0.1:0', $errno, $errstr, STREAM_SERVER_BIND);
+stream_set_blocking($lanListener, false);
+$lanGood = (int) substr((string) strrchr((string) stream_socket_get_name($lanListener, false), ':'), 1);
+/** What came to the listener: the datagrams until the first one, or $seconds, and any that came a moment after it. */
+$lanHeard = static function (float $seconds = 5.0) use ($lanListener): array {
+    $got = [];
+    $until = hrtime(true) / 1e9 + $seconds;
+    while ($got === [] && hrtime(true) / 1e9 < $until) {
+        $data = @stream_socket_recvfrom($lanListener, 65535);
+        if (is_string($data) && $data !== '') {
+            $got[] = $data;
+        } else {
+            usleep(20000);
+        }
+    }
+    usleep(300000);
+    while (is_string($data = @stream_socket_recvfrom($lanListener, 65535)) && $data !== '') {
+        $got[] = $data;
+    }
+
+    return $got;
+};
+try {
+    [$lanPort, $lanPeer] = $lanFreePorts(2);
+    $lanRadio = $lanStarted($lanPort, $lanPeer);
+    try {
+        $lanBad = ['lan:127.0.0.1:0', 'lan:127.0.0.1:65536', 'lan:127.0.0.1:' . (65536 + $lanGood), 'lan:127.0.0.1:-1', 'lan:127.0.0.1:99999999999',
+            'lan:127.0.0.1:x', 'lan::' . $lanGood, 'bt:127.0.0.1:' . $lanGood];
+        $lanIds = array_map(static fn (string $address): ?string => $lanRadio->send('AF' . str_repeat("\0", 20), $address), $lanBad);
+        $lanOk = $lanRadio->send('AF' . str_repeat("\1", 20), 'lan:127.0.0.1:' . $lanGood);
+        $lanWaitFor($lanRadio, static fn (TransportProcess $p): bool => array_filter([...$lanIds, $lanOk], static fn (?string $id): bool => $id === null || $p->status($id) === 'waiting') === []);
+        $lanGot = $lanHeard();
+        $check(array_map(static fn (?string $id): string => $id === null ? 'no room' : $lanRadio->status($id) . ' ' . ($lanRadio->frames[$id]['reason'] ?? ''), $lanIds) === array_fill(0, count($lanBad), 'not_sent bad_address')
+            && ($lanRadio->lastError[2] ?? null) === 'an address is lan:<ip>:<port>, with a port from 1 to 65535',
+            'an address with a port out of range, with no host or on another medium is refused before the socket, and says what an address is', json_encode([$lanRadio->frames, $lanRadio->lastError]));
+        $check($lanOk !== null && $lanRadio->status($lanOk) === 'sent' && count($lanGot) === 1 && str_ends_with($lanGot[0], 'AF' . str_repeat("\1", 20)),
+            'and the transport goes on: the next good address gets its frame, and nothing went to the port 65536 below', json_encode([$lanGood, array_map('bin2hex', $lanGot)]));
+    } finally {
+        $lanRadio->stop();
+    }
+
+    // A peer with a port out of range is left out and said, in the same line as aamio-python's, and a frame to nobody
+    // in particular goes to the other peer alone.
+    $lanSaid = [];
+    $lanLeftOut = static function () use (&$lanSaid): array {
+        return array_values(array_filter($lanSaid, static fn (string $line): bool => str_contains($line, ' is no host:port')));
+    };
+    [$lanPort] = $lanFreePorts(1);
+    $lanPeered = new TransportProcess('lan', $lanVersion, [PHP_BINARY, $lanScript], sys_get_temp_dir(), TransportProcess::environment(['AAMIO_LAN_PORT', 'AAMIO_LAN_BIND', 'AAMIO_LAN_BROADCAST', 'AAMIO_LAN_PEERS'], $lanBase + [
+        'AAMIO_LAN_PORT' => (string) $lanPort, 'AAMIO_LAN_BIND' => '127.0.0.1', 'AAMIO_LAN_BROADCAST' => 'none', 'AAMIO_LAN_PEERS' => '127.0.0.1:0, 127.0.0.1:65536, 127.0.0.1:' . $lanGood]),
+        null, static function (string $line) use (&$lanSaid): void {
+            $lanSaid[] = $line;
+        });
+    try {
+        $lanPeered->start('0.0.0-test', 'php', sys_get_temp_dir());
+        $lanWaitFor($lanPeered, static fn (TransportProcess $p): bool => $p->room() > 0);
+        $lanAll = $lanPeered->send('AF' . str_repeat("\2", 20));
+        // What it writes on standard error comes beside its lines, so the lines that leave a peer out are waited for too.
+        $lanWaitFor($lanPeered, static fn (TransportProcess $p): bool => $lanAll === null || ($p->status($lanAll) !== 'waiting' && count($lanLeftOut()) >= 2));
+        $lanGot = $lanHeard();
+        $check($lanLeftOut() === ["transport lan: aamio-lan: '127.0.0.1:0' is no host:port with a port from 1 to 65535, and is left out",
+                "transport lan: aamio-lan: '127.0.0.1:65536' is no host:port with a port from 1 to 65535, and is left out"],
+            'a peer with a port out of range is left out, and said in the same line as aamio-python\'s', json_encode($lanSaid));
+        $check($lanAll !== null && $lanPeered->status($lanAll) === 'sent' && count($lanGot) === 1 && str_ends_with($lanGot[0], 'AF' . str_repeat("\2", 20))
+            && array_filter($lanSaid, static fn (string $line): bool => str_contains($line, 'did not go')) === [],
+            'and a frame to nobody in particular goes to the other peer alone', json_encode([$lanSaid, array_map('bin2hex', $lanGot)]));
+    } finally {
+        $lanPeered->stop();
+    }
+} finally {
+    fclose($lanListener);
+}
+
+// A port out of range in the settings stops the transport before it starts, with exit code 1 from the process the host
+// starts, also on Windows, where a second process does the rest. Port 0 asked the system for any port, and here then
+// named port 0, which nobody can reach (a review of 20 November 2026). Nothing comes on standard input, so a transport
+// that does start ends at once, with 0, and opens no port.
+$lanRun = static function (string $value) use ($lanScript, $lanBase): array {
+    $errFile = (string) tempnam(sys_get_temp_dir(), 'aamio-lan-');
+    $process = proc_open([PHP_BINARY, $lanScript], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $errFile, 'w']], $pipes, null, $lanBase + ['AAMIO_LAN_PORT' => $value]);
+    fclose($pipes[0]);
+    stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+    $status = proc_close($process);
+    $said = array_values(preg_grep('/AAMIO_LAN_PORT/', explode("\n", str_replace("\r", '', (string) @file_get_contents($errFile)))));
+    @unlink($errFile);
+
+    return [$status, $said];
+};
+$lanRuns = [];
+foreach (['0', '65536', '-5', 'seven', '1', '65535', ' 47474 '] as $value) {
+    $lanRuns[] = [$value, ...$lanRun($value)];
+}
+$lanRefused = ['aamio-lan: AAMIO_LAN_PORT must be a port from 1 to 65535'];
+$check(array_slice($lanRuns, 0, 4) === [['0', 1, $lanRefused], ['65536', 1, $lanRefused], ['-5', 1, $lanRefused], ['seven', 1, $lanRefused]],
+    'a port out of range in the settings stops the transport before it starts, with exit code 1 and the same line as aamio-python\'s', json_encode($lanRuns));
+$check(array_slice($lanRuns, 4) === [['1', 0, []], ['65535', 0, []], [' 47474 ', 0, []]], 'and 1, 65535 and a port with space around it are ports', json_encode($lanRuns));

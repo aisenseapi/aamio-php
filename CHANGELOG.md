@@ -6,6 +6,9 @@ not what moved in the source.
 
 ## 0.4.1 - 2026-11-19
 
+- A transport is started for a moment, to say where it is reached, once at a
+  time, and after the runtime has let go of its home nothing is started and
+  nothing is written. `aamio transport here` says so.
 - Where a machine is reached on a medium. A transport may say it on each
   `ready` (`here`, contract 3), the home keeps it, and `aamio transport here
   TRANSPORT` starts an enabled transport for a moment to say it. `aamio
