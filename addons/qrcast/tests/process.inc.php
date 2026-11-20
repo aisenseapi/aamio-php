@@ -614,3 +614,67 @@ require_once dirname(__DIR__, 2) . '/earshot/autoload.php';
     }
     $check($said === [[2, 'not_a_write_address'], [2, 'not_a_write_address']], 'a bad address is said before a bad via, as before 0.2.0', json_encode($said));
 })();
+
+// Which transports this machine has (media), as aamio-python's test_qrcast_process.py says it: over MCP the reader names
+// the one to bind, so nobody has to know which transport carries which medium; and a medium whose transport gives no
+// address goes on the card alone, and nothing is wrong (the review of 19 November 2026).
+(static function () use ($root, $check): void {
+    $address = 'k7rq2m4xw5tbz3yd6ena';
+    $key = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
+    $now = 1794150000;
+    $btHere = 'bt:8C:1D:55:03:7B:53';
+    $hereSaid = [['transport' => 'bt', 'medium' => 'bt', 'here' => [$btHere], 'at' => $now]];
+    $mediaSaid = [['transport' => 'bt', 'medium' => 'bt'], ['transport' => 'lan', 'medium' => 'lan']];
+    $request = static fn (string $kind, string $call, array $arguments = []): array => ['aamio_addon' => 2, 'kind' => $kind, 'name' => $call, 'arguments' => $arguments, 'subject' => null, 'own_key' => null, 'here' => null, 'media' => null, 'state_dir' => null, 'deadline_seconds' => 90, 'aamio' => ['version' => '0.4.1', 'runtime' => 'php']];
+    $text = \Aamio\Earshot\Card::make($address, 'stue-tv', $now + 3600, ['ble', $btHere], $key);
+    $shown = [];
+    $seams = [
+        'display' => static function (string $path) use (&$shown): string {
+            $shown[] = $path;
+
+            return 'fake-viewer';
+        },
+        'read_local' => static fn (string $data): array => [$text],
+        'frames' => static function (int $seconds, ?string $which): \Generator {
+            yield [4, 2, 'card'];
+        },
+        'read_frame' => static fn (int $width, int $height, string $gray): array => $gray === 'card' ? [$text] : [],
+        'clock' => static fn (): int => $now,
+    ];
+
+    $folder = $root . DIRECTORY_SEPARATOR . 'qrcast-media';
+    @mkdir($folder, 0700, true);
+    $picture = $folder . DIRECTORY_SEPARATOR . 'seen.png';
+    file_put_contents($picture, "\x89PNG\r\n\x1a\n" . str_repeat("\0", 32));
+    $read = static fn (mixed $media): array => Process::handle(['media' => $media] + $request('tool', 'aamio_addon_qrcast_read', ['file' => $picture]), $seams);
+    $said = $read($mediaSaid);
+    $check(($said['result']['status'] ?? null) === 'seen'
+        && str_contains($said['result']['bind'] ?? '', 'aamio partner add stue-tv ' . $key . ', then aamio transport bind stue-tv bt --address ' . $btHere . ' sends your messages to them over bt.'),
+        'over MCP the bind names the transport of the first medium on the card this machine has', json_encode($said['result']));
+    $said = $read([['transport' => 'lan', 'medium' => 'lan']]);
+    $check(str_contains($said['result']['bind'] ?? '', 'no transport on this machine carries any of them') && !str_contains($said['result']['bind'] ?? 'aamio transport bind', 'aamio transport bind'),
+        'when no transport on this machine carries a medium on the card, it says so, and names no bind', json_encode($said['result']));
+    $said = Process::handle(['media' => $mediaSaid] + $request('tool', 'aamio_addon_qrcast_scan', ['seconds' => 5]), $seams);
+    $check(($said['result']['status'] ?? null) === 'seen' && str_contains($said['result']['bind'] ?? '', 'aamio transport bind stue-tv bt --address ' . $btHere),
+        'and scan takes the media the core gives as read does', json_encode($said['result']));
+    $manifest = json_decode((string) file_get_contents(dirname(__DIR__) . DIRECTORY_SEPARATOR . 'aamio-addon.json'), true);
+    $needs = [];
+    foreach ($manifest['tools'] ?? [] as $spec) {
+        $needs[$spec['name']] = $spec['needs'] ?? null;
+    }
+    $check(($needs['aamio_addon_qrcast_read'] ?? null) === ['media'] && ($needs['aamio_addon_qrcast_scan'] ?? null) === ['media'],
+        'read and scan ask which transports this machine has, and for nothing that starts one', json_encode($needs));
+
+    // Over MCP a medium whose transport has no address goes on the card alone, as sound or Bluetooth LE.
+    $tool = static fn (array $here): array => ['own_key' => $key, 'here' => $here] + $request('tool', 'aamio_addon_qrcast_show', ['address' => $address, 'via' => ['ble', 'bt']]);
+    $said = Process::handle($tool(array_merge([['transport' => 'ble', 'medium' => 'ble', 'here' => [], 'at' => $now]], $hereSaid)), $seams);
+    $note = $said['result']['note'] ?? '';
+    $check($said['exit_code'] === 0 && str_ends_with($said['result']['card'] ?? '', '&v=ble,' . $btHere . '&k=' . $key)
+        && str_contains($note, 'The card names ble without an address, as this machine\'s transport over ble gives none a card can carry')
+        && !str_contains($note, 'No enabled transport on this machine says'), 'over MCP a medium whose transport has no address goes on the card alone, and nothing is wrong', json_encode($said['result']));
+    $said = Process::handle($tool($hereSaid), $seams);
+    $check(str_contains($said['result']['note'] ?? '', 'No enabled transport on this machine says where it is reached over ble'), 'and a medium no transport said anything of is said as before', json_encode($said['result']));
+    foreach ($shown as $path) {
+        Programs::clean(dirname($path));
+    }
+})();

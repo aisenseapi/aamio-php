@@ -671,3 +671,92 @@ echo "earshot: the process\n";
     }
     $check($said === [[2, 'not_a_write_address'], [2, 'not_a_write_address']], 'a bad address is said before a bad via, as before 0.5.0', json_encode($said));
 })();
+
+// Which transports this machine has (media), as aamio-python's test_earshot_process.py says it: over MCP the listener
+// names the one to bind, so nobody has to know which transport carries which medium; and a medium whose transport gives
+// no address goes on the card alone, and nothing is wrong (the review of 19 November 2026).
+(static function () use ($root, $check): void {
+    $address = 'k7rq2m4xw5tbz3yd6ena';
+    $key = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
+    $now = 1794150000;
+    $btHere = 'bt:8C:1D:55:03:7B:53';
+    $hereSaid = [['transport' => 'bt', 'medium' => 'bt', 'here' => [$btHere], 'at' => $now],
+        ['transport' => 'lan', 'medium' => 'lan', 'here' => ['lan:10.0.0.7:47474', 'lan:10.0.0.8:47474'], 'at' => $now]];
+    $mediaSaid = [['transport' => 'bt', 'medium' => 'bt'], ['transport' => 'earshot-link', 'medium' => 'sound'], ['transport' => 'lan', 'medium' => 'lan']];
+    $request = static fn (string $kind, string $call, array $arguments = []): array => ['aamio_addon' => 2, 'kind' => $kind, 'name' => $call, 'arguments' => $arguments, 'subject' => null, 'own_key' => null, 'here' => null, 'media' => null, 'state_dir' => null, 'deadline_seconds' => 90, 'aamio' => ['version' => '0.4.1', 'runtime' => 'php']];
+    $encoded = [];
+    $sound = Codec::wav(str_repeat("\0\0", 4800));
+    $heardText = null;
+    $seams = [
+        'encode' => static function (string $card, string $mode) use (&$encoded, $sound): string {
+            $encoded[] = $card;
+
+            return $sound;
+        },
+        'decode' => static function (string $recording, string $mode) use (&$heardText): array {
+            return ['data_base64' => '', 'byte_length' => strlen((string) $heardText), 'text' => $heardText, 'protocol' => 'aisense-audio-v2', 'corrected_bits' => 0, 'mode' => 'audible'];
+        },
+        'play' => static fn (string $path): string => 'fake-player',
+        'record' => static function (int $seconds, string $path) use ($sound): string {
+            file_put_contents($path, $sound);
+
+            return 'fake-recorder';
+        },
+        'pause' => static function (float $seconds): void {
+        },
+        'clock' => static fn (): int => $now,
+    ];
+    /** What the listen tool says of a card heard, with media as the core gives it. */
+    $listen = static function (string $text, mixed $media) use ($request, $seams, &$heardText): array {
+        $heardText = $text;
+
+        return Process::handle(['media' => $media] + $request('tool', 'aamio_addon_earshot_listen'), $seams)['result'];
+    };
+
+    $text = Card::make($address, 'rom-42', $now + 3600, ['ble', $btHere], $key);
+    $heard = $listen($text, $mediaSaid);
+    $check(str_contains($heard['bind'] ?? '', 'aamio partner add rom-42 ' . $key . ', then aamio transport bind rom-42 bt --address ' . $btHere . ' sends your messages to them over bt.')
+        && !str_contains($heard['bind'] ?? 'TRANSPORT', 'TRANSPORT'),
+        'over MCP the bind names the transport of the first medium on the card this machine has: ble comes first, and this machine has no transport for it', json_encode($heard));
+    $overSound = $listen(Card::make($address, 'rom-42', $now + 3600, ['sound'], $key), $mediaSaid);
+    $check(str_contains($overSound['bind'] ?? '', 'aamio transport bind rom-42 earshot-link sends your messages to them over earshot-link, this machine\'s transport for sound.')
+        && str_contains($overSound['bind'] ?? '', 'nobody in particular'), 'a transport with a name of its own is named, with the medium it carries', json_encode($overSound));
+    $none = $listen($text, [['transport' => 'lan', 'medium' => 'lan']]);
+    $check(str_contains($none['bind'] ?? '', 'aamio partner add rom-42 ' . $key . ' keeps the key') && str_contains($none['bind'] ?? '', 'no transport on this machine carries any of them')
+        && !str_contains($none['bind'] ?? 'aamio transport bind', 'aamio transport bind'), 'when no transport on this machine carries a medium on the card, it says so, and names no bind', json_encode($none));
+    $odd = $listen($text, [['transport' => 'bt x', 'medium' => 'bt'], 'bt', ['medium' => 'bt'], ['transport' => 'bt', 'medium' => 'bt:x']]);
+    $check(str_contains($odd['bind'] ?? '', 'no transport on this machine carries'), 'what is not a transport\'s name and medium is left out', json_encode($odd));
+    $old = $listen($text, null);
+    $check(str_contains($old['bind'] ?? '', 'aamio transport bind rom-42 TRANSPORT') && str_contains($old['bind'] ?? '', 'the medium ble'), 'a core before 0.4.1 says nothing of media, and TRANSPORT stands for the transport', json_encode($old));
+
+    // The listen and decode tools take the media the core gives, and their manifest asks for it.
+    $lanCard = Card::make($address, 'rom-42', $now + 3600, ['lan', 'internet'], $key);
+    $heard = $listen($lanCard, $mediaSaid);
+    $folder = $root . DIRECTORY_SEPARATOR . 'earshot-media';
+    @mkdir($folder, 0700, true);
+    $file = $folder . DIRECTORY_SEPARATOR . 'heard.wav';
+    file_put_contents($file, $sound);
+    $heardText = $lanCard;
+    $decoded = Process::handle(['media' => $mediaSaid] + $request('tool', 'aamio_addon_earshot_decode', ['file' => $file]), $seams);
+    $bound = 'aamio transport bind rom-42 lan sends your messages to them over lan.';
+    $check(($heard['status'] ?? null) === 'heard' && str_contains($heard['bind'] ?? '', $bound) && $decoded['exit_code'] === 0 && str_contains($decoded['result']['bind'] ?? '', $bound),
+        'the listen and decode tools take the media the core gives', json_encode([$heard, $decoded]));
+    $manifest = json_decode((string) file_get_contents(dirname(__DIR__) . DIRECTORY_SEPARATOR . 'aamio-addon.json'), true);
+    $needs = [];
+    foreach ($manifest['tools'] ?? [] as $spec) {
+        $needs[$spec['name']] = $spec['needs'] ?? null;
+    }
+    $check(($needs['aamio_addon_earshot_listen'] ?? null) === ['media'] && ($needs['aamio_addon_earshot_decode'] ?? null) === ['media'],
+        'listen and decode ask which transports this machine has, and for nothing that starts one', json_encode($needs));
+
+    // Over MCP a medium whose transport has no address goes on the card alone, as sound or Bluetooth LE: the core says the
+    // transport with an empty here.
+    $tool = static fn (array $here): array => ['own_key' => $key, 'here' => $here] + $request('tool', 'aamio_addon_earshot_broadcast', ['address' => $address, 'via' => ['ble', 'bt']]);
+    $said = Process::handle($tool(array_merge([['transport' => 'ble', 'medium' => 'ble', 'here' => [], 'at' => $now]], $hereSaid)), $seams);
+    $note = $said['result']['note'] ?? '';
+    $check($said['exit_code'] === 0 && str_ends_with((string) end($encoded), '&v=ble,' . $btHere . '&k=' . $key)
+        && str_contains($note, 'The card names ble without an address, as this machine\'s transport over ble gives none a card can carry')
+        && !str_contains($note, 'No enabled transport on this machine says'), 'over MCP a medium whose transport has no address goes on the card alone, and nothing is wrong', json_encode($said['result']));
+    $said = Process::handle($tool($hereSaid), $seams);
+    $check(str_contains($said['result']['note'] ?? '', 'No enabled transport on this machine says where it is reached over ble'), 'and a medium no transport said anything of is said as before', json_encode($said['result']));
+})();

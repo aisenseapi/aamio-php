@@ -302,7 +302,11 @@ final class TransportService
     /**
      * What an add-on that needs here gets: each enabled transport's medium and where it is reached, as the running one
      * says it, else as the home keeps it from this version of the transport, else learned now by a start of a moment, at
-     * most once per version. Never a partner's. A transport that said nothing of it is left out.
+     * most once per version. Never a partner's.
+     *
+     * A transport that says nothing of it is there with an empty list: the medium is this machine's, and it has no
+     * address on it, as sound or Bluetooth LE, so a card names the medium alone and says nothing is wrong. One that could
+     * not say now, as when its medium is off, is left out (the review of 19 November 2026).
      *
      * @return list<array{transport: string, medium: string, here: list<string>, at: int}>
      */
@@ -313,7 +317,7 @@ final class TransportService
         foreach ($this->manifests() as $name => $manifest) {
             $name = (string) $name;
             $process = $this->running[$name]['process'] ?? null;
-            $running = $process !== null && $process->readied ? $process->here : null;
+            $running = $process !== null && $process->readied ? ($process->here ?? []) : null;
             $said = $kept[$name] ?? null;
             if ($running !== null) {
                 [$here, $at] = [$running, time()];
@@ -321,16 +325,39 @@ final class TransportService
                 [$here, $at] = [$said['here'], $said['at']];
             } else {
                 try {
-                    [$here] = $this->learnHere($name);
+                    [$here, $how] = $this->learnHere($name);
                 } catch (CodedRuntime $error) {
                     $this->runtime->logged('transport ' . $name . ': ' . $error->getMessage());
-                    $here = null;
+                    [$here, $how] = [null, 'failed'];
+                }
+                if ($how === 'learned' || $how === 'running') {
+                    // It said ready: what it said of where it is reached, or nothing, which is an empty list.
+                    $here ??= [];
                 }
                 $at = time();
             }
-            if ($here !== null && $here !== []) {
+            if ($here !== null) {
                 $out[] = ['transport' => $name, 'medium' => $manifest->medium, 'here' => array_values($here), 'at' => $at];
             }
+        }
+
+        return $out;
+    }
+
+    /**
+     * What an add-on that needs media gets: each enabled transport's name and medium, as its manifest says them, ordered
+     * by name. From the manifests alone, and nothing is started: a reader of a card asks only which media this machine
+     * has, and a transport over Bluetooth LE announces this machine as it starts (19 November 2026).
+     *
+     * @return list<array{transport: string, medium: string}>
+     */
+    public function mediaForAddons(): array
+    {
+        $manifests = $this->manifests();
+        ksort($manifests, SORT_STRING);
+        $out = [];
+        foreach ($manifests as $name => $manifest) {
+            $out[] = ['transport' => (string) $name, 'medium' => $manifest->medium];
         }
 
         return $out;

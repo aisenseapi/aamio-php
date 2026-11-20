@@ -123,7 +123,7 @@ final class AddonManifest implements Addon
             }
             $needs = $spec['needs'] ?? [];
             if (!is_array($needs) || array_filter($needs, static fn ($need): bool => !in_array($need, AddonProcess::NEEDS, true)) !== []) {
-                $wrong('needs on the command ' . $command . ' names something other than own_key and here');
+                $wrong('needs on the command ' . $command . ' names something other than own_key, here and media');
             }
             if ($needs !== [] && ($spec['runtime'] ?? true) === false) {
                 $wrong('the command ' . $command . ' needs ' . implode(' and ', $needs) . ' and says it runs without a runtime');
@@ -175,7 +175,7 @@ final class AddonManifest implements Addon
             }
             $needs = $spec['needs'] ?? [];
             if (!is_array($needs) || array_filter($needs, static fn ($need): bool => !in_array($need, AddonProcess::NEEDS, true)) !== []) {
-                $wrong('needs on the tool ' . $spec['name'] . ' names something other than own_key and here');
+                $wrong('needs on the tool ' . $spec['name'] . ' names something other than own_key, here and media');
             }
             if (isset($spec['annotations']) && !is_array($spec['annotations'])) {
                 $wrong('annotations on the tool ' . $spec['name'] . ' is not an object');

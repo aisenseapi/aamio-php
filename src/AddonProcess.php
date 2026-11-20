@@ -45,10 +45,11 @@ final class AddonProcess
     /** How long a stopped process gets to go away before it is given up on. */
     public const STOP_WAIT = 5.0;
     /**
-     * What a command or a tool may ask the core for: the runtime's public key, and where this machine's transports are
-     * reached (here), for a card that says it. Never a partner's address, and never the home's key.
+     * What a command or a tool may ask the core for: the runtime's public key, where this machine's transports are reached
+     * (here), for a card that says it, and which transports it has (media), for a reader of a card that names the one to
+     * bind. Never a partner's address, and never the home's key.
      */
-    public const NEEDS = ['own_key', 'here'];
+    public const NEEDS = ['own_key', 'here', 'media'];
     /** Names an add-on may not ask for in its environment list. */
     public const NEVER_PASSED = ['AAMIO_HOME', 'AAMIO_ADDONS', 'AAMIO_ADDON'];
     /** The consent list lives beside the add-on's own directory, not in it: the add-on's process must not be able to widen what it may read. */
@@ -460,9 +461,10 @@ final class AddonProcess
      *
      * @param array<string, mixed> $arguments
      * @param list<array{transport: string, medium: string, here: list<string>, at: int}>|null $here where this machine's transports are reached, for a call that needs it
+     * @param list<array{transport: string, medium: string}>|null $media which transports this machine has, for a call that needs it
      * @return array<string, mixed>
      */
-    public static function run(AddonManifest $manifest, string $kind, string $name, array $arguments, ?array $subject = null, ?string $ownKey = null, ?string $stateDir = null, ?callable $stderr = null, ?int $deadline = null, bool $declared = true, ?array $here = null): array
+    public static function run(AddonManifest $manifest, string $kind, string $name, array $arguments, ?array $subject = null, ?string $ownKey = null, ?string $stateDir = null, ?callable $stderr = null, ?int $deadline = null, bool $declared = true, ?array $here = null, ?array $media = null): array
     {
         $deadline ??= $manifest->deadline;
         $request = [
@@ -473,6 +475,7 @@ final class AddonProcess
             'subject' => $subject,
             'own_key' => $ownKey,
             'here' => $here,
+            'media' => $media,
             'state_dir' => $stateDir,
             'deadline_seconds' => $deadline,
             'aamio' => ['version' => Http::VERSION, 'runtime' => 'php'],
@@ -644,8 +647,8 @@ final class AddonProcess
             : 'It was enabled already, and nothing of it ran now.';
 
         return $package . ' runs here from now on, in a process of its own for each call. ' . $ran . ' '
-            . 'A call gets its arguments, a key aamio resolved for it, the runtime\'s public key and where this machine\'s transports are reached '
-            . 'where a call asks for them, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, '
+            . 'A call gets its arguments, a key aamio resolved for it, the runtime\'s public key, where this machine\'s transports are reached '
+            . 'and which transports it has, where a call asks for them, a directory of its own under the home, and a short list of environment variables: the path, a temporary directory, '
             . 'the locale, the interpreter\'s own settings, TLS roots and the proxy variables, which can carry credentials of their own' . $asked . ', and never the '
             . 'home\'s key or the rest of your environment. Nothing it answers changes state in aamio. It runs with your own file permissions.';
     }
@@ -665,6 +668,23 @@ final class AddonProcess
             return $service->hereForAddons();
         } catch (\RuntimeException | \InvalidArgumentException $error) {
             throw new AddonRefused('here_unknown', 'Where this machine\'s transports are reached could not be read: ' . $error->getMessage() . '. aamio transport list shows them.', 'unreachable');
+        }
+    }
+
+    /**
+     * What a call that needs media gets: each enabled transport's name and medium, as TransportService::mediaForAddons
+     * finds it, from the manifests alone. Nothing is started. An empty list when no transport is enabled.
+     *
+     * @return list<array{transport: string, medium: string}>
+     */
+    public static function mediaOfTransports(Runtime $runtime): array
+    {
+        try {
+            $service = $runtime->transportService() ?? throw new CodedRuntime('transport_down', 'this runtime has no home of its own, so it has no transports');
+
+            return $service->mediaForAddons();
+        } catch (\RuntimeException | \InvalidArgumentException $error) {
+            throw new AddonRefused('media_unknown', 'Which transports this machine has could not be read: ' . $error->getMessage() . '. aamio transport list shows them.', 'unreachable');
         }
     }
 
@@ -851,6 +871,7 @@ final class AddonProcess
         $subject = null;
         $ownKey = null;
         $here = null;
+        $media = null;
         $host = null;
         try {
             foreach ($spec['arguments'] ?? [] as $argument) {
@@ -870,6 +891,9 @@ final class AddonProcess
             }
             if (in_array('here', $spec['needs'] ?? [], true) && $runtime !== null) {
                 $here = self::hereOfTransports($runtime);
+            }
+            if (in_array('media', $spec['needs'] ?? [], true) && $runtime !== null) {
+                $media = self::mediaOfTransports($runtime);
             }
         } catch (AddonRefused $refused) {
             self::out(self::refusal($refused, $host, $subject));
@@ -891,7 +915,7 @@ final class AddonProcess
         try {
             $answer = self::run($manifest, 'command', $name, $arguments, $subject, $ownKey, $directory, static function (string $text): void {
                 fwrite(STDERR, $text);
-            }, here: $here);
+            }, here: $here, media: $media);
         } finally {
             self::giveBack($manifest->name);
         }
@@ -958,6 +982,7 @@ final class AddonProcess
         $subject = null;
         $ownKey = null;
         $here = null;
+        $media = null;
         try {
             if (isset($spec['host']) && ($arguments[$spec['host']] ?? null) !== null) {
                 $host = $arguments[$spec['host']] = self::normaliseHost($arguments[$spec['host']]);
@@ -985,6 +1010,9 @@ final class AddonProcess
             if (in_array('here', $spec['needs'] ?? [], true)) {
                 $here = self::hereOfTransports($runtime);
             }
+            if (in_array('media', $spec['needs'] ?? [], true)) {
+                $media = self::mediaOfTransports($runtime);
+            }
             if ($host !== null && !in_array($host, self::allowedHosts($runtime, $manifest), true)) {
                 $answer = self::consent($manifest, $runtime, $name, $host, $subject, $arguments, $ask);
                 if ($answer !== null) {
@@ -1003,7 +1031,7 @@ final class AddonProcess
             return McpServer::resultOf(self::refusal(new AddonRefused($busy, 'At most ' . self::MAX_AT_ONCE . ' calls of the add-on ' . $manifest->name . ' run at once and ' . self::MAX_PER_WINDOW . ' start per minute here. Nothing was done. Try again shortly.', 'unreachable'), $host), true);
         }
         try {
-            $answer = self::run($manifest, 'tool', $name, $arguments, $subject, $ownKey, $directory, here: $here);
+            $answer = self::run($manifest, 'tool', $name, $arguments, $subject, $ownKey, $directory, here: $here, media: $media);
         } finally {
             self::giveBack($manifest->name);
         }

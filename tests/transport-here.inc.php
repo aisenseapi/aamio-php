@@ -521,14 +521,17 @@ while (($line = fgets(STDIN)) !== false) {
         $kept = (new TransportConfig($a->home))->here()['mute'] ?? null;
         $second = $service->hereForAddons();
         $starts = (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started');
-        $check($first === [] && $second === [] && ($kept['here'] ?? null) === [] && ($kept['version'] ?? null) === '0.1.0' && $starts === "0.1.0\n"
+        $withHere = static fn (array $said): array => array_map(static fn (array $item): array => [$item['transport'], $item['medium'], $item['here']], $said);
+        $check($withHere($first) === [['mute', 'mute', []]],
+            'it says nothing of where it is reached, and is there all the same: a card knows the medium is this machine\'s', json_encode($first));
+        $check($second === [['transport' => 'mute', 'medium' => 'mute', 'here' => [], 'at' => $kept['at'] ?? null]] && ($kept['here'] ?? null) === [] && ($kept['version'] ?? null) === '0.1.0' && $starts === "0.1.0\n"
             && ($transportItem(Transports::listing($a), 'mute')['here'] ?? null) === [],
             'a transport that says nothing of where it is reached is kept as saying nothing, and not started again for the next card', json_encode([$first, $second, $kept, $starts]));
         $manifest('0.2.0');
         Addons::reset();
         $third = $service->hereForAddons();
         $starts = (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started');
-        $check($third === [] && $starts === "0.1.0\n0.2.0\n" && ((new TransportConfig($a->home))->here()['mute']['version'] ?? null) === '0.2.0',
+        $check($withHere($third) === [['mute', 'mute', []]] && $starts === "0.1.0\n0.2.0\n" && ((new TransportConfig($a->home))->here()['mute']['version'] ?? null) === '0.2.0',
             'and another version of it is started once more', json_encode([$third, $starts]));
         $said = array_values(array_filter($lines, static fn (string $line): bool => str_starts_with($line, 'transport mute: mute: et tilkoblingsfors')));
         $check($said !== [] && preg_match('//u', $said[0]) === 1 && ($ansi !== 1252 || $said[0] === 'transport mute: mute: ' . $norwegian),
@@ -548,6 +551,18 @@ while (($line = fgets(STDIN)) !== false) {
         $service->running = [];
         $check($notYet === [null, 'starting'] && $readied === [[], 'running'] && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $starts,
             'a transport the service has a process for is asked, and never started a second time beside it', json_encode([$notYet, $readied]));
+        // For an add-on that needs here, the same process: one that has said ready, and nothing of where it is reached, is
+        // there with an empty list; one that has not said ready yet, with nothing kept from its version, is left out.
+        $manifest('0.3.0');
+        Addons::reset();
+        $beside = new TransportProcess('mute', '0.3.0', [], null, []);
+        $service->running['mute'] = ['manifest' => null, 'process' => $beside, 'carrier' => null, 'crashes' => [], 'next' => 0.0, 'down' => null];
+        $starting = $service->hereForAddons();
+        $beside->readied = true;
+        $running = $service->hereForAddons();
+        $service->running = [];
+        $check($starting === [] && $withHere($running) === [['mute', 'mute', []]] && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $starts,
+            'an add-on that needs here gets a running transport that said nothing with an empty list, and none for one not ready yet', json_encode([$starting, $running]));
         $a->close();
 
         // An empty list says the same as nothing said: transport here answers it alike, and names no address.
@@ -560,6 +575,21 @@ while (($line = fgets(STDIN)) !== false) {
         $said = Transports::here($a, 'blank');
         $check(array_key_exists('here', $said) && $said['here'] === [] && str_contains($said['note'] ?? '', 'blank says nothing of where it is reached')
             && ((new TransportConfig($a->home))->here()['blank']['here'] ?? null) === [], 'transport here says nothing for an empty list, as for none', json_encode($said));
+        $a->close();
+
+        // A reader of a card asks only which media this machine has. Asking for here instead starts a transport that keeps
+        // nothing for a moment, and one over Bluetooth LE announces the machine as it starts (19 November 2026).
+        $radio = $hRoot . DIRECTORY_SEPARATOR . 'radio';
+        $package($radio, 'radio', '0.1.0');
+        putenv('AAMIO_ADDONS=' . $radio . ',' . $lanDir);
+        Addons::reset();
+        @mkdir($hRoot . DIRECTORY_SEPARATOR . 'media', 0700, true);
+        $a = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'media' . DIRECTORY_SEPARATOR . 'a', $nowhere, null, true, $quietly);
+        $service = $a->transportService();
+        $media = $service->mediaForAddons();
+        $check($media === [['transport' => 'lan', 'medium' => 'lan'], ['transport' => 'radio', 'medium' => 'radio']] && $service->running === []
+            && !is_file($radio . DIRECTORY_SEPARATOR . 'started') && (new TransportConfig($a->home))->here() === [],
+            'an add-on that needs media gets the enabled transports by name, from the manifests, and nothing is started or kept', json_encode($media));
         $a->close();
     } finally {
         foreach ($opened as $runtime) {

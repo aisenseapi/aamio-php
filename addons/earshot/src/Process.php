@@ -279,24 +279,29 @@ final class Process
 
     /**
      * Each bare medium of a transport given where this machine is reached on it, as the core said it (here): the first
-     * address of a transport with that medium that a card can carry. The entries, and the media no address was found for.
+     * address of a transport with that medium that a card can carry. The entries; the media no transport of this machine
+     * said anything of, as one that is off (unknown); and the media its transport gives no address on that a card can
+     * carry, as sound or Bluetooth LE (silent): those go on the card alone, and nothing is wrong.
      *
      * @param list<string> $entries
-     * @return array{0: list<string>, 1: list<string>}
+     * @return array{0: list<string>, 1: list<string>, 2: list<string>}
      */
     private static function reached(array $entries, mixed $here): array
     {
         $found = [];
         $unknown = [];
+        $silent = [];
+        $transports = array_values(array_filter(is_array($here) && array_is_list($here) ? $here : [], static fn (mixed $transport): bool => is_array($transport)));
         foreach ($entries as $entry) {
             $medium = Card::mediumOf($entry);
             if ($medium === Card::INTERNET || $entry !== $medium) {
                 $found[] = $entry;
                 continue;
             }
+            $ours = array_values(array_filter($transports, static fn (array $transport): bool => ($transport['medium'] ?? null) === $medium));
             $address = null;
-            foreach (is_array($here) && array_is_list($here) ? $here : [] as $transport) {
-                if (!is_array($transport) || ($transport['medium'] ?? null) !== $medium || !is_array($transport['here'] ?? null) || !array_is_list($transport['here'])) {
+            foreach ($ours as $transport) {
+                if (!is_array($transport['here'] ?? null) || !array_is_list($transport['here'])) {
                     continue;
                 }
                 foreach ($transport['here'] as $candidate) {
@@ -307,23 +312,28 @@ final class Process
                 }
             }
             if ($address === null) {
-                $unknown[] = $medium;
+                if ($ours !== []) {
+                    $silent[] = $medium;
+                } else {
+                    $unknown[] = $medium;
+                }
             }
             $found[] = $address ?? $entry;
         }
 
-        return [$found, $unknown];
+        return [$found, $unknown, $silent];
     }
 
     /**
-     * The card's text, its expiry, and the media it names without where they are reached.
+     * The card's text, its expiry, the media it names without where they are reached, and those of them this machine's
+     * transport gives no address on (silent, over MCP alone).
      *
      * On the command line the key and the addresses are the ones given. Over MCP the key is the runtime's own, only when
      * the card names a medium other than internet, and each such medium gets where this machine is reached on it from
      * here: the model gives the medium alone.
      *
      * @param array<string, mixed> $arguments
-     * @return array{0: string, 1: ?int, 2: list<string>}
+     * @return array{0: string, 1: ?int, 2: list<string>, 3: list<string>}
      */
     private static function cardOf(array $arguments, string $kind, mixed $ownKey, mixed $here, int $now): array
     {
@@ -338,8 +348,9 @@ final class Process
                 throw new Refused('invalid_via', 'Over MCP give the media alone, as bt or lan: where this machine is reached on each comes from its own transports, so a card never names another machine.');
             }
             $unknown = [];
+            $silent = [];
             if ($entries !== null) {
-                [$entries, $unknown] = self::reached($entries, $here);
+                [$entries, $unknown, $silent] = self::reached($entries, $here);
             }
             $key = $entries !== null && array_filter($entries, static fn (string $entry): bool => Card::mediumOf($entry) !== Card::INTERNET) !== [] ? $ownKey : null;
             $via = $entries;
@@ -347,27 +358,36 @@ final class Process
             $key = $arguments['key'] ?? null;
             $entries = Card::checkVia($via);
             $unknown = array_values(array_filter($entries ?? [], static fn (string $entry): bool => $entry !== Card::INTERNET && $entry === Card::mediumOf($entry)));
+            $silent = [];
         }
 
-        return [Card::make($arguments['address'] ?? null, $arguments['name'] ?? null, $expires, $via, $key), $expires, $unknown];
+        return [Card::make($arguments['address'] ?? null, $arguments['name'] ?? null, $expires, $via, $key), $expires, $unknown, $silent];
     }
 
     /**
-     * What a card that names a medium without where it is reached leaves a listener without, or an empty string.
+     * What a card that names a medium without where it is reached leaves a listener without, or an empty string. A medium
+     * this machine's transport gives no address on is said as such, and not as something to put right.
      *
      * @param list<string> $unknown
+     * @param list<string> $silent
      */
-    private static function unreached(array $unknown, string $kind): string
+    private static function unreached(array $unknown, string $kind, array $silent = []): string
     {
+        $said = '';
+        if ($silent !== []) {
+            $media = implode(' and ', $silent);
+            $said .= ' The card names ' . $media . ' without an address, as this machine\'s transport over ' . $media . ' gives none a card can carry: '
+                . 'a listener\'s first ask goes to nobody in particular, as its transport sends that.';
+        }
         if ($unknown === []) {
-            return '';
+            return $said;
         }
         $media = implode(', ', $unknown);
         $how = $kind === 'tool'
             ? 'No enabled transport on this machine says where it is reached over ' . $media . ': aamio transport list shows the transports and what they said.'
             : 'aamio transport here ' . $unknown[0] . ' shows where this machine is reached on it, and --via ' . $unknown[0] . ':ADDRESS puts it on the card.';
 
-        return ' The card names ' . $media . ' without where you are reached on it, so a listener\'s first ask goes to nobody in particular, as its transport sends that. ' . $how;
+        return $said . ' The card names ' . $media . ' without where you are reached on it, so a listener\'s first ask goes to nobody in particular, as its transport sends that. ' . $how;
     }
 
     /** What a card with via or a key tells everyone within earshot, or an empty string for one without. */
@@ -390,7 +410,7 @@ final class Process
     public static function broadcast(array $arguments, string $kind, callable $encode, callable $play, callable $pause, int $now, ?callable $write = null, mixed $ownKey = null, mixed $here = null): array
     {
         try {
-            [$text, $expires, $unknown] = self::cardOf($arguments, $kind, $ownKey, $here, $now);
+            [$text, $expires, $unknown, $silent] = self::cardOf($arguments, $kind, $ownKey, $here, $now);
             $mode = self::mode($arguments['mode'] ?? null, Service::MODES, 'audible');
             $repeat = self::whole($arguments['repeat'] ?? null, 1, self::REPEAT_MAX, 1, 'repeat');
             $engine = self::engine($arguments['engine'] ?? null);
@@ -440,7 +460,7 @@ final class Process
             }
 
             return $said + ['status' => 'written', 'file' => $out, 'bytes' => strlen($sound),
-                'note' => 'Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it.' . self::unreached($unknown, $kind)];
+                'note' => 'Nothing was played. Play the whole file, at its own speed, near the agents that listen: a speed change or a lossy conversion damages it.' . self::unreached($unknown, $kind, $silent)];
         }
         $folder = self::folder();
         if ($folder === null) {
@@ -471,7 +491,7 @@ final class Process
             : 'The card has no end, and neither does the address: use a new scope for the next room or occasion.';
 
         return $said + ['status' => 'played', 'repeat' => $repeat, 'player' => $player,
-            'note' => 'Played on this machine\'s speaker. Agents within earshot that were listening can now post into the scope: read their posts with ' . self::by($kind, 'aamio board find --scope NAME --wait 25', 'aamio_board_find with scope and wait') . ', and answer one with ' . self::by($kind, 'aamio board answer POST TEXT --scope NAME', 'aamio_board_answer') . '. ' . $good . self::saysMore($text) . self::unreached($unknown, $kind)];
+            'note' => 'Played on this machine\'s speaker. Agents within earshot that were listening can now post into the scope: read their posts with ' . self::by($kind, 'aamio board find --scope NAME --wait 25', 'aamio_board_find with scope and wait') . ', and answer one with ' . self::by($kind, 'aamio board answer POST TEXT --scope NAME', 'aamio_board_answer') . '. ' . $good . self::saysMore($text) . self::unreached($unknown, $kind, $silent)];
     }
 
     /**
@@ -479,7 +499,7 @@ final class Process
      *
      * @return array<string, mixed>
      */
-    private static function heard(string $sound, string $mode, string $kind, callable $decode, int $now, string $engine): array
+    private static function heard(string $sound, string $mode, string $kind, callable $decode, int $now, string $engine, mixed $media = null): array
     {
         $used = $engine;
         $reserve = null;
@@ -503,14 +523,14 @@ final class Process
             return self::fallback(self::refused($error->reason, $error->fix) + ['engine' => $used], $reserve, 'read');
         }
 
-        return self::fallback(self::cardHeard($said, $kind, $now) + ['engine' => $used], $reserve, 'read');
+        return self::fallback(self::cardHeard($said, $kind, $now, $media) + ['engine' => $used], $reserve, 'read');
     }
 
     /**
      * @param array<string, mixed> $said
      * @return array<string, mixed>
      */
-    private static function cardHeard(array $said, string $kind, int $now): array
+    private static function cardHeard(array $said, string $kind, int $now, mixed $media = null): array
     {
         $text = is_string($said['text'] ?? null) ? $said['text'] : null;
         try {
@@ -531,7 +551,7 @@ final class Process
         $age = $found['expires_at'] !== null ? ' It is good until ' . self::when($found['expires_at']) . '.' : ' It says no time it stops being good, so it may be a recording of any age.';
 
         $heard = ['status' => 'heard', 'card' => $found, 'protocol' => $said['protocol'] ?? null, 'corrected_bits' => $said['corrected_bits'] ?? null, 'mode' => $said['mode'] ?? null, 'note' => self::HEARD . $age, 'next' => $steps];
-        $bind = self::bind($found, $name);
+        $bind = self::bind($found, $name, $media);
         if ($bind !== null) {
             $heard['bind'] = $bind;
         }
@@ -540,35 +560,86 @@ final class Process
     }
 
     /**
+     * This machine's transports as [name, medium], from what the core said of them (media), or null when it said
+     * nothing: on the command line, and from a core before 0.4.1.
+     *
+     * @return list<array{0: string, 1: string}>|null
+     */
+    private static function ours(mixed $media): ?array
+    {
+        if (!is_array($media) || !array_is_list($media)) {
+            return null;
+        }
+        $bare = static fn (mixed $value): bool => is_string($value) && preg_match(Card::ENTRY, $value) === 1 && Card::mediumOf($value) === $value;
+        $ours = [];
+        foreach ($media as $item) {
+            if (is_array($item) && $bare($item['transport'] ?? null) && $bare($item['medium'] ?? null)) {
+                $ours[] = [$item['transport'], $item['medium']];
+            }
+        }
+
+        return $ours;
+    }
+
+    /**
      * What a card that names media or carries a key lets a listener do, said and never done: binding is the user's choice.
+     *
+     * With media, what the core said of this machine's transports over MCP, the first medium on the card that one of them
+     * carries is the one to bind, under that transport's name, so nobody has to know which transport carries which medium.
+     * Without it, on the command line, TRANSPORT stands for the transport (the review of 19 November 2026).
      *
      * @param array<string, mixed> $found
      */
-    private static function bind(array $found, string $name): ?string
+    private static function bind(array $found, string $name, mixed $media = null): ?string
     {
-        $media = array_values(array_filter($found['via'] ?? [], static fn (string $medium): bool => $medium !== Card::INTERNET));
-        if ($media === [] && !isset($found['key'])) {
+        $entries = array_values(array_filter($found['via'] ?? [], static fn (string $entry): bool => $entry !== Card::INTERNET));
+        if ($entries === [] && !isset($found['key'])) {
             return null;
         }
-        if ($media !== [] && !isset($found['key'])) {
-            return 'The card asks for answers over ' . implode(', ', $media) . ', and carries no key to bind one to: answer in the scope, over aamio.at.';
+        if ($entries !== [] && !isset($found['key'])) {
+            return 'The card asks for answers over ' . implode(', ', $entries) . ', and carries no key to bind one to: answer in the scope, over aamio.at.';
         }
         $trust = 'The card carries a public key, and a card is not signed: anyone within earshot could have played it. If you trust whoever played it, ';
-        if ($media === []) {
+        if ($entries === []) {
             return $trust . 'aamio partner add ' . $name . ' ' . $found['key'] . ' keeps the key in your address book. The card names no medium beside internet: answer in the scope.';
         }
-        $entry = $media[0];
+        $ours = self::ours($media);
+        $entry = null;
+        $transport = null;
+        if ($ours === null) {
+            $entry = $entries[0];
+        } else {
+            foreach ($entries as $candidate) {
+                foreach ($ours as [$mine, $medium]) {
+                    if ($medium === Card::mediumOf($candidate)) {
+                        [$entry, $transport] = [$candidate, $mine];
+                        break 2;
+                    }
+                }
+            }
+            if ($entry === null) {
+                $asked = implode(', ', array_map([Card::class, 'mediumOf'], $entries));
+
+                return $trust . 'aamio partner add ' . $name . ' ' . $found['key'] . ' keeps the key in your address book. The card asks for answers over ' . $asked . ', and no transport on this machine '
+                    . 'carries ' . (count($entries) === 1 ? 'it' : 'any of them') . ': an add-on for one, enabled with aamio addon enable, lets you bind them over it. Until then, answer in the scope, over aamio.at.';
+            }
+        }
         $medium = Card::mediumOf($entry);
+        $bind = 'aamio transport bind ' . $name . ' ' . ($transport ?? 'TRANSPORT');
         if ($entry !== $medium) {
-            $bind = 'aamio transport bind ' . $name . ' TRANSPORT --address ' . $entry;
+            $bind .= ' --address ' . $entry;
             $where = ' The first ask goes to that address, where the card says they are reached.';
         } else {
-            $bind = 'aamio transport bind ' . $name . ' TRANSPORT';
             $where = ' The card says nothing of where they are reached on ' . $medium . ', so the first ask goes to nobody in particular, as the transport sends that.';
         }
+        if ($transport === null) {
+            [$which, $over] = [', where TRANSPORT is the one aamio transport list shows with the medium ' . $medium . ',', 'it'];
+        } else {
+            [$which, $over] = ['', $transport === $medium ? $transport : $transport . ', this machine\'s transport for ' . $medium];
+        }
 
-        return $trust . 'aamio partner add ' . $name . ' ' . $found['key'] . ', then ' . $bind . ', where TRANSPORT is the one aamio transport list shows with the medium ' . $medium . ', '
-            . 'sends your messages to them over it.' . $where . ' That is the user\'s choice, on the command line. Until then, answer in the scope, over aamio.at.';
+        return $trust . 'aamio partner add ' . $name . ' ' . $found['key'] . ', then ' . $bind . $which . ' sends your messages to them over ' . $over . '.' . $where . ' That is the user\'s choice, on the command line. '
+            . 'Until then, answer in the scope, over aamio.at.';
     }
 
     /**
@@ -580,7 +651,7 @@ final class Process
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function listen(array $arguments, string $kind, callable $decode, callable $record, callable $clock): array
+    public static function listen(array $arguments, string $kind, callable $decode, callable $record, callable $clock, mixed $media = null): array
     {
         try {
             $seconds = self::whole($arguments['seconds'] ?? null, self::SECONDS_MIN, self::SECONDS_MAX, self::SECONDS_DEFAULT, 'seconds');
@@ -610,14 +681,14 @@ final class Process
             return self::unreachable(new Unreachable('recorder_failed', 'The recorder said it was done, and left no recording. Check the microphone, or record the sound another way and read the file with decode.'));
         }
 
-        return self::heard($sound, $mode, $kind, $decode, $heardAt, $engine) + ['recorded_seconds' => $seconds, 'recorder' => $recorder];
+        return self::heard($sound, $mode, $kind, $decode, $heardAt, $engine, $media) + ['recorded_seconds' => $seconds, 'recorder' => $recorder];
     }
 
     /**
      * @param array<string, mixed> $arguments
      * @return array<string, mixed>
      */
-    public static function decodeFile(array $arguments, string $kind, callable $decode, callable $clock): array
+    public static function decodeFile(array $arguments, string $kind, callable $decode, callable $clock, mixed $media = null): array
     {
         try {
             $mode = self::mode($arguments['mode'] ?? null, Service::DECODE_MODES, 'auto');
@@ -641,7 +712,7 @@ final class Process
             return self::refused('not_a_wav', $name . ' is not a WAV file. Record or convert it to uncompressed 16-bit PCM WAV at 44.1 or 48 kHz: MP3, AAC and WebM are not read.');
         }
 
-        return self::heard($sound, $mode, $kind, $decode, (int) $clock(), $engine);
+        return self::heard($sound, $mode, $kind, $decode, (int) $clock(), $engine, $media);
     }
 
     /**
@@ -681,10 +752,10 @@ final class Process
             return self::answer(self::broadcast($arguments, $kind, $encode, $play, $pause, $now, $write, $request['own_key'] ?? null, $request['here'] ?? null));
         }
         if ($short === 'listen') {
-            return self::answer(self::listen($arguments, $kind, $decode, $record, $clock));
+            return self::answer(self::listen($arguments, $kind, $decode, $record, $clock, $request['media'] ?? null));
         }
         if ($short === 'decode') {
-            return self::answer(self::decodeFile($arguments, $kind, $decode, $clock));
+            return self::answer(self::decodeFile($arguments, $kind, $decode, $clock, $request['media'] ?? null));
         }
 
         return self::answer(self::refused('unknown_call', 'The add-on ' . self::NAME . ' has no ' . self::said($kind) . ' called ' . self::said($name) . '. aamio addon ' . self::NAME . ' --help lists its commands, and aamio addon list its tools.'));
