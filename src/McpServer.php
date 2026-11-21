@@ -40,6 +40,10 @@ final class McpServer
     public const PARTNER_QUESTION = 'aamio_partner_key';
     /** aamio_send asks the user whether a readable message may carry a secret, under this name. */
     public const SECRET_QUESTION = 'aamio_send_secret';
+    /** What a call to aamio_send hears when it comes back with an answer it cannot continue with. */
+    public const CONTINUATION_REFUSED = 'this call comes back with an answer to a question, and cannot go on as it is: an answer is taken over 2026-07-28, '
+        . 'for the same readable message, from an app that can show the user the form, so nothing was sent';
+    public const CONTINUATION_FIX = 'Call aamio_send again without requestState and inputResponses. If the message carries a secret of this home, the user is asked anew.';
     /**
      * How long an answer to that question may take to come back over
      * 2026-07-28, in seconds: time for a person to find a key, and not so long
@@ -1040,6 +1044,16 @@ final class McpServer
                 foreach ($listed['inputSchema']['properties'] ?? [] as $field => $want) {
                     if (($want['type'] ?? null) === 'integer' && is_float($arguments[$field] ?? null)) {
                         $arguments[$field] = (int) $arguments[$field];
+                    }
+                }
+                // A call that comes back with a question's state or an answer is a continuation, whatever else it says,
+                // and is judged as one before a way to send is chosen: over 2026-07-28, readable, with a state, from an
+                // app that can show the form. Anything else sends nothing. A continuation that left out the form or
+                // readable, or came over another revision, went the way of a new send, and the answer in it was never
+                // read (a review of 21 November 2026). What the state binds is checked after this.
+                if ($name === 'aamio_send' && (array_key_exists('requestState', $params) || array_key_exists('inputResponses', $params))) {
+                    if (!($version === self::MODERN && ($arguments['readable'] ?? null) === true && is_string($params['requestState'] ?? null) && $this->canAskTheUser($params, $version))) {
+                        return ['jsonrpc' => '2.0', 'id' => $id, 'result' => self::shaped(self::resultOf(['sent' => false, 'error' => self::CONTINUATION_REFUSED, 'error_code' => 'no_dialog', 'fix' => self::CONTINUATION_FIX], true), $modern)];
                     }
                 }
                 // Whether this call comes back with a question's state or an answer to the secret question: then

@@ -268,6 +268,66 @@ try {
 $check($namedLike === 'readable_with_key' && count($readablePosted($yw)) === 2, 'a partner named like an address is not written to readable', $namedLike);
 $yr->close();
 
+// A continuation that cannot go on as it is sends nothing, whatever else it says: no form in the call that brings the
+// answer, readable false or left out, an answer without a state, or another revision (a review of 21 November 2026).
+$asOf = static fn (array $params, int $id, string $version, mixed $capabilities): array => ['jsonrpc' => '2.0', 'id' => $id, 'method' => 'tools/call', 'params' => $params + ['_meta' => ['io.modelcontextprotocol/protocolVersion' => $version, 'io.modelcontextprotocol/clientInfo' => ['name' => 'check', 'version' => '1'], 'io.modelcontextprotocol/clientCapabilities' => $capabilities]]];
+foreach (['no form', 'readable false', 'readable left out', 'an answer without a state', 'another revision'] as $variant) {
+    [$cr, $cw] = $readableWriter();
+    $cServer = new McpServer($cr);
+    $cKey = $readableScope($cr);
+    $cArguments = ['to' => $cw, 'text' => 'the key is ' . $cKey, 'readable' => true];
+    $cState = $cServer->handle($modern(['name' => 'aamio_send', 'arguments' => $cArguments], 1))['result']['requestState'] ?? null;
+    $cr->scopeRemove('team');
+    $resumedArguments = $cArguments;
+    $cParams = ['name' => 'aamio_send', 'requestState' => $cState, 'inputResponses' => [McpServer::SECRET_QUESTION => ['action' => 'decline']]];
+    [$cVersion, $cCapabilities] = ['2026-07-28', $form];
+    if ($variant === 'no form') {
+        $cCapabilities = new \stdClass();
+    } elseif ($variant === 'readable false') {
+        $resumedArguments['readable'] = false;
+    } elseif ($variant === 'readable left out') {
+        unset($resumedArguments['readable']);
+    } elseif ($variant === 'an answer without a state') {
+        unset($cParams['requestState']);
+    } else {
+        $cVersion = '2025-11-25';
+    }
+    $outboxBefore = $cr->outbox;
+    $postsBefore = $postsTo($cw);
+    $cAnswered = $cServer->handle($asOf($cParams + ['arguments' => $resumedArguments], 2, $cVersion, $cCapabilities));
+    $cSaid = $cAnswered['result']['structuredContent'] ?? [];
+    $check(($cSaid['sent'] ?? null) === false && ($cSaid['error_code'] ?? null) === 'no_dialog' && str_contains((string) ($cSaid['fix'] ?? ''), 'requestState')
+        && $postsTo($cw) === $postsBefore && $cr->outbox === $outboxBefore,
+        'a continuation with ' . $variant . ' sends nothing, and nothing goes to the service', json_encode($cSaid));
+    $cr->close();
+}
+
+// A partner named like an address is refused readable with the way to reach them, and their key reaches them sealed.
+[$pa, ] = $readableWriter();
+$pcHome = $root . DIRECTORY_SEPARATOR . 'readable-partner-c';
+mkdir($pcHome, 0700, true);
+$pc = new Runtime($pcHome, 'https://fake.test', ['c'], false, $readableQuiet);
+$pcInbox = $pc->ensureInbox();
+$pc->publishPresence(true);
+$pName = 'abcdefghijklmnopqrst';
+$pa->partnerAdd($pName, $pc->keys->public);
+try {
+    $pa->send($pName, 'hei', null, null, null, true);
+    $pRefused = null;
+} catch (\Throwable $error) {
+    $pRefused = $error;
+}
+$pSent = $pa->send($pc->keys->public, 'hei, forseglet');
+$pLast = $fake->threads[$pcInbox->w]['messages'][count($fake->threads[$pcInbox->w]['messages']) - 1] ?? [];
+$check($pRefused !== null && Runtime::errorCode($pRefused) === 'readable_with_key' && str_contains($pRefused->getMessage(), 'public key') && str_contains($pRefused->getMessage(), 'aamio partner list')
+    && !isset($pSent['readable']) && ($pSent['w'] ?? null) === $pcInbox->w && ($pLast['sealed'] ?? null) === true,
+    'a partner named like an address is refused readable with the way to them, and their key reaches them sealed', json_encode([$pRefused?->getMessage(), $pSent['w'] ?? null]));
+$pa->close();
+$pc->close();
+
+$traceTool = array_column(json_decode((string) file_get_contents(dirname(__DIR__) . '/src/mcp-tools.json'), true)['tools'], null, 'name')['aamio_trace'] ?? [];
+$check(str_contains((string) ($traceTool['description'] ?? ''), 'apart from one sent readable and one over a transport under a readable profile, which are signed and not sealed'), 'aamio_trace says which messages go unsealed');
+
 $instructions = json_decode((string) file_get_contents(dirname(__DIR__) . '/src/mcp-tools.json'), true)['instructions'] ?? '';
 $check(str_contains($instructions, "unsealed with readable, where a secret goes only on the user's yes"), "the instructions say readable and the user's yes");
 
