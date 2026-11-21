@@ -258,6 +258,15 @@ $check(($late['result']['structuredContent']['error_code'] ?? null) === 'no_dial
     && ($againYes['result']['structuredContent']['error_code'] ?? null) === 'no_dialog' && count($readablePosted($yw)) === 2,
     'an answer out of its time, or one used before, sends nothing', json_encode([$late['result']['structuredContent'] ?? null, $againYes['result']['structuredContent'] ?? null]));
 
+// The way on, for a call that sent nothing, says stop: a no stands, and a new send is the user's to ask for. The way it
+// said before, call again without requestState and inputResponses, made a first call of it, which asks only about what
+// the home holds by then, so a no about a secret removed since went unheard (a review of 21 November 2026).
+$saysStop = static fn (mixed $fix): bool => is_string($fix) && str_contains($fix, 'This call sent nothing') && str_contains($fix, 'Do not try again on your own')
+    && str_contains($fix, 'decline') && str_contains($fix, 'explicitly asks') && !str_contains($fix, 'again without requestState') && !str_contains($fix, 'to ask the user again');
+$check($saysStop($late['result']['structuredContent']['fix'] ?? null) && $saysStop($againYes['result']['structuredContent']['fix'] ?? null),
+    'and the way on says stop: a no stands, an earlier send may have gone, and a new send is the user\'s to ask for',
+    json_encode([$late['result']['structuredContent']['fix'] ?? null, $againYes['result']['structuredContent']['fix'] ?? null]));
+
 $yr->partnerAdd($yw, Keys::generate()->public);
 try {
     $yr->send($yw, 'hei', null, null, null, true);
@@ -296,7 +305,7 @@ foreach (['no form', 'readable false', 'readable left out', 'an answer without a
     $postsBefore = $postsTo($cw);
     $cAnswered = $cServer->handle($asOf($cParams + ['arguments' => $resumedArguments], 2, $cVersion, $cCapabilities));
     $cSaid = $cAnswered['result']['structuredContent'] ?? [];
-    $check(($cSaid['sent'] ?? null) === false && ($cSaid['error_code'] ?? null) === 'no_dialog' && str_contains((string) ($cSaid['fix'] ?? ''), 'requestState')
+    $check(($cSaid['sent'] ?? null) === false && ($cSaid['error_code'] ?? null) === 'no_dialog' && $saysStop($cSaid['fix'] ?? null)
         && $postsTo($cw) === $postsBefore && $cr->outbox === $outboxBefore,
         'a continuation with ' . $variant . ' sends nothing, and nothing goes to the service', json_encode($cSaid));
     $cr->close();
@@ -327,6 +336,21 @@ $pc->close();
 
 $traceTool = array_column(json_decode((string) file_get_contents(dirname(__DIR__) . '/src/mcp-tools.json'), true)['tools'], null, 'name')['aamio_trace'] ?? [];
 $check(str_contains((string) ($traceTool['description'] ?? ''), 'apart from one sent readable and one over a transport under a readable profile, which are signed and not sealed'), 'aamio_trace says which messages go unsealed');
+$check(str_contains((string) ($traceTool['description'] ?? ''), 'The one sent readable goes to an address with no known key and has no line here')
+    && str_contains((string) ($traceTool['description'] ?? ''), 'keep the sha256 its send answer gave, and read no_trace as nothing recorded, not as nothing sent'),
+    'aamio_trace says a readable message has no line in it, and to keep the sha256');
+// What the trace tool says of it: the trace follows a counterpart's key, and this address has none.
+[$tr, $tw] = $readableWriter();
+$tSent = $tr->send($tw, 'hei', null, null, null, true);
+try {
+    $tr->trace($tw);
+    $tTrace = 'traced';
+} catch (\Throwable $error) {
+    $tTrace = Runtime::errorCode($error);
+}
+$check(preg_match('/^[0-9a-f]{64}$/', (string) ($tSent['sha256'] ?? '')) === 1 && $tTrace === 'no_trace',
+    'a readable message has no line in the trace, and its answer gives the sha256', json_encode([$tSent['sha256'] ?? null, $tTrace]));
+$tr->close();
 
 $instructions = json_decode((string) file_get_contents(dirname(__DIR__) . '/src/mcp-tools.json'), true)['instructions'] ?? '';
 $check(str_contains($instructions, "unsealed with readable, where a secret goes only on the user's yes"), "the instructions say readable and the user's yes");

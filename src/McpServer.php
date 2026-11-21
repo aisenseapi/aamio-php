@@ -43,7 +43,15 @@ final class McpServer
     /** What a call to aamio_send hears when it comes back with an answer it cannot continue with. */
     public const CONTINUATION_REFUSED = 'this call comes back with an answer to a question, and cannot go on as it is: an answer is taken over 2026-07-28, '
         . 'for the same readable message, from an app that can show the user the form, so nothing was sent';
-    public const CONTINUATION_FIX = 'Call aamio_send again without requestState and inputResponses. If the message carries a secret of this home, the user is asked anew.';
+    /**
+     * What it says to do. Stop, and leave a new send to the user: a call made anew, without requestState and
+     * inputResponses, is a first call, which asks only about what the home holds by then, so a no about a secret
+     * removed since would not stand (a review of 21 November 2026). An answer this server cannot take, out of its
+     * time, used before or answered with an error, is told the same.
+     */
+    public const CONTINUATION_FIX = 'This call sent nothing. Do not try again on your own, and do not take requestState or inputResponses out to get it through: '
+        . 'a decline or cancellation the user gave stands, and an earlier send of this message may already have gone, so check what it answered. '
+        . 'Send this message again only if the user explicitly asks you to.';
     /**
      * How long an answer to that question may take to come back over
      * 2026-07-28, in seconds: time for a person to find a key, and not so long
@@ -586,7 +594,7 @@ final class McpServer
                 'error' => $asked['no_dialog'] . ', so nothing was sent',
                 'error_code' => 'no_dialog',
                 'carries' => $carried,
-                'fix' => 'Call aamio_send again to ask the user again. ' . $instead,
+                'fix' => self::CONTINUATION_FIX,
             ], true);
         }
         $answer = is_array($asked['answer'] ?? null) ? $asked['answer'] : [];
