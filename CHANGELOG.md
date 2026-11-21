@@ -11,7 +11,8 @@ not what moved in the source.
   nothing is written. `aamio transport here` says so.
 - A close from the log while a transport starts ends the start, and its
   process has ended when the runtime lets go of the home; the start used to
-  take the process back in after the close, and it ran on.
+  take the process back in after the close, and it ran on. A lookup of where
+  it is reached, or a start, from the log meanwhile starts no second one.
 - A transport that does not stop when asked is killed after five seconds with
   SIGKILL on Linux and macOS. The SIGTERM it got could be caught, and the stop
   then waited for it with no end.

@@ -301,8 +301,10 @@ final class TransportService
             // Never a second one beside it: the two would fight over the medium, as a port or a channel.
             return [$process->here, $process->readied ? 'running' : 'starting'];
         }
-        if (isset($this->learning[$name])) {
-            // One start of a moment per transport. A second lookup comes from inside the first here, and cannot wait for it.
+        if (isset($this->learning[$name]) || isset($this->starting[$name])) {
+            // One start of a moment per transport, and none beside the ordinary start while that one starts it. A second
+            // lookup comes from inside the first here, as from the log, and cannot wait for it: one from the log of the
+            // ordinary start started a second child (a review of 21 November 2026).
             return [null, 'starting'];
         }
         $folder = Transports::workingFolder($this->runtime->home, $name);
@@ -423,16 +425,23 @@ final class TransportService
     private function startDue(): void
     {
         $now = self::now();
-        foreach ($this->running as $name => $entry) {
+        // Each entry as it is now, not as it was when the round began: a round called from a callback inside this one can
+        // have started a transport meanwhile, and a copy taken at the start would start it a second time.
+        foreach (array_keys($this->running) as $name) {
             $name = (string) $name;
             if ($this->stopped) {
                 return;
             }
+            $entry = $this->running[$name] ?? null;
+            if ($entry === null) {
+                continue;
+            }
             if ($entry['carrier'] !== null || $entry['manifest'] === null || $entry['down'] !== null || $now < $entry['next']) {
                 continue;
             }
-            if (isset($this->learning[$name])) {
-                // Started for a moment just now, to say where it is reached: the ordinary start waits for that one to end.
+            if (isset($this->learning[$name]) || isset($this->starting[$name])) {
+                // Started for a moment just now, to say where it is reached, or being started by a round this one was
+                // called from, as from the log: the one under way ends first.
                 continue;
             }
             $manifest = $entry['manifest'];

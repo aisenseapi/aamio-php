@@ -646,6 +646,31 @@ file_put_contents(__DIR__ . "/ended", $version . "\n", FILE_APPEND);
         $a->close();
         $b->close();
 
+        // A lookup and a start from the log while the ordinary start runs start no second child: the lookup looked only for
+        // a registered process and a start of a moment, and started one beside it (a review of 21 November 2026).
+        @mkdir($hRoot . DIRECTORY_SEPARATOR . 'inside-ordinary', 0700, true);
+        $inner = null;
+        $asked = [];
+        $a = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'inside-ordinary' . DIRECTORY_SEPARATOR . 'a', $nowhere, null, true, static function (string $line) use (&$inner, &$asked): void {
+            if ($inner !== null && $asked === [] && str_starts_with($line, 'transport mute: mute: ')) {
+                $asked[] = $inner->learnHere('mute');
+                $inner->start();
+                $asked[] = isset($inner->running['mute']) ? 'kept' : 'gone';
+            }
+        });
+        $b = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'inside-ordinary' . DIRECTORY_SEPARATOR . 'b', $nowhere, null, true, $quietly);
+        $a->partnerAdd('b', $b->keys->public);
+        Transports::bind($a, 'b', 'mute');
+        $startedBefore = (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started');
+        $inner = $a->transportService();
+        $inner->start();
+        $check($asked === [[null, 'starting'], 'kept'] && ($inner->running['mute']['process'] ?? null) !== null && $inner->starting === []
+            && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $startedBefore . "0.3.0\n",
+            'a lookup and a start from the log while a transport starts start no second one: one child, and the lookup says starting', json_encode($asked));
+        $inner = null;
+        $a->close();
+        $b->close();
+
         // Killed, as B2 says: SIGKILL where SIGTERM can be caught, and proc_close then waited with no end (a review of
         // 21 November 2026). Windows ends a process whatever the signal, so this is a POSIX check.
         if (PHP_OS_FAMILY !== 'Windows') {
