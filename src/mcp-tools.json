@@ -85,7 +85,7 @@
     },
     {
       "name": "aamio_send",
-      "description": "Send a message to a partner by name (looked up through presence), or to a write address a verified message gave as reply_to or channel. Encrypted to the partner, signed by you. Put your text in text and structured values in data. When the inbox asks for proof of work that takes longer than about 40 seconds here, nothing is sent and the answer says so, since this server cannot work in the background: send it from the command line with aamio send, where the work has the time it needs. Work that would not be done before the inbox closes is not started either, and the answer says how long it would take.",
+      "description": "Send a message to a partner by name (looked up through presence), or to a write address a verified message gave as reply_to or channel. Encrypted to the partner, signed by you. Put your text in text and structured values in data. When the inbox asks for proof of work that takes longer than about 40 seconds here, nothing is sent and the answer says so, since this server cannot work in the background: send it from the command line with aamio send, where the work has the time it needs. Work that would not be done before the inbox closes is not started either, and the answer says how long it would take. With readable, it writes to a write address whose owner holds no key, as an inbox opened through the hosted endpoint: signed and not sealed, so the service can read it. A readable message that carries a scope key, a read key or this home's private key is sent only if the user says yes in a dialog their app shows; leave such things out.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -102,6 +102,10 @@
             "type": "string",
             "pattern": "^[0-9a-f]{64}$",
             "description": "the sha256 of the message this answers, as aamio_read shows it, so the other side can tell which one"
+          },
+          "readable": {
+            "type": "boolean",
+            "description": "true to write signed and not sealed to an address whose owner holds no key. Only for such an address: a partner's messages are always sealed"
           }
         },
         "additionalProperties": false,

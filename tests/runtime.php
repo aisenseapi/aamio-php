@@ -135,7 +135,9 @@ final class FakeService
                 return [array_shift($this->closing), ['error' => 'an answer the test chose', 'fix' => 'none'], []];
             }
             if ($sub === 'gate') {
-                return $thread === null ? [404, ['error' => 'No thread', 'fix' => 'Open one'], []] : [200, $thread['gate'], ['x-seconds-left' => (string) max(0, $thread['expire_at'] - $this->now), 'x-expire-at' => (string) $thread['expire_at']]];
+                // An inbox opened through the hosted endpoint says so in a header, as the service does.
+                return $thread === null ? [404, ['error' => 'No thread', 'fix' => 'Open one'], []] : [200, $thread['gate'], ['x-seconds-left' => (string) max(0, $thread['expire_at'] - $this->now), 'x-expire-at' => (string) $thread['expire_at']]
+                    + (($thread['opened_via'] ?? null) === 'hosted' ? ['x-opened-via' => 'hosted'] : [])];
             }
             if ($method === 'POST') {
                 if ($thread === null) {
@@ -164,7 +166,8 @@ final class FakeService
                 $message = ['seq' => $seq, 'at' => $this->now + $seq, 'type' => is_array($json) ? 'json' : 'text', 'body' => (string) $body, 'sha256' => hash('sha256', (string) $body), 'from' => $headers['X-Key'] ?? null, 'sig' => $headers['X-Sig'] ?? null, 'verified' => isset($headers['X-Key']), 'sealed' => Keys::isEnvelope((string) $body)];
                 $this->threads[$w]['messages'][] = $message;
 
-                return [201, ['w' => $w, 'seq' => $seq, 'at' => $message['at'], 'sha256' => $message['sha256'], 'verified' => $message['verified'], 'sealed' => $message['sealed'], 'count' => $seq, 'expire_at' => $thread['expire_at']] + (isset($thread['instance']) ? ['instance' => $thread['instance']] : []), []];
+                return [201, ['w' => $w, 'seq' => $seq, 'at' => $message['at'], 'sha256' => $message['sha256'], 'verified' => $message['verified'], 'sealed' => $message['sealed'], 'count' => $seq, 'expire_at' => $thread['expire_at']] + (isset($thread['instance']) ? ['instance' => $thread['instance']] : [])
+                    + (($this->threads[$w]['opened_via'] ?? null) === 'hosted' ? ['opened_via' => 'hosted', 'opened_via_note' => 'This inbox was opened through the hosted endpoint, which holds no key for whoever opened it.'] : []), []];
             }
             if ($method === 'GET' && $sub === '' && $this->down) {
                 return [503, ['error' => 'the fake will not read', 'fix' => 'ask again later'], []];
@@ -953,6 +956,7 @@ require __DIR__ . '/release-check-2026-11-14.inc.php';
 require __DIR__ . '/per-key.inc.php';
 require __DIR__ . '/transports.inc.php';
 require __DIR__ . '/transport-here.inc.php';
+require __DIR__ . '/readable.inc.php';
 $a->close();
 $b->close();
 Http::$override = null;

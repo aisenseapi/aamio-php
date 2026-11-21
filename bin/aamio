@@ -14,7 +14,10 @@ declare(strict_types=1);
  *   Verifyum's MCP server. For a copy of both on this machine, name both)
  *
  *   init | whoami | partner add NAME KEY | partner list | partner remove NAME
- *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] [--re SHA256]
+ *   lookup [NAME ...] [--wait N] | send TO TEXT [--data JSON] [--re SHA256] [--readable [--allow-secret]]
+ *   (--readable writes to an address whose owner holds no key, as an inbox opened through the hosted endpoint:
+ *   signed and not sealed, so the service can read it. One that carries a scope key, a read key or the private
+ *   key of this home is refused, unless --allow-secret)
  *   trace [WHO] [--limit N]   (what was sent to one counterpart and what came back, as hashes)
  *   read [--wait N] [--limit N] [--max-bytes N]
  *   (--max-bytes is per channel, and a message larger than it stays at the service, named in attention;
@@ -113,7 +116,7 @@ function csv(?string $text): ?array
     return array_values(array_filter(array_map('trim', explode(',', $text)), static fn (string $t): bool => $t !== ''));
 }
 
-[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'all', 'help', 'version', 'readable']);
+[$args, $opts] = parse(array_slice($argv, 1), ['no-archive', 'anchor', 'all', 'help', 'version', 'readable', 'allow-secret']);
 // An option that takes a value, given without one, is refused before anything
 // is read or written: `--home` alone would otherwise mean the default home.
 foreach (['home' => 'DIR', 'host' => 'URL', 'tags' => 'a,b'] as $takesValue => $what) {
@@ -226,7 +229,7 @@ if ($command !== 'addon') {
         'partner list' => [[], 0, [], []],
         'partner remove' => [['name'], 0, [], []],
         'lookup' => [null, 0, ['wait'], []],
-        'send' => [['to', 'text'], 0, ['data', 're'], []],
+        'send' => [['to', 'text'], 0, ['data', 're'], ['readable', 'allow-secret']],
         'read' => [[], 0, ['wait', 'limit', 'max-bytes'], []],
         'receipt' => [[], 0, ['channel'], ['anchor']],
         'outbox pending' => [[], 0, [], []],
@@ -612,7 +615,11 @@ try {
             // As it was given, objects as objects: as arrays, {"0": "a"} went
             // out as ["a"], and a value that was not an array not at all.
             $data = isset($opts['data']) ? Codec::jsonValue($checkedData) : null;
-            out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), $data, null, isset($opts['re']) ? (string) $opts['re'] : null));
+            if (isset($opts['allow-secret']) && !isset($opts['readable'])) {
+                throw new CodedInvalidArgument('invalid_arguments', '--allow-secret goes with --readable, and a sealed message needs no leave: it is sealed to the partner');
+            }
+            out($runtime->send((string) ($args[1] ?? fail('send TO TEXT')), (string) ($args[2] ?? fail('send TO TEXT')), $data, null, isset($opts['re']) ? (string) $opts['re'] : null,
+                isset($opts['readable']), isset($opts['allow-secret'])));
             break;
         case 'trace':
             try {

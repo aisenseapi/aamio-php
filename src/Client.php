@@ -24,6 +24,8 @@ final class Client
     private array $gates = [];
     /** @var array<string, array{0: int, 1: float}> X-Seconds-Left per address, and when it was read */
     private array $gateLeft = [];
+    /** @var array<string, ?string> what X-Opened-Via said per address whose gate was read: "hosted", or null */
+    private array $gateOpened = [];
     /**
      * How long a caller may be held for proof of work, in seconds, or null for
      * as long as it takes. The MCP server sets it, since its host cuts a tool
@@ -137,14 +139,25 @@ final class Client
         if ($status === 200 && is_string($left) && ctype_digit($left)) {
             $this->gateLeft[$w] = [(int) $left, microtime(true)];
         }
+        // How the inbox was opened, from X-Opened-Via, kept beside the gate:
+        // "hosted" for one opened through the hosted endpoint, whose owner may
+        // hold no key. A header for the same reason as the time left.
+        $opened = $headers['x-opened-via'] ?? null;
+        $this->gateOpened[$w] = $status === 200 && is_string($opened) && trim($opened) !== '' ? strtolower(trim($opened)) : null;
 
         return $this->gates[$w];
+    }
+
+    /** How the inbox at w was opened, as its gate said when it was last read here: "hosted", or null when it did not say. */
+    public function openedVia(string $w): ?string
+    {
+        return $this->gateOpened[$w] ?? null;
     }
 
     /** The gate kept for w, and the time it said, belong to an inbox that may not be there now. */
     public function forgetGate(string $w): void
     {
-        unset($this->gates[$w], $this->gateLeft[$w]);
+        unset($this->gates[$w], $this->gateLeft[$w], $this->gateOpened[$w]);
     }
 
     /**

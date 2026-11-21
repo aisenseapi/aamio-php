@@ -2841,17 +2841,133 @@ final class Runtime
      * It goes in the sealed body as re, so the other side can tell which of its
      * messages this is about.
      */
-    public function send(string $to, ?string $text = null, mixed $data = null, ?string $replyTo = null, ?string $answers = null): array
+    /**
+     * $readable sends to a write address whose owner holds no key this runtime
+     * knows, as an inbox opened through the hosted endpoint at aamio.at: signed
+     * and not sealed, so the service can read it, and so can whoever holds the
+     * inbox's read key. It is the user's choice, never the default. A readable
+     * message that carries something this home holds that reads, a scope's key,
+     * the read key of one of its threads or its private key, is not stored or
+     * sent, unless $allowSecret says the user wants exactly that.
+     */
+    public function send(string $to, ?string $text = null, mixed $data = null, ?string $replyTo = null, ?string $answers = null, bool $readable = false, bool $allowSecret = false): array
     {
         self::checkRe($answers);
         // A partner bound to a transport goes over it, and never over HTTPS instead.
         $bound = $this->boundPartner($to);
         if ($bound !== null) {
+            if ($readable) {
+                throw new CodedInvalidArgument('readable_with_key', $bound['name'] . ' is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at');
+            }
+
             return $this->sendCarried($bound, $text, $data, $answers);
+        }
+        if ($readable) {
+            return $this->sendSealed($this->readableAddress($to), null, null, $text, $data, $replyTo, null, $answers, $allowSecret);
         }
         [$w, $key, $partner] = $this->recipient($to);
 
         return $this->sendSealed($w, $key, $partner, $text, $data, $replyTo, null, $answers);
+    }
+
+    /**
+     * The write address a readable message goes to: one whose owner's key this
+     * runtime does not know. A partner, a key, or an address whose key is known
+     * is refused: a message there can be sealed, and a readable copy of it
+     * would be one nobody needed.
+     */
+    private function readableAddress(string $to): string
+    {
+        if (Address::isW($to)) {
+            if (($this->peers[$to] ?? null) !== null) {
+                throw new CodedInvalidArgument('readable_with_key', 'the key of address ' . $to . ' is known here, so a message to it goes sealed. Leave readable out');
+            }
+
+            return $to;
+        }
+        $partner = $this->partnerByName($to);
+        if ($partner === null && Codec::isKey($to)) {
+            $partner = $this->partnerByKey($to);
+        }
+        if ($partner !== null) {
+            // The book's name for them, never what was given: that may be a key.
+            throw new CodedInvalidArgument('readable_with_key', $partner['name'] . ' is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at');
+        }
+        // What was given is not said back: a key pasted where an address goes would be in the answer.
+        throw new CodedInvalidArgument('unknown_address', 'a readable message goes to a write address, 20 characters of a to z and 2 to 7, and what was given is not one');
+    }
+
+    /** @return list<array{0: string, 1: string}> what this home holds that reads something, as [what it is, the value]; the value is for comparing, never for saying */
+    private function secretsHeld(): array
+    {
+        $held = [];
+        foreach ($this->scopes as $scope) {
+            if (is_array($scope) && is_string($scope['key'] ?? null) && $scope['key'] !== '') {
+                $held[] = ['the key of scope ' . (string) ($scope['name'] ?? ''), $scope['key']];
+            }
+        }
+        foreach ($this->channels as $label => $channel) {
+            if ($channel instanceof Channel && $channel->readKey !== '') {
+                $held[] = [$label === 'inbox' ? 'the read key of your inbox' : 'the read key of channel ' . $label, $channel->readKey];
+            }
+        }
+        $held[] = ["this home's private key", bin2hex($this->keys->seed())];
+
+        return $held;
+    }
+
+    /** @return list<string> which of the secrets this home holds a message carries, by what they are; an exact copy, in any case, and a key written another way is not seen */
+    private function secretsIn(string $plaintext): array
+    {
+        $text = strtolower($plaintext);
+        $found = [];
+        foreach ($this->secretsHeld() as [$what, $value]) {
+            if (strlen($value) >= 16 && str_contains($text, strtolower($value)) && !in_array($what, $found, true)) {
+                $found[] = $what;
+            }
+        }
+
+        return $found;
+    }
+
+    /** How the inbox at w was opened, as its gate said when it was read here: "hosted", or null when it did not say. */
+    public function openedVia(string $w): ?string
+    {
+        return $this->client->openedVia($w);
+    }
+
+    /** A readable message that carries a secret this home holds stops here, before anything is stored, with what it carries named. */
+    private function stopSecrets(string $w, string $plaintext): void
+    {
+        $found = $this->secretsIn($plaintext);
+        if ($found === []) {
+            return;
+        }
+        $hosted = $this->openedVia($w) === 'hosted';
+        $where = $hosted ? 'The inbox at ' . $w . ' was opened through the hosted endpoint at aamio.at: its owner holds no key, so nothing written there can be sealed. ' : '';
+
+        throw new SecretInReadable(
+            'this readable message carries ' . implode(' and ', $found) . ', and a readable message is signed and not sealed: the service can read it, and so can whoever holds the read key of ' . $w . '. ' . $where
+            . 'Nothing was stored or sent. Leave it out, or share a scope with a partner sealed, with aamio scope share. If the user wants this sent as it is, '
+            . 'the user says so: on the command line with --allow-secret, and over MCP in the dialog their app shows, never on an agent\'s word.',
+            $found,
+            $w,
+            $hosted,
+        );
+    }
+
+    /** What a readable send says beside its answer: that it went readable, how the inbox was opened when known, and what that means. */
+    private function readableSaid(string $w, mixed $result = null): array
+    {
+        $opened = is_array($result) && is_string($result['opened_via'] ?? null) && $result['opened_via'] !== '' ? $result['opened_via'] : $this->openedVia($w);
+        $said = ['readable' => true];
+        if ($opened !== null) {
+            $said['opened_via'] = $opened;
+        }
+        $said['readable_note'] = 'Sent signed and not sealed: the service can read it, and so can whoever holds the read key of ' . $w . '.'
+            . ($opened === 'hosted' ? ' That inbox was opened through the hosted endpoint at aamio.at, whose owner holds no key: send no secret there.' : '');
+
+        return $said;
     }
 
     /**
@@ -2883,7 +2999,7 @@ final class Runtime
                 // text or data is the dead end an agent on MCP walks into: the
                 // tool that opens a channel returns an address, and nothing here
                 // learns whose it is from reading it (item 5 of the round-2 list).
-                throw new CodedRuntime('unknown_address', 'no key known for address ' . $to . '. A runtime learns whose an address is from presence, or from reply_to or channel in a verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its reply_to, or ask the owner to hand the address over: aamio_open_channel with to, or aamio board channel KEY --reply-to ADDRESS on the command line');
+                throw new CodedRuntime('unknown_address', 'no key known for address ' . $to . '. A runtime learns whose an address is from presence, or from reply_to or channel in a verified message; one pasted into text or data binds nothing. Send to the partner by name, answer a message at its reply_to, or ask the owner to hand the address over: aamio_open_channel with to, or aamio board channel KEY --reply-to ADDRESS on the command line. If its owner holds no key, as an inbox opened through the hosted endpoint at aamio.at, write to it readable: signed and not sealed, so the service can read it (readable over MCP, --readable on the command line)');
             }
 
             return [$to, $key, null];
@@ -2900,12 +3016,14 @@ final class Runtime
     }
 
     /**
-     * One message sealed to $key and written to $w. $partner is the name
-     * presence is asked again with when that address has gone, and null for
-     * an address given as it is. $archivedData stands in for $data in the
-     * archive, for a message carrying what no file should.
+     * One message sealed to $key and written to $w, or readable when $key is
+     * null. $partner is the name presence is asked again with when that
+     * address has gone, and null for an address given as it is. $archivedData
+     * stands in for $data in the archive, for a message carrying what no file
+     * should. A readable message is the plain body, signed: it is checked for
+     * the secrets this home holds before an entry exists, unless $allowSecret.
      */
-    private function sendSealed(string $w, string $key, ?string $partner, ?string $text = null, mixed $data = null, ?string $replyTo = null, ?array $archivedData = null, ?string $answers = null): array
+    private function sendSealed(string $w, ?string $key, ?string $partner, ?string $text = null, mixed $data = null, ?string $replyTo = null, ?array $archivedData = null, ?string $answers = null, bool $allowSecret = false): array
     {
         // What the inbox asks of writers is read before anything is stored,
         // with how long it still takes writes, so work that would not be done
@@ -2930,8 +3048,23 @@ final class Runtime
             $body['data'] = $data;
         }
         $body += $this->conversation($key, $answers);
+        if ($key === null) {
+            // Sealing gives each message bytes of its own. A readable one is
+            // given them here, so the same words sent twice are two messages,
+            // not a replay of one, while a retry from the outbox sends the same bytes.
+            $body['nonce'] = bin2hex(random_bytes(16));
+        }
         $plaintext = Codec::json($body);
-        $envelope = $this->keys->seal($key, $plaintext);
+        if ($key === null) {
+            // Readable: the body itself, signed and not sealed. The bytes that
+            // would go are the bytes looked through, before anything is stored.
+            if (!$allowSecret) {
+                $this->stopSecrets($w, $plaintext);
+            }
+            $envelope = $plaintext;
+        } else {
+            $envelope = $this->keys->seal($key, $plaintext);
+        }
         $entry = $this->outboxAdd($w, $key, $envelope, $body);
         [$status, $result] = $this->deliver($entry);
         if (in_array($status, [404, 410], true)) {
@@ -2946,7 +3079,10 @@ final class Runtime
         }
         $entry = $this->outbox[$entry['id']];
         $archived = $archivedData === null ? $body : ['data' => $archivedData] + $body;
-        $record = ['kind' => 'sent', 'at' => time(), 'to' => $this->nameForKey($key) ?? $key, 'w' => $entry['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $archived];
+        $record = ['kind' => 'sent', 'at' => time(), 'to' => $key === null ? $w : ($this->nameForKey($key) ?? $key), 'w' => $entry['w'], 'status' => $status, 'message_id' => $entry['id'], 'outcome' => $entry['status'], 'body' => $archived];
+        if ($key === null) {
+            $record['readable'] = true;
+        }
         // The archive is a record of the send, not the send. A failed write
         // after a 201 threw here, and the caller heard an error for a message
         // that was delivered, and might send it again as new bytes: a real
@@ -2974,6 +3110,9 @@ final class Runtime
         }
         if (($entry['trace_error'] ?? null) !== null) {
             $sent['trace_error'] = $entry['trace_error'];
+        }
+        if ($key === null) {
+            $sent += $this->readableSaid($w, $result);
         }
 
         return $sent;
@@ -3020,7 +3159,7 @@ final class Runtime
         $this->client->forgetGate($w);
     }
 
-    private function outboxAdd(string $w, string $key, string $envelope, array $body, ?string $replaces = null): array
+    private function outboxAdd(string $w, ?string $key, string $envelope, array $body, ?string $replaces = null): array
     {
         // Every send passes here, so a message too large for any inbox stops
         // here, before an entry exists, a byte leaves or a gate is worked for.
@@ -4525,7 +4664,7 @@ final class Runtime
     }
 
     /** The two fields a message carries about the conversation it is part of. */
-    private function conversation(string $key, ?string $answers = null): array
+    private function conversation(?string $key, ?string $answers = null): array
     {
         $fields = [];
         if ($answers !== null) {
@@ -4533,8 +4672,9 @@ final class Runtime
         }
         // seen is the last message from this key that was read here and could be
         // opened. A trace that cannot say leaves it out, and never stops a send.
+        // A readable message has no key, and so no seen.
         try {
-            $last = $this->traces[$key]['last_read'] ?? null;
+            $last = $key === null ? null : ($this->traces[$key]['last_read'] ?? null);
             if (is_array($last) && self::isMessageHash($last['sha256'] ?? null)) {
                 $fields['seen'] = $last['sha256'];
             }

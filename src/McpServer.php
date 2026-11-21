@@ -38,6 +38,8 @@ final class McpServer
     private const CACHE_MS = 3600000;
     /** aamio_partner_add asks the user one question, under this name in inputRequests. */
     public const PARTNER_QUESTION = 'aamio_partner_key';
+    /** aamio_send asks the user whether a readable message may carry a secret, under this name. */
+    public const SECRET_QUESTION = 'aamio_send_secret';
     /**
      * How long an answer to that question may take to come back over
      * 2026-07-28, in seconds: time for a person to find a key, and not so long
@@ -512,6 +514,81 @@ final class McpServer
     }
 
     /** aamio_partner_add: the name from the model, the key from the user, and nothing added without both. */
+    /** The form the user is shown when a readable message carries a secret: what it carries, by name, and one box to tick. */
+    private function secretQuestion(array $found, string $w, bool $hosted): array
+    {
+        $message = 'Your agent asks to send a readable message to ' . $w . ' that carries ' . implode(' and ', $found) . '. A readable message is signed and not sealed: the service can read it, '
+            . 'and so can whoever holds the read key of that inbox.' . ($hosted ? ' That inbox was opened through the hosted endpoint at aamio.at: its owner holds no key, so nothing written there can be sealed.' : '')
+            . ' Tick the box only if you want exactly this sent as it is; otherwise decline, and nothing is sent.';
+        $send = ['type' => 'boolean', 'title' => 'Send it as it is', 'description' => 'Ticked and accepted, the message goes readable with what it carries. Anything else sends nothing.', 'default' => false];
+
+        return ['message' => $message, 'requestedSchema' => ['type' => 'object', 'properties' => ['send' => $send], 'required' => ['send']]];
+    }
+
+    /** aamio_send: sealed to a partner, or readable to an address without a key; a readable message carrying a secret goes only on the user's yes. */
+    private function sendMessage(array $a, ?callable $ask): array
+    {
+        $r = $this->runtime;
+        // Whether a secret may go is the user's to say. An argument for it would be the model's.
+        if (array_key_exists('allow_secret', $a)) {
+            return self::resultOf([
+                'error' => "aamio_send takes no allow_secret: whether a readable message may carry a secret is the user's to say, in a dialog this server shows them",
+                'error_code' => 'invalid_arguments',
+                'fix' => 'Call aamio_send without it. When a readable message carries a secret this home holds, the user is asked.',
+            ], true);
+        }
+        $readable = $a['readable'] ?? null;
+        if ($readable !== null && !is_bool($readable)) {
+            return self::resultOf(['error' => 'readable is true or false', 'error_code' => 'invalid_arguments', 'fix' => 'Pass true to write signed and not sealed to an address whose owner holds no key, or leave it out.', 'given' => $readable], true);
+        }
+        $to = self::text($a, 'to', true);
+        $text = self::text($a, 'text');
+        $data = self::data($a);
+        $re = self::text($a, 're');
+        try {
+            return self::resultOf($r->send((string) $to, $text, $data, null, $re, $readable === true));
+        } catch (SecretInReadable $held) {
+            $carried = $held->found;
+            $where = $held->w;
+            $hosted = $held->hosted;
+        }
+        $instead = 'Leave it out of the message. If the user wants it sent as it is, they do it themselves on the command line with --readable --allow-secret, while this server is stopped.';
+        if ($ask === null) {
+            return self::resultOf([
+                'sent' => false,
+                'error' => 'this readable message carries ' . implode(' and ', $carried) . ', and this app did not say it can show the user a form (the elicitation capability of MCP), so the user was not asked and nothing was sent',
+                'error_code' => 'secret_in_readable',
+                'carries' => $carried,
+                'fix' => $instead,
+            ], true);
+        }
+        // The answer belongs to this message: the same address and the same words, and no other.
+        $about = substr(hash('sha256', (string) json_encode(['data' => $data, 're' => $re, 'readable' => true, 'text' => $text, 'to' => $to], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)), 0, 32);
+        $asked = $ask($this->secretQuestion($carried, $where, $hosted), $about, 'aamio_send', self::SECRET_QUESTION);
+        if (isset($asked['no_dialog'])) {
+            return self::resultOf([
+                'sent' => false,
+                'error' => $asked['no_dialog'] . ', so nothing was sent',
+                'error_code' => 'no_dialog',
+                'carries' => $carried,
+                'fix' => 'Call aamio_send again to ask the user again. ' . $instead,
+            ], true);
+        }
+        $answer = is_array($asked['answer'] ?? null) ? $asked['answer'] : [];
+        $action = $answer['action'] ?? null;
+        $content = is_array($answer['content'] ?? null) ? $answer['content'] : [];
+        if ($action !== 'accept' || ($content['send'] ?? null) !== true) {
+            return self::resultOf([
+                'sent' => false,
+                'action' => in_array($action, ['accept', 'decline'], true) ? $action : 'cancel',
+                'carries' => $carried,
+                'note' => 'The user did not say yes, so nothing was sent. Leave the secret out, and do not ask again unless the user says so.',
+            ]);
+        }
+
+        return self::resultOf($r->send((string) $to, $text, $data, null, $re, true, true));
+    }
+
     private function addPartner(array $arguments, ?callable $ask): array
     {
         $r = $this->runtime;
@@ -632,7 +709,7 @@ final class McpServer
                 case 'aamio_presence_lookup':
                     return self::resultOf($r->lookup(self::strings($a, 'names'), self::number($a, 'wait')));
                 case 'aamio_send':
-                    return self::resultOf($r->send(self::text($a, 'to', true), self::text($a, 'text'), self::data($a), null, self::text($a, 're')));
+                    return $this->sendMessage($a, $ask);
                 case 'aamio_trace':
                     return self::resultOf($r->trace(self::text($a, 'who'), isset($a['limit']) ? self::number($a, 'limit') : 20));
                 case 'aamio_read':
