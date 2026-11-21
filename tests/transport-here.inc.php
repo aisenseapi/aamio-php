@@ -722,6 +722,37 @@ file_put_contents(__DIR__ . "/ended", $version . "\n", FILE_APPEND);
             && !is_file($radio . DIRECTORY_SEPARATOR . 'started') && (new TransportConfig($a->home))->here() === [],
             'an add-on that needs media gets the enabled transports by name, from the manifests, and nothing is started or kept', json_encode($media));
         $a->close();
+
+        // Two transports, and a start from the log of the first while it starts: the round inside starts the second, and
+        // the round outside, reading entries it had copied before, started it again. Each round reads every entry as it is
+        // now (a review of 21 November 2026). Last in this block, since it changes AAMIO_ADDONS, which finally puts back.
+        $twoStarts = $hRoot . DIRECTORY_SEPARATOR . 'two-starts';
+        foreach (['alpha', 'beta'] as $name) {
+            $package($twoStarts . DIRECTORY_SEPARATOR . $name, $name, '0.1.0');
+        }
+        putenv('AAMIO_ADDONS=' . $twoStarts . DIRECTORY_SEPARATOR . 'alpha,' . $twoStarts . DIRECTORY_SEPARATOR . 'beta');
+        Addons::reset();
+        $nested = null;
+        $nestedCalls = 0;
+        $a = $opened[] = new Runtime($twoStarts . DIRECTORY_SEPARATOR . 'a', $nowhere, null, true, static function (string $line) use (&$nested, &$nestedCalls): void {
+            if ($nested !== null && $nestedCalls === 0 && str_starts_with($line, 'transport alpha: alpha: ')) {
+                $nestedCalls++;
+                $nested->start();
+            }
+        });
+        $b = $opened[] = new Runtime($twoStarts . DIRECTORY_SEPARATOR . 'b', $nowhere, null, true, $quietly);
+        $a->partnerAdd('b', $b->keys->public);
+        Transports::bind($a, 'b', 'alpha');
+        Transports::bind($a, 'b', 'beta');
+        $nested = $a->transportService();
+        $nested->start();
+        $startedOf = static fn (string $name): string => (string) @file_get_contents($twoStarts . DIRECTORY_SEPARATOR . $name . DIRECTORY_SEPARATOR . 'started');
+        $check($nestedCalls === 1 && $nested->starting === [] && ($nested->running['alpha']['process'] ?? null) !== null && ($nested->running['beta']['process'] ?? null) !== null
+            && $startedOf('alpha') === "0.1.0\n" && $startedOf('beta') === "0.1.0\n",
+            'a start from the log of one transport while it starts starts the other once, and both run', json_encode([$nestedCalls, $startedOf('alpha'), $startedOf('beta')]));
+        $nested = null;
+        $a->close();
+        $b->close();
     } finally {
         foreach ($opened as $runtime) {
             $runtime->close();

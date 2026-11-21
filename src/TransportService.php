@@ -281,8 +281,9 @@ final class TransportService
      * there.
      *
      * This runtime has no threads, so a lookup never overlaps another one, the ordinary start or the stop, as two lookups
-     * did in aamio-js (a review of 20 November 2026). Only a call from inside a lookup, as from the log, comes while one
-     * runs, and it follows the same rules.
+     * did in aamio-js (a review of 20 November 2026). Only a call from a callback, as the log, comes while a lookup or the
+     * ordinary start runs, and it follows the same rules: it starts nothing beside the start under way (a review of
+     * 21 November 2026).
      *
      * @return array{0: ?list<string>, 1: string}
      */
