@@ -218,6 +218,59 @@ $check(($first['result']['resultType'] ?? null) === 'input_required' && isset($f
     && ($second['result']['structuredContent']['readable'] ?? null) === true && count($readablePosted($hw)) === $posts + 1,
     'over 2026-07-28 the question is the result, and the yes belongs to that message and no other', json_encode([$first['result']['resultType'] ?? null, $misused['result']['structuredContent'] ?? null, $second['result']['structuredContent'] ?? null]));
 
+// A no stands although the home no longer holds the key: the answer is read before anything that sends, and the
+// scope that went while the question was open does not make the message pass (a review of 21 November 2026).
+$postsTo = static fn (string $w): int => count(array_filter($fake->calls, static fn (array $call): bool => $call[0] === 'POST' && str_contains($call[1], '/' . $w)));
+foreach (['decline' => ['action' => 'decline'], 'cancel' => ['action' => 'cancel'], 'an unticked accept' => ['action' => 'accept', 'content' => ['send' => false]]] as $how => $no) {
+    [$nr, $nw] = $readableWriter();
+    $noServer = new McpServer($nr);
+    $noKey = $readableScope($nr);
+    $noArguments = ['to' => $nw, 'text' => 'the key is ' . $noKey, 'readable' => true];
+    $asking = $noServer->handle($modern(['name' => 'aamio_send', 'arguments' => $noArguments], 1));
+    $nr->scopeRemove('team');
+    $outboxBefore = $nr->outbox;
+    $postsBefore = $postsTo($nw);
+    $answered = $noServer->handle($modern(['name' => 'aamio_send', 'arguments' => $noArguments, 'inputResponses' => [McpServer::SECRET_QUESTION => $no], 'requestState' => $asking['result']['requestState'] ?? null], 2));
+    $check(($asking['result']['resultType'] ?? null) === 'input_required' && ($answered['result']['structuredContent']['sent'] ?? null) === false
+        && $postsTo($nw) === $postsBefore && $nr->outbox === $outboxBefore && $readablePosted($nw) === [],
+        'over 2026-07-28 ' . $how . ' stands although the home no longer holds the key, and nothing goes to the service', json_encode($answered['result']['structuredContent'] ?? null));
+    $nr->close();
+}
+
+[$yr, $yw] = $readableWriter();
+$yesServer = new McpServer($yr);
+$yesKey = $readableScope($yr);
+$yesArguments = ['to' => $yw, 'text' => 'the key is ' . $yesKey, 'readable' => true];
+$asking = $yesServer->handle($modern(['name' => 'aamio_send', 'arguments' => $yesArguments], 1));
+$yr->scopeRemove('team');
+$sentAfter = $yesServer->handle($modern(['name' => 'aamio_send', 'arguments' => $yesArguments, 'inputResponses' => $yesAnswer, 'requestState' => $asking['result']['requestState'] ?? null], 2));
+$check(($sentAfter['result']['structuredContent']['readable'] ?? null) === true && count($readablePosted($yw)) === 1, 'and a yes still sends it when the home no longer holds the key');
+
+$yesKey = $readableScope($yr, 'second');
+$yesArguments = ['to' => $yw, 'text' => 'the key is ' . $yesKey, 'readable' => true];
+$about = substr(hash('sha256', (string) json_encode(['data' => null, 're' => null, 'readable' => true, 'text' => $yesArguments['text'], 'to' => $yw], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)), 0, 32);
+$late = $yesServer->handle($modern(['name' => 'aamio_send', 'arguments' => $yesArguments, 'inputResponses' => $yesAnswer, 'requestState' => $yesServer->sealState($about, time() - 1, 'aamio_send')], 3));
+$fresh = $yesServer->handle($modern(['name' => 'aamio_send', 'arguments' => $yesArguments], 4))['result']['requestState'] ?? null;
+$firstYes = $yesServer->handle($modern(['name' => 'aamio_send', 'arguments' => $yesArguments, 'inputResponses' => $yesAnswer, 'requestState' => $fresh], 5));
+$againYes = $yesServer->handle($modern(['name' => 'aamio_send', 'arguments' => $yesArguments, 'inputResponses' => $yesAnswer, 'requestState' => $fresh], 6));
+$check(($late['result']['structuredContent']['error_code'] ?? null) === 'no_dialog' && ($late['result']['structuredContent']['sent'] ?? null) === false
+    && ($firstYes['result']['structuredContent']['readable'] ?? null) === true
+    && ($againYes['result']['structuredContent']['error_code'] ?? null) === 'no_dialog' && count($readablePosted($yw)) === 2,
+    'an answer out of its time, or one used before, sends nothing', json_encode([$late['result']['structuredContent'] ?? null, $againYes['result']['structuredContent'] ?? null]));
+
+$yr->partnerAdd($yw, Keys::generate()->public);
+try {
+    $yr->send($yw, 'hei', null, null, null, true);
+    $namedLike = 'sent';
+} catch (\Throwable $error) {
+    $namedLike = Runtime::errorCode($error);
+}
+$check($namedLike === 'readable_with_key' && count($readablePosted($yw)) === 2, 'a partner named like an address is not written to readable', $namedLike);
+$yr->close();
+
+$instructions = json_decode((string) file_get_contents(dirname(__DIR__) . '/src/mcp-tools.json'), true)['instructions'] ?? '';
+$check(str_contains($instructions, "unsealed with readable, where a secret goes only on the user's yes"), "the instructions say readable and the user's yes");
+
 $tools = array_column(json_decode((string) file_get_contents(dirname(__DIR__) . '/src/mcp-tools.json'), true)['tools'], null, 'name');
 $sendTool = $tools['aamio_send'] ?? [];
 $check(($sendTool['inputSchema']['properties']['readable']['type'] ?? null) === 'boolean' && !isset($sendTool['inputSchema']['properties']['allow_secret'])

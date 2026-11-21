@@ -82,6 +82,9 @@ final class McpServer
     /** @var array<string, array> The core's tools by name, as mcp-tools.json has them, to check a call's arguments against. */
     private array $core = [];
 
+    /** Set for the call being served: it comes back with a question's state or an answer to the secret question. */
+    private bool $answering = false;
+
     public function __construct(private readonly Runtime $runtime)
     {
         $spec = json_decode((string) file_get_contents(__DIR__ . '/mcp-tools.json'), true, 512, JSON_THROW_ON_ERROR);
@@ -545,12 +548,20 @@ final class McpServer
         $text = self::text($a, 'text');
         $data = self::data($a);
         $re = self::text($a, 're');
-        try {
-            return self::resultOf($r->send((string) $to, $text, $data, null, $re, $readable === true));
-        } catch (SecretInReadable $held) {
-            $carried = $held->found;
-            $where = $held->w;
-            $hosted = $held->hosted;
+        if ($readable !== true) {
+            return self::resultOf($r->send((string) $to, $text, $data, null, $re));
+        }
+        // A call that comes back with an answer is answered from it first, before anything that sends: a no stands
+        // although the home no longer holds what the message carried when the user was asked. Sending first and
+        // asking only on a refusal let such a message go with the no unread (a review of 21 November 2026). A first
+        // call looks at what it carries, and asks before anything is stored.
+        $resumed = $ask !== null && $this->answering;
+        $check = $r->readableCheck((string) $to, $text, $data);
+        $carried = $check['carries'];
+        $where = $check['w'];
+        $hosted = $check['hosted'];
+        if ($carried === [] && !$resumed) {
+            return self::resultOf($r->send((string) $to, $text, $data, null, $re, true));
         }
         $instead = 'Leave it out of the message. If the user wants it sent as it is, they do it themselves on the command line with --readable --allow-secret, while this server is stopped.';
         if ($ask === null) {
@@ -564,7 +575,7 @@ final class McpServer
         }
         // The answer belongs to this message: the same address and the same words, and no other.
         $about = substr(hash('sha256', (string) json_encode(['data' => $data, 're' => $re, 'readable' => true, 'text' => $text, 'to' => $to], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)), 0, 32);
-        $asked = $ask($this->secretQuestion($carried, $where, $hosted), $about, 'aamio_send', self::SECRET_QUESTION);
+        $asked = $ask($this->secretQuestion($carried !== [] ? $carried : ['what it carried when you were asked'], $where, $hosted), $about, 'aamio_send', self::SECRET_QUESTION);
         if (isset($asked['no_dialog'])) {
             return self::resultOf([
                 'sent' => false,
@@ -1031,6 +1042,10 @@ final class McpServer
                         $arguments[$field] = (int) $arguments[$field];
                     }
                 }
+                // Whether this call comes back with a question's state or an answer to the secret question: then
+                // aamio_send reads the answer before anything that sends (a review of 21 November 2026).
+                $responses = $params['inputResponses'] ?? null;
+                $this->answering = $version === self::MODERN && (array_key_exists('requestState', $params) || (is_array($responses) && array_key_exists(self::SECRET_QUESTION, $responses)));
                 try {
                     $result = $this->dispatch($name, $arguments, $this->asker($params, $version, $id));
                 } catch (McpInterrupt $interrupt) {
@@ -1040,6 +1055,9 @@ final class McpServer
                     // the input ended, while the user was being asked, and a
                     // cancelled request is not answered.
                     return $interrupt->result === null ? null : ['jsonrpc' => '2.0', 'id' => $id, 'result' => $interrupt->result];
+                } finally {
+                    // For this call only: a call made straight to dispatch brings no answer.
+                    $this->answering = false;
                 }
                 if ($result === null) {
                     return ['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => -32602, 'message' => 'Unknown tool: ' . $name]];

@@ -2878,14 +2878,19 @@ final class Runtime
      */
     private function readableAddress(string $to): string
     {
+        $partner = $this->partnerByName($to);
         if (Address::isW($to)) {
             if (($this->peers[$to] ?? null) !== null) {
                 throw new CodedInvalidArgument('readable_with_key', 'the key of address ' . $to . ' is known here, so a message to it goes sealed. Leave readable out');
             }
+            // A partner may be called by twenty letters that read as an address. Taken as one, a message meant for
+            // them would go readable to an address nobody named (a review of 21 November 2026).
+            if ($partner !== null) {
+                throw new CodedInvalidArgument('readable_with_key', $to . ' is the name of a partner as well as the shape of an address, and what goes to a partner is sealed to their key. Leave readable out, or give the address of the inbox itself');
+            }
 
             return $to;
         }
-        $partner = $this->partnerByName($to);
         if ($partner === null && Codec::isKey($to)) {
             $partner = $this->partnerByKey($to);
         }
@@ -2934,6 +2939,27 @@ final class Runtime
     public function openedVia(string $w): ?string
     {
         return $this->client->openedVia($w);
+    }
+
+    /**
+     * What a readable message to $to would carry of this home's secrets, and
+     * how the inbox there was opened: ['w', 'carries', 'hosted']. Nothing is
+     * stored or sent. The recipient is taken as a readable send takes it, and
+     * the gate is read as a send reads it first, which also says how the inbox
+     * was opened. carries names the secrets, never their values. A send looks
+     * again at the bytes it sends; this is for asking the user before anything
+     * that sends is called.
+     */
+    public function readableCheck(string $to, ?string $text = null, mixed $data = null): array
+    {
+        $bound = $this->boundPartner($to);
+        if ($bound !== null) {
+            throw new CodedInvalidArgument('readable_with_key', $bound['name'] . ' is a partner, and what goes to a partner is sealed to their key. Leave readable out: it is for an inbox whose owner holds no key, as one opened through the hosted endpoint at aamio.at');
+        }
+        $w = $this->readableAddress($to);
+        $this->gateFor($w);
+
+        return ['w' => $w, 'carries' => $this->secretsIn(Codec::json(['text' => $text, 'data' => $data])), 'hosted' => $this->openedVia($w) === 'hosted'];
     }
 
     /** A readable message that carries a secret this home holds stops here, before anything is stored, with what it carries named. */
