@@ -504,6 +504,7 @@ while (($line = fgets(STDIN)) !== false) {
         break;
     }
 }
+file_put_contents(__DIR__ . "/ended", $version . "\n", FILE_APPEND);
 ');
         };
         $mute = $hRoot . DIRECTORY_SEPARATOR . 'mute';
@@ -615,14 +616,59 @@ while (($line = fgets(STDIN)) !== false) {
         $letGo = null;
         $a->close();
 
+        // The ordinary start, stopped from the log as the transport starts. The stop did not know the start, which then
+        // took its process into an entry the stop had emptied, so the child ran on after the owner let go of the home
+        // (a review of 21 November 2026). Now the stop ends it, and nothing of it is left when start returns.
+        @mkdir($hRoot . DIRECTORY_SEPARATOR . 'stop-ordinary', 0700, true);
+        $letGo = null;
+        $stops = 0;
+        $a = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'stop-ordinary' . DIRECTORY_SEPARATOR . 'a', $nowhere, null, true, static function (string $line) use (&$letGo, &$stops): void {
+            if ($letGo !== null && $stops === 0 && str_starts_with($line, 'transport mute: mute: ')) {
+                $stops++;
+                $letGo->stop();
+            }
+        });
+        $b = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'stop-ordinary' . DIRECTORY_SEPARATOR . 'b', $nowhere, null, true, $quietly);
+        $a->partnerAdd('b', $b->keys->public);
+        Transports::bind($a, 'b', 'mute');
+        $endedBefore = (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'ended');
+        $letGo = $a->transportService();
+        $thrown = null;
+        try {
+            $letGo->start();
+        } catch (\Throwable $error) {
+            $thrown = $error;
+        }
+        $check($thrown === null && $stops === 1 && $letGo->running === [] && $letGo->starting === []
+            && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'ended') === $endedBefore . "0.3.0\n",
+            'a stop from the log while a transport starts ends the start, and its process has ended when start returns', json_encode([$thrown?->getMessage(), array_keys($letGo->running)]));
+        $letGo = null;
+        $a->close();
+        $b->close();
+
+        // Killed, as B2 says: SIGKILL where SIGTERM can be caught, and proc_close then waited with no end (a review of
+        // 21 November 2026). Windows ends a process whatever the signal, so this is a POSIX check.
+        if (PHP_OS_FAMILY !== 'Windows') {
+            $describe = json_encode(['t' => 'describe', 'name' => 'stubborn', 'version' => '0.1.0', 'aamio_addon' => 3, 'medium' => 'stubborn', 'properties' => ['max_frame_up' => 100,
+                'max_frame_down' => 100, 'rate_up' => 1000, 'rate_down' => 1000, 'direction' => 'duplex', 'addressing' => 'none', 'link_ack' => false, 'airtime' => null,
+                'metadata_visible_to' => 'range', 'medium_encrypts' => false]]);
+            $stubborn = new TransportProcess('stubborn', '0.1.0', ['sh', '-c', 'trap "" TERM; read hello; printf "%s\n" "$DESCRIBE"; while :; do sleep 0.2; done'], null,
+                ['PATH' => (string) getenv('PATH'), 'DESCRIBE' => (string) $describe]);
+            $stubborn->start('0.0.0-test', 'php', sys_get_temp_dir());
+            $began = hrtime(true) / 1e9;
+            $stubborn->stop();
+            $check(hrtime(true) / 1e9 - $began < 8, 'a transport that ignores SIGTERM is killed after its five seconds, and stop returns');
+        }
+
         // A transport service made for the first time after the close starts out stopped: made fresh there, a lookup through
         // it could still start a transport in a home another runtime may own now (a review of 20 November 2026).
         @mkdir($hRoot . DIRECTORY_SEPARATOR . 'closed-first', 0700, true);
+        $startedBefore = (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started');
         $a = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'closed-first' . DIRECTORY_SEPARATOR . 'a', $nowhere, null, true, $quietly);
         $a->close();
         $after = $a->transportService();
         $check($after->learnHere('mute') === [null, 'stopping'] && $after->start()->running === []
-            && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $starts . "0.3.0\n" && (new TransportConfig($a->home))->here() === [],
+            && (string) @file_get_contents($mute . DIRECTORY_SEPARATOR . 'started') === $startedBefore && (new TransportConfig($a->home))->here() === [],
             'a transport service made first after the close is stopped from the start, and a lookup through it starts nothing', json_encode($after->running));
 
         // An empty list says the same as nothing said: transport here answers it alike, and names no address.

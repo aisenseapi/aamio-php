@@ -90,6 +90,13 @@ final class TransportProcess
     public bool $readied = false;
     /** @var array{0: float, 1: string, 2: ?string}|null the clock, code and message of the latest error it gave for a frame */
     public ?array $lastError = null;
+    /**
+     * stop has been called: the process is never started after it, and a start under way ends. A callback from inside
+     * start, as the log, can stop it (a review of 21 November 2026).
+     */
+    private bool $stopped = false;
+    /** stop is under way: a second one, from a callback inside the first, leaves the stop to it. */
+    private bool $stopping = false;
 
     public function __construct(public readonly string $name, public readonly string $version, private array $command, private ?string $cwd, private array $env, ?callable $clock = null, ?callable $log = null)
     {
@@ -217,6 +224,9 @@ final class TransportProcess
     /** hello, and the describe that answers it. With $probe the transport is asked to take nothing of its medium in use (B3). */
     public function start(string $aamioVersion, string $runtime, string $stateDir, bool $probe = false): array
     {
+        if ($this->stopped) {
+            $this->fail(new TransportFailed('transport_down', 'stopped before it started'));
+        }
         $process = @proc_open($this->command, [0 => ['socket'], 1 => ['socket'], 2 => ['socket']], $pipes, $this->cwd, $this->env);
         if (!is_resource($process)) {
             $this->fail(new TransportFailed('transport_down', 'the process could not be started'));
@@ -242,6 +252,10 @@ final class TransportProcess
             // before, whatever is kept already.
             foreach ($this->heard(0.2) as $event) {
                 $this->early[] = $event;
+            }
+            if ($this->stopped) {
+                // Stopped from a callback while it waited for describe: the process is gone, and so is the start.
+                $this->fail(new TransportFailed('transport_down', 'stopped while it started'));
             }
         }
 
@@ -343,9 +357,11 @@ final class TransportProcess
      */
     public function stop(): void
     {
-        if ($this->process === null) {
+        $this->stopped = true;
+        if ($this->process === null || $this->stopping) {
             return;
         }
+        $this->stopping = true;
         // Lines not yet begun are withdrawn rather than waited for, and the stop line goes next.
         $kept = [];
         foreach ($this->out as $line) {
@@ -368,13 +384,17 @@ final class TransportProcess
             usleep(50000);
         }
         if (proc_get_status($this->process)['running'] ?? false) {
-            proc_terminate($this->process);
+            // Killed, as B2 says: SIGKILL on POSIX, where the default SIGTERM can be caught or held up by a cleanup
+            // that never ends, and proc_close then waited for it with no end (a review of 21 November 2026). Windows
+            // ends the process whatever the signal.
+            proc_terminate($this->process, 9);
         }
         foreach ($this->pipes as $pipe) {
             @fclose($pipe);
         }
         proc_close($this->process);
         $this->process = null;
+        $this->pipes = [];
     }
 
     // --------------------------------------------------- room and frames --
@@ -501,6 +521,10 @@ final class TransportProcess
             $seconds = (int) floor($timeout);
             if (@stream_select($read, $write, $except, $seconds, (int) (($timeout - $seconds) * 1e6)) > 0) {
                 foreach ($read as $stream) {
+                    if ($this->process === null) {
+                        // A callback from the line before stopped it, and its pipes are closed.
+                        break;
+                    }
                     $chunk = (string) @fread($stream, 65536);
                     if ($stream === $this->pipes[2]) {
                         $this->stderr($chunk);

@@ -33,6 +33,11 @@ final class TransportService
      * never beside its ordinary start, and none after the stop (a review of 20 November 2026)
      */
     public array $learning = [];
+    /**
+     * @var array<string, TransportProcess> an ordinary start under way, by transport name: known before its process can
+     * call back, so a stop from the log stops it too (a review of 21 November 2026)
+     */
+    public array $starting = [];
     /** The environment a transport's variables are read from: getenv(), unless a test or an embedder says otherwise. */
     public ?array $environ = null;
     private float $knownAt = 0.0;
@@ -139,7 +144,8 @@ final class TransportService
         }
         $this->add($this->wanted());
         $this->startDue();
-        $this->started = true;
+        // Not when a callback inside the start stopped the service: started is false from the stop on.
+        $this->started = !$this->stopped;
 
         return $this;
     }
@@ -310,6 +316,10 @@ final class TransportService
                 $process->poll(0.1);
             }
         } catch (TransportFailed $error) {
+            if ($this->stopped) {
+                // Ended by the stop, from a callback while it started: no failure of the transport.
+                return [null, 'stopping'];
+            }
             throw new CodedRuntime('transport_down', $name . ' did not start to say where it is reached: ' . $error->getMessage());
         } finally {
             $process->stop();
@@ -404,10 +414,20 @@ final class TransportService
         return false;
     }
 
+    /**
+     * Every transport that is due started. A callback from inside a start, as the log, can stop the service: the start is
+     * known to the stop before it begins, and after each callback the service checks that it still owns the transport.
+     * A close from the log stopped nothing that was starting, and the start then took the process back into an entry the
+     * stop had emptied (a review of 21 November 2026).
+     */
     private function startDue(): void
     {
         $now = self::now();
         foreach ($this->running as $name => $entry) {
+            $name = (string) $name;
+            if ($this->stopped) {
+                return;
+            }
             if ($entry['carrier'] !== null || $entry['manifest'] === null || $entry['down'] !== null || $now < $entry['next']) {
                 continue;
             }
@@ -419,27 +439,55 @@ final class TransportService
             $folder = Transports::workingFolder($this->runtime->home, $name);
             $process = new TransportProcess($name, $manifest->version, $manifest->startCommand(), $folder, Transports::environmentFor($manifest, $this->environ), null,
                 fn (string $line) => $this->runtime->logged($line));
+            $this->starting[$name] = $process;
             try {
                 $process->start(Http::VERSION, 'php', $folder);
-                $this->running[$name]['carrier'] = new Carrier($this->carry(), $process, fn (string $pk): array => $this->profileFor($pk), $this->knownFor($name),
-                    note: fn (string $text) => $this->runtime->notSentAgain((string) $name, $text), addresses: $this->addressesFor((string) $name),
-                    heard: fn (string $pk, string $address) => $this->heardFrom((string) $name, $pk, $address), nameOf: fn (string $pk): string => $this->nameOf($pk),
-                    onHere: fn (array $here) => $this->keepHere((string) $name, $manifest->medium, $here, $manifest->version),
+                if (!$this->owns($name)) {
+                    // Stopped, or no longer wanted, from a callback while it started: the next round sees which.
+                    $process->stop();
+                    continue;
+                }
+                $carrier = new Carrier($this->carry(), $process, fn (string $pk): array => $this->profileFor($pk), $this->knownFor($name),
+                    note: fn (string $text) => $this->runtime->notSentAgain($name, $text), addresses: $this->addressesFor($name),
+                    heard: fn (string $pk, string $address) => $this->heardFrom($name, $pk, $address), nameOf: fn (string $pk): string => $this->nameOf($pk),
+                    onHere: fn (array $here) => $this->keepHere($name, $manifest->medium, $here, $manifest->version),
                     log: fn (string $line) => $this->runtime->logged($line));
+                if (!$this->owns($name)) {
+                    $process->stop();
+                    continue;
+                }
+                $this->running[$name]['carrier'] = $carrier;
                 $this->running[$name]['process'] = $process;
-                $this->runtime->logged('transport ' . $name . ': up');
-                $this->checkWindows((string) $name, $this->running[$name]['carrier']);
             } catch (TransportFailed $error) {
                 $process->stop();
-                $this->crashed($name, $error);
+                if ($this->owns($name)) {
+                    $this->crashed($name, $error);
+                }
+                continue;
             } catch (\RuntimeException | \InvalidArgumentException $error) {
                 // Not the transport: the carrier state is closed after a write failed, or a profile cannot be read. It
                 // stays down with the reason rather than start again every second.
                 $process->stop();
-                $this->running[$name]['down'] = rtrim($error->getMessage(), '.') . '. It stays down until that is put right and aamio starts again';
-                $this->runtime->logged('transport ' . $name . ': down: ' . $this->running[$name]['down']);
+                if ($this->owns($name)) {
+                    $this->running[$name]['down'] = rtrim($error->getMessage(), '.') . '. It stays down until that is put right and aamio starts again';
+                    $this->runtime->logged('transport ' . $name . ': down: ' . $this->running[$name]['down']);
+                }
+                continue;
+            } finally {
+                unset($this->starting[$name]);
             }
+            $this->runtime->logged('transport ' . $name . ': up');
+            if (!$this->owns($name)) {
+                continue;
+            }
+            $this->checkWindows($name, $carrier);
         }
+    }
+
+    /** Whether the service still runs and still has this transport: a callback can have stopped it, or unbound it. */
+    private function owns(string $name): bool
+    {
+        return !$this->stopped && isset($this->running[$name]);
     }
 
     /**
@@ -493,6 +541,10 @@ final class TransportService
 
     private function crashed(string $name, \Throwable $error): void
     {
+        if ($this->stopped || !isset($this->running[$name])) {
+            // Stopped, or no longer wanted, from a callback meanwhile: nothing of it is left to count.
+            return;
+        }
         $entry = $this->running[$name];
         if ($entry['process'] !== null) {
             $entry['process']->stop();
@@ -527,6 +579,10 @@ final class TransportService
             $this->refresh();
         }
         foreach ($this->running as $name => $entry) {
+            if ($this->stopped) {
+                // Stopped from a callback in this round, as the log of a carrier.
+                return;
+            }
             if ($entry['carrier'] === null) {
                 continue;
             }
@@ -580,13 +636,20 @@ final class TransportService
     {
         // From here on nothing is added or started, not even for a moment (a review of 20 November 2026).
         $this->stopped = true;
-        foreach ($this->running as $entry) {
+        $running = $this->running;
+        $this->running = [];
+        $this->started = false;
+        foreach ($running as $entry) {
             if ($entry['process'] !== null) {
                 $entry['process']->stop();
             }
         }
-        $this->running = [];
-        $this->started = false;
+        // A start under way, ordinary or of a moment, can only be here when this stop came from a callback inside it:
+        // its process is stopped now, before the owner lets go of the home, and the start sees that it is (a review of
+        // 21 November 2026).
+        foreach ([...array_values($this->starting), ...array_values($this->learning)] as $process) {
+            $process->stop();
+        }
     }
 
     /** @return array<string, string> */
