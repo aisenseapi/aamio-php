@@ -2829,7 +2829,37 @@ final class Runtime
                 return [$entry['w'], $partner['key']];
             }
         }
-        throw new CodedRuntime('partner_offline', $partner['name'] . ' is not online right now');
+        throw new CodedRuntime('partner_offline', $this->offlineSaid($partner, isset($result['error']) ? (string) $result['error'] : null));
+    }
+
+    /**
+     * Why a partner was not found over the internet, and the way over a transport when one is enabled here and the partner
+     * is bound to none. A field test over sound, Bluetooth, QR and LoRa on 22 November 2026 sent to a device in earshot that
+     * was bound to no transport, and heard only that it was not online. A lookup that failed was said the same way here and
+     * in aamio-python, while the Node runtime said why. The same as aamio-python.
+     *
+     * @param array{name: string, key: string} $partner
+     */
+    private function offlineSaid(array $partner, ?string $failed): string
+    {
+        $name = $partner['name'];
+        $said = $name . ' is not online right now' . ($failed !== null && $failed !== '' ? ': ' . $failed : '');
+        try {
+            $enabled = array_keys($this->transportService()->manifests());
+            $bound = $this->boundPartner($partner['key']) !== null;
+        } catch (\Throwable) {
+            // The advice never stands in the way of the refusal it is added to.
+            return $said;
+        }
+        if ($enabled === [] || $bound) {
+            return $said;
+        }
+        $said .= '. ' . $name . ' is bound to no transport, so it was only looked up over the internet';
+        if (count($enabled) === 1) {
+            return $said . '. To reach ' . $name . ' over ' . $enabled[0] . ', which is enabled here: aamio transport bind ' . $name . ' ' . $enabled[0];
+        }
+
+        return $said . '. To reach ' . $name . ' over one of the transports enabled here, ' . implode(', ', $enabled) . ': aamio transport bind ' . $name . ' NAME';
     }
 
     // --------------------------------------------------------------- send --
@@ -5299,9 +5329,11 @@ final class Runtime
      * under the transport's name, added to what waits there unread.
      */
     /** What a transport has to tell the user, in attention under its name and the state given. */
-    public function noteTransport(string $transport, string $state, string $text): void
+    /** $adding puts the text after what waits unread under the same transport and state, unless it is there already. */
+    public function noteTransport(string $transport, string $state, string $text, bool $adding = false): void
     {
-        $this->noteTrouble($transport, $state, $text);
+        $earlier = $adding ? ($this->attention[$transport . '|' . $state] ?? null) : null;
+        $this->noteTrouble($transport, $state, $earlier === null || str_contains($earlier['what'], $text) ? $text : $earlier['what'] . ' ' . $text);
     }
 
     public function notSentAgain(string $transport, string $text): void

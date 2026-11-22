@@ -756,6 +756,20 @@ final class CarryState
     {
         $t = $this->tick($now);
         $got = Carry::read($envelope, $this->keys, $known, fn (string $pk, string $session): ?string => $this->bindingFor($pk, $session, $mono));
+        try {
+            return $this->taken($envelope, $got, $profile, $mono, $t, $rnd, $sealRnd);
+        } catch (CarryRefused $refused) {
+            // Refused after the sender was verified: who and in which session go with it, so the carrier can say it where
+            // the user sees it (A7). Until 22 November 2026 a refusal said nothing of whom it came from.
+            $refused->reading = $got;
+
+            throw $refused;
+        }
+    }
+
+    /** What A6 and A7 make of an envelope that was read and its sender verified. */
+    private function taken(string $envelope, array $got, array|\Closure $profile, float $mono, int $t, ?string $rnd, ?string $sealRnd): array
+    {
         if ($profile instanceof \Closure) {
             $profile = $profile($got['sender']);
         }

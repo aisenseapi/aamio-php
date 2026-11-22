@@ -67,6 +67,14 @@ final class Carrier
      * over the medium (A7), so every message after would be lost in it too. The next one asks for a new session.
      */
     public const UNANSWERED_TRIES = 3;
+    /** The newest refusal codes kept for a test or a log to read: in a long aamio serve the list grew for as long as it ran. */
+    public const REFUSALS_KEPT = 1000;
+    /** Refusals said once for each partner, session and code; emptied when it reaches this, so a line may come again. */
+    public const SAID_KEPT = 1024;
+    /** What was turned away before a sender was known is said at most this often, in seconds: anyone in range can send it. */
+    public const UNVERIFIED_SAID_EVERY = 60;
+    private const KIND_NAMES = [Carry::MESSAGE => 'a message', Carry::RECEIPT => 'a receipt', Carry::ASK => 'an ask', Carry::CHALLENGE => 'a challenge',
+        Carry::OPEN => 'an open', Carry::CLOSE => 'a close'];
 
     private CarryReassembly $reassembly;
     private int $frameLimit;
@@ -95,8 +103,13 @@ final class Carrier
     public array $answered = [];
     /** @var array<string, string> bin2hex of a partner's key => the transport address it was last heard from fresh, or the home kept from before */
     public array $addresses = [];
-    /** @var list<string> */
+    /** @var list<string> the newest codes */
     public array $refused = [];
+    /** @var array<string, true> partner, session and code of the refusals said once */
+    private array $refusalsSaid = [];
+    /** @var array<string, int> code => how many were turned away before a sender was known, not said yet */
+    private array $unverified = [];
+    private ?float $unverifiedSaidAt = null;
     private float $budget = self::UNVERIFIED_PER_SECOND;
     private float $budgetAt;
     private int $counter = 0;
@@ -114,6 +127,8 @@ final class Carrier
     private $nameOf;
     /** @var callable(string): void where the owner keeps its log */
     private $log;
+    /** @var callable(string, string): void what the user is to hear once, with a state of its own: a message refused in a session that has expired */
+    private $attention;
 
     /**
      * @param array|\Closure(string): array $profile one profile for every partner, or a function from a partner's key to its own
@@ -122,7 +137,8 @@ final class Carrier
      */
     public function __construct(private CarryState $state, private TransportProcess $process, array|\Closure $profile, public array $known,
         ?callable $clock = null, ?callable $wall = null, private float $retrySeconds = 2.0, private float $askRetrySeconds = 5.0, private int $tries = CarryState::TRIES_DEFAULT,
-        ?callable $note = null, ?array $addresses = null, ?callable $heard = null, ?callable $nameOf = null, ?callable $onHere = null, ?callable $log = null)
+        ?callable $note = null, ?array $addresses = null, ?callable $heard = null, ?callable $nameOf = null, ?callable $onHere = null, ?callable $log = null,
+        ?callable $attention = null)
     {
         $this->profileOf = $profile instanceof \Closure ? $profile : static fn (string $pk): array => $profile;
         $this->clock = $clock ?? static fn (): float => hrtime(true) / 1e9;
@@ -138,6 +154,7 @@ final class Carrier
         $this->nameOf = $nameOf ?? static fn (string $pk): string => substr(bin2hex($pk), 0, 8);
         $this->log = $log ?? static function (string $line): void {
         };
+        $this->attention = $attention ?? fn (string $state, string $text) => ($this->log)('transport ' . $process->name . ': ' . $text);
         $this->addresses = $addresses ?? [];
         $rateDown = $process->properties['rate_down'] ?? null;
         $frameDown = $process->properties['max_frame_down'] ?? null;
@@ -287,6 +304,67 @@ final class Carrier
         return max(1, (int) (($this->profileOf)($pk)['challenge_window'] / max($this->retrySeconds, self::SLACK * $this->frameSeconds * 2 * $this->frames(self::ANSWER_BYTES))));
     }
 
+    /**
+     * A refusal, kept here and never answered over the medium (A7), and said where the user sees it, as A7 asks.
+     *
+     * Once the sender was verified, it is said once for each partner, session and code: a message in a session that has
+     * expired, as each session with a challenge has after aamio starts again (A6.8), goes to attention, since it was not
+     * stored and has to be sent again, and anything else to the log. What was turned away before a sender was known is
+     * counted and said at most once a minute, since anyone in range can send it. Until 22 November 2026 every refusal went
+     * into a list that only tests read. The same as aamio-python's carrier.
+     *
+     * @param array<string, mixed>|null $reading what was read of the envelope, when the sender was verified
+     */
+    private function refusedHere(string $code, ?array $reading = null): void
+    {
+        $this->refused[] = $code;
+        if (count($this->refused) > self::REFUSALS_KEPT) {
+            $this->refused = array_slice($this->refused, -self::REFUSALS_KEPT);
+        }
+        if ($reading === null) {
+            $this->unverified[$code] = ($this->unverified[$code] ?? 0) + 1;
+            $this->sayUnverified();
+
+            return;
+        }
+        $said = bin2hex($reading['sender']) . ':' . bin2hex($reading['session']) . ':' . $code;
+        if (isset($this->refusalsSaid[$said])) {
+            return;
+        }
+        if (count($this->refusalsSaid) >= self::SAID_KEPT) {
+            $this->refusalsSaid = [];
+        }
+        $this->refusalsSaid[$said] = true;
+        $who = ($this->nameOf)($reading['sender']);
+        if ($code === 'carry_session_expired') {
+            ($this->attention)('session_expired', 'a message from ' . $who . ' came in a session this aamio can no longer take messages in, and was refused, so it '
+                . 'was not stored: the session was opened before this aamio started again, when its age can no longer be measured, or it has outlived '
+                . 'its lifetime (contract 3, A6.8). Refusals are not answered over the medium, so ' . $who . "'s aamio takes a new session after three "
+                . 'tries without a receipt (A7), and what it sent in the old session has to be sent again from there.');
+
+            return;
+        }
+        ($this->log)('transport ' . $this->process->name . ': ' . (self::KIND_NAMES[$reading['kind']] ?? 'an envelope') . ' from ' . $who
+            . ' was refused with ' . $code . ', and refusals are not answered over the medium (contract 3, A7)');
+    }
+
+    /** What was turned away before a sender was known, counted by code, said at most once a minute (refusedHere). */
+    private function sayUnverified(): void
+    {
+        if ($this->unverified === []) {
+            return;
+        }
+        $now = ($this->clock)();
+        if ($this->unverifiedSaidAt !== null && $now - $this->unverifiedSaidAt < self::UNVERIFIED_SAID_EVERY) {
+            return;
+        }
+        $this->unverifiedSaidAt = $now;
+        ksort($this->unverified, SORT_STRING);
+        $counted = implode(', ', array_map(static fn (string $code, int $count): string => $code . ' ' . $count, array_keys($this->unverified), $this->unverified));
+        $this->unverified = [];
+        ($this->log)('transport ' . $this->process->name . ': turned away before a sender was known, said at most once a minute: ' . $counted);
+    }
+
     /** Ask the partner for a session of this party's: the challenge and the open follow in pump. */
     public function open(string $partnerPk): string
     {
@@ -434,6 +512,7 @@ final class Carrier
                 ($this->onHere)($event[1]);
             }
         }
+        $this->sayUnverified();
         $this->resend();
         $this->flush();
         $this->process->checkTime();
@@ -444,7 +523,7 @@ final class Carrier
         try {
             $envelope = $this->reassembly->add($frame);
         } catch (CarryRefused $refused) {
-            $this->refused[] = $refused->carryCode;
+            $this->refusedHere($refused->carryCode);
 
             return;
         }
@@ -455,7 +534,7 @@ final class Carrier
         $this->budget = min(self::UNVERIFIED_PER_SECOND, $this->budget + ($now - $this->budgetAt) * self::UNVERIFIED_PER_SECOND);
         $this->budgetAt = $now;
         if ($this->budget < 1) {
-            $this->refused[] = 'unverified_over_budget';
+            $this->refusedHere('unverified_over_budget');
 
             return;
         }
@@ -463,8 +542,8 @@ final class Carrier
         try {
             [$result, $reply, $got] = $this->state->deliver($envelope, $this->known, $this->profileOf, $now, ($this->wall)());
         } catch (CarryRefused $refused) {
-            // Refusals stay here (A7): logged and counted, never answered over the medium.
-            $this->refused[] = $refused->carryCode;
+            // Refusals stay here (A7): said where the user sees it and counted, never answered over the medium.
+            $this->refusedHere($refused->carryCode, $refused->reading);
 
             return;
         }

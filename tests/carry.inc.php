@@ -131,6 +131,8 @@ $check(substr($first, 9, 32) !== substr($second, 9, 32) && Carry::read($first, $
 
 require __DIR__ . '/carry-state.inc.php';
 
+require __DIR__ . '/carrier-refusals.inc.php';
+
 require __DIR__ . '/carry-transport.inc.php';
 
 require __DIR__ . '/transport-lan.inc.php';

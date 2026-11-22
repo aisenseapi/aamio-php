@@ -478,7 +478,8 @@ final class TransportService
                     note: fn (string $text) => $this->runtime->notSentAgain($name, $text), addresses: $this->addressesFor($name),
                     heard: fn (string $pk, string $address) => $this->heardFrom($name, $pk, $address), nameOf: fn (string $pk): string => $this->nameOf($pk),
                     onHere: fn (array $here) => $this->keepHere($name, $manifest->medium, $here, $manifest->version),
-                    log: fn (string $line) => $this->runtime->logged($line));
+                    log: fn (string $line) => $this->runtime->logged($line),
+                    attention: fn (string $state, string $text) => $this->runtime->noteTransport($name, $state, $text, true));
                 if (!$this->owns($name)) {
                     $process->stop();
                     continue;

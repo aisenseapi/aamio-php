@@ -103,6 +103,35 @@ try {
         && str_contains($windowNotes[0]['what'], 'aamio transport profile add sealed-slow --window 480 --lifetime 3600')
         && str_contains($windowNotes[0]['what'], 'aamio transport bind d lan --profile sealed-slow'),
         'a profile whose window is too short for a slow medium is said in attention, with a window that gives an open three tries');
+    // A carrier's note of a message refused in a session that has expired: added to one that waits unread under the same
+    // transport and state, and never twice (22 November 2026).
+    foreach (['one.', 'one.', 'two.'] as $said) {
+        $made['c']->noteTransport('lan', 'session_expired', $said, true);
+    }
+    $expiredNotes = array_values(array_filter($made['c']->attentionTaken(), static fn (array $noted): bool => $noted['state'] === 'session_expired'));
+    $check(count($expiredNotes) === 1 && $expiredNotes[0]['channel'] === 'lan' && $expiredNotes[0]['what'] === 'one. two.',
+        'a note from a carrier is added to one that waits under the same transport and state, and never said twice');
+    // A partner bound to no transport while one is enabled here: not found over the internet, the refusal gives the command,
+    // and says why the lookup failed, as the Node runtime did (a field test of 22 November 2026).
+    $made['c']->partnerAdd('e', \Aamio\Keys::fromSeedHex(str_repeat('ab', 32))->public);
+    $offline = null;
+    try {
+        $made['c']->addressFor('e');
+    } catch (\Aamio\CodedRuntime $refusal) {
+        $offline = $refusal;
+    }
+    $offlineSaid = $offline?->getMessage() ?? '';
+    $check($offline?->errorCode() === 'partner_offline' && str_starts_with($offlineSaid, 'e is not online right now: lookup failed')
+        && str_ends_with($offlineSaid, '. e is bound to no transport, so it was only looked up over the internet. To reach e over lan, which is enabled here: aamio transport bind e lan'),
+        'a partner bound to no transport while one is enabled is refused with why the lookup failed and the command that binds it');
+    $offline = null;
+    try {
+        $made['c']->addressFor('d');
+    } catch (\Aamio\CodedRuntime $refusal) {
+        $offline = $refusal;
+    }
+    $check($offline?->errorCode() === 'partner_offline' && !str_contains($offline->getMessage(), 'aamio transport bind'),
+        'a partner bound to a transport already gets no advice to bind it');
     // Over MCP, decided 17 November 2026: a send whose wait ran out before a session could open on a slow medium says
     // that the ask goes on and when its answer is due. A carrier over sound stands in for the running transport.
     $service = $made['c']->transportService();
