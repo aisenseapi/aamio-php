@@ -5105,9 +5105,21 @@ final class Runtime
         if ($said !== []) {
             $this->noteTrouble('read', 'more', implode(' ', array_merge([$said[0]], array_map('ucfirst', array_slice($said, 1)))));
         }
+        // In the order the messages arrived, across the channels, as aamio-python and the Node runtime give them. A read
+        // gave them channel by channel, so an answer that came on a board inbox stood apart from the rest, and one on an
+        // older board inbox apart again (a field report of 22 November 2026). usort keeps equals in the order they came.
+        usort($collected, static fn (array $a, array $b): int => self::arrival($a) <=> self::arrival($b));
         $this->carriedHandedOver($collected);
 
         return $collected;
+    }
+
+    /** What read orders by: when the message arrived, and one without a time last. */
+    private static function arrival(array $message): array
+    {
+        $at = $message['at'] ?? null;
+
+        return is_int($at) || is_float($at) ? [0, $at] : [1, 0];
     }
 
     // ------------------------------------------------------- transports --

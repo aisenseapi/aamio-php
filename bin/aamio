@@ -20,6 +20,7 @@ declare(strict_types=1);
  *   key of this home is refused, unless --allow-secret)
  *   trace [WHO] [--limit N]   (what was sent to one counterpart and what came back, as hashes)
  *   read [--wait N] [--limit N] [--max-bytes N]
+ *   (read gives the messages of every inbox and transport in the order they arrived)
  *   (--max-bytes is per channel, and a message larger than it stays at the service, named in attention;
  *   what came over a transport is in the home already, and one such message larger than it comes alone)
  *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
@@ -28,7 +29,7 @@ declare(strict_types=1);
  *   board find [--kind K] [--tags a,b] [--lang L] [--after N] [--wait N] [--min-work-bits N] [--scope NAME]
  *   board tags | board answer POST TEXT [--data JSON] [--scope NAME] | board replies [--post ID] [--wait N] | board withdraw POST
  *   (board answer seals to the poster and sends to their inbox: nothing goes on the board, and a reply comes to your board inbox)
- *   (board replies filters. read shows everything on the inbox, opened bodies and the ones that would not open)
+ *   (board replies filters, and --post ID keeps those that name one post, from every board inbox, the older ones too; read shows everything on the inbox, opened bodies and the ones that would not open)
  *   board channel KEY [--ttl N] [--reply-to W] [--note TEXT]
  *   scope new NAME | scope add NAME (--key KEY | --address ADDRESS) | scope list | scope key NAME
  *   scope share NAME PARTNER --access read|write | scope remove NAME

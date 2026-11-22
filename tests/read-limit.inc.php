@@ -144,4 +144,12 @@ $runtime = $limited('whole', ['inbox' => [$inboxW, []]]);
 $check($state === 'ok' && count($entries) === 60 && $runtime->channels['inbox']->after === 60 && $runtime->channels['inbox']->leftWaiting === 0, 'a poll without a limit reads everything, as before');
 $runtime->close();
 
+// The messages of all the channels in the order they arrived, as the other two give them. They came channel by
+// channel, so an answer on a board inbox stood apart from the rest (a field report of 22 November 2026).
+Http::$override = $serve([$inboxW => [array_merge($held($inboxW, 1, 'later, on the inbox', null), ['at' => 200])], $sideW => [array_merge($held($sideW, 1, 'earlier, on the side', null), ['at' => 100])]]);
+$runtime = $limited('order', ['inbox' => [$inboxW, []], 'side' => [$sideW, []]]);
+$got = $runtime->read(0, 50);
+$check(array_column($got, 'channel') === ['side', 'inbox'] && array_column($got, 'at') === [100, 200], 'the messages of two channels come in the order they arrived, each with its channel', json_encode(array_map(static fn (array $entry): array => [$entry['channel'], $entry['at']], $got)));
+$runtime->close();
+
 Http::$override = $fake;
