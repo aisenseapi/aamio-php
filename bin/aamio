@@ -266,6 +266,23 @@ if ($command !== 'addon') {
     }
     [$words, $optional, $takes, $switches] = $commands[$used];
     $given = array_slice($args, count(explode(' ', $used)));
+    // A command's own help, before its words are counted and before a home is opened: the parts of the usage that name
+    // it. board answer --help was refused with 2, so the route the usage gives was out of reach where it was asked for
+    // (a review of 22 November 2026).
+    if (isset($opts['help']) || in_array('-h', $given, true)) {
+        $usage = (string) preg_replace('/^ \* ?/m', '', (string) preg_replace('!^.*?/\*\*(.*?)\*/.*$!s', '$1', (string) file_get_contents(__FILE__)));
+        $said = [];
+        foreach (explode("\n", $usage) as $line) {
+            foreach (explode(' | ', trim($line)) as $part) {
+                $bare = ltrim($part, '(');
+                if ($bare === $used || str_starts_with($bare, $used . ' ')) {
+                    $said[] = $part === $bare ? 'aamio ' . $part : $part;
+                }
+            }
+        }
+        fwrite(STDOUT, ($said === [] ? trim($usage) : implode("\n", $said)) . "\n");
+        exit(0);
+    }
     if ($words !== null && (count($given) < count($words) - $optional || count($given) > count($words))) {
         $named = array_map(static fn (string $word, int $at): string => $at < count($words) - $optional ? strtoupper($word) : '[' . strtoupper($word) . ']', $words, array_keys($words));
         fail($used . ' takes ' . ($words === [] ? 'no arguments' : implode(' ', $named)) . '. Run aamio help for usage.', 2);

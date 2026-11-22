@@ -130,7 +130,7 @@ echo "transports: where things are reached\n";
 
     // ------------------------------------------------------------- here, in the host
 
-    $check(TransportProcess::hereOf(['bt:8C:1D:55:03:7B:53'], 'bt') === ['bt:8C:1D:55:03:7B:53']
+    $check(TransportProcess::hereOf(['bt:00:00:5E:00:53:01'], 'bt') === ['bt:00:00:5E:00:53:01']
         && TransportProcess::hereOf(['lan:10.0.0.7:47474', 'lan:10.0.0.8:47474'], 'lan') === ['lan:10.0.0.7:47474', 'lan:10.0.0.8:47474']
         && TransportProcess::hereOf([], 'bt') === [], 'here is a short list of the transport\'s own addresses');
     $bad = [['lan:10.0.0.7:47474'], ['bt:'], ['bt:a b'], ['bt:x', 'bt:x'], array_map(static fn (int $n): string => 'bt:' . $n, range(0, 4)), 'bt:x', [7], ['bt:' . str_repeat('x', 126)], null, ['one' => 'bt:x']];
@@ -147,13 +147,13 @@ echo "transports: where things are reached\n";
 
         return $byHand->poll();
     };
-    $first = $ready(['here' => ['bt:8C:1D:55:03:7B:53']]);
-    $again = $ready(['here' => ['bt:8C:1D:55:03:7B:53']]);
+    $first = $ready(['here' => ['bt:00:00:5E:00:53:01']]);
+    $again = $ready(['here' => ['bt:00:00:5E:00:53:01']]);
     $other = $ready(['here' => ['lan:10.0.0.7:47474']]);
-    $check($first === [['here', ['bt:8C:1D:55:03:7B:53']]] && $again === [] && $other === [] && str_contains((string) end($logged), 'here is not taken')
-        && $byHand->here === ['bt:8C:1D:55:03:7B:53'] && $byHand->room() === 1 && $byHand->failed === null && $byHand->readied,
+    $check($first === [['here', ['bt:00:00:5E:00:53:01']]] && $again === [] && $other === [] && str_contains((string) end($logged), 'here is not taken')
+        && $byHand->here === ['bt:00:00:5E:00:53:01'] && $byHand->room() === 1 && $byHand->failed === null && $byHand->readied,
         'a ready with here is said once, the same again is nothing new, and a here that cannot be taken is said and stops nothing', json_encode([$first, $again, $other, $logged]));
-    $check($ready([]) === [] && $byHand->here === ['bt:8C:1D:55:03:7B:53'] && $ready(['here' => ['bt:DC:FB:48:D5:EA:C0']]) === [['here', ['bt:DC:FB:48:D5:EA:C0']]],
+    $check($ready([]) === [] && $byHand->here === ['bt:00:00:5E:00:53:01'] && $ready(['here' => ['bt:DC:FB:48:D5:EA:C0']]) === [['here', ['bt:DC:FB:48:D5:EA:C0']]],
         'a ready without here leaves it as it was, and another day brings another address');
 
     $norwegian = 'et tilkoblingsforsøk';
@@ -418,7 +418,7 @@ echo "transports: where things are reached\n";
         [$status, $said, $err] = $finish($startChild(['--home', $aHome, '--host', $nowhere, 'transport', 'bind', 'b', 'lan', '--address', 'lan:127.0.0.1:' . $port], $childEnv([])));
         $check($status === 0 && ($said['address'] ?? null) === 'lan:127.0.0.1:' . $port && ($said['routes'] ?? null) === [['transport' => 'lan', 'profile' => 'sealed']],
             'aamio transport bind PARTNER TRANSPORT --address ADDR binds and keeps where the partner is reached', json_encode([$status, $said, substr($err, -400)]));
-        [$status, $said] = $finish($startChild(['--home', $aHome, '--host', $nowhere, 'transport', 'bind', 'b', 'lan', '--address', 'bt:8C:1D:55:03:7B:53'], $childEnv([])));
+        [$status, $said] = $finish($startChild(['--home', $aHome, '--host', $nowhere, 'transport', 'bind', 'b', 'lan', '--address', 'bt:00:00:5E:00:53:01'], $childEnv([])));
         $check($status === 1 && ($said['error_code'] ?? null) === 'transport_address_invalid' && str_contains($said['error'] ?? '', 'an address on lan is lan:'),
             'and an address on another medium is the command\'s answer, with its code', json_encode([$status, $said]));
         [$status, , $err] = $finish($startChild(['--home', $aHome, '--host', $nowhere, 'transport', 'here'], $childEnv([])));
@@ -436,7 +436,7 @@ echo "transports: where things are reached\n";
 
         // bind with an address checks it, and sets it for a partner bound already.
         [$a, $b] = $homes('bind-address');
-        $check($code(static fn () => Transports::bind($a, 'b', 'lan', null, 'bt:8C:1D:55:03:7B:53')) === 'transport_address_invalid' && $a->transportService()->config->bindings() === [],
+        $check($code(static fn () => Transports::bind($a, 'b', 'lan', null, 'bt:00:00:5E:00:53:01')) === 'transport_address_invalid' && $a->transportService()->config->bindings() === [],
             'an address on another medium is refused, and nothing is bound');
         Transports::bind($a, 'b', 'lan');
         $try(static fn () => Transports::bind($a, 'b', 'lan'));

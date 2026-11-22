@@ -601,7 +601,7 @@ echo "earshot: the process\n";
     $address = 'k7rq2m4xw5tbz3yd6ena';
     $key = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
     $now = 1794150000;
-    $btHere = 'bt:8C:1D:55:03:7B:53';
+    $btHere = 'bt:00:00:5E:00:53:01';
     $hereSaid = [['transport' => 'bt', 'medium' => 'bt', 'here' => [$btHere], 'at' => $now],
         ['transport' => 'lan', 'medium' => 'lan', 'here' => ['lan:10.0.0.7:47474', 'lan:10.0.0.8:47474'], 'at' => $now]];
     $request = static fn (string $kind, string $call, array $arguments = []): array => ['aamio_addon' => 2, 'kind' => $kind, 'name' => $call, 'arguments' => $arguments, 'subject' => null, 'own_key' => null, 'here' => null, 'state_dir' => null, 'deadline_seconds' => 90, 'aamio' => ['version' => '0.4.1', 'runtime' => 'php']];
@@ -679,7 +679,7 @@ echo "earshot: the process\n";
     $address = 'k7rq2m4xw5tbz3yd6ena';
     $key = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
     $now = 1794150000;
-    $btHere = 'bt:8C:1D:55:03:7B:53';
+    $btHere = 'bt:00:00:5E:00:53:01';
     $hereSaid = [['transport' => 'bt', 'medium' => 'bt', 'here' => [$btHere], 'at' => $now],
         ['transport' => 'lan', 'medium' => 'lan', 'here' => ['lan:10.0.0.7:47474', 'lan:10.0.0.8:47474'], 'at' => $now]];
     $mediaSaid = [['transport' => 'bt', 'medium' => 'bt'], ['transport' => 'earshot-link', 'medium' => 'sound'], ['transport' => 'lan', 'medium' => 'lan']];

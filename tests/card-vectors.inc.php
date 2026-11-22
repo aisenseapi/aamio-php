@@ -55,7 +55,7 @@ echo "the card: the shared vectors\n";
     }
     $made = array_column(array_filter($vectors['make'], static fn (array $case): bool => isset($case['card'])), 'card');
     $refused = array_unique(array_column(array_filter($vectors['make'], static fn (array $case): bool => isset($case['refused'])), 'refused'));
-    $check(array_filter($made, static fn (string $text): bool => str_contains($text, 'v=bt:8C:1D:55:03:7B:53')) !== []
+    $check(array_filter($made, static fn (string $text): bool => str_contains($text, 'v=bt:00:00:5E:00:53:01')) !== []
         && array_filter($made, static fn (string $text): bool => str_contains($text, 'v=lan:192.168.2.22:47474,internet')) !== []
         && array_diff(['invalid_via', 'key_needed', 'card_too_long', 'invalid_key', 'a_key_not_a_public_key'], $refused) === []
         && max(array_column(array_filter($vectors['make'], static fn (array $case): bool => isset($case['card'])), 'bytes')) === $vectors['max_bytes'] && $vectors['max_bytes'] === 128,

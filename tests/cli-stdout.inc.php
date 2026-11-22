@@ -102,6 +102,13 @@ if (trim($able) !== 'yes') {
         [$usageStatus, $usageOut, $usageErr] = $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $unmade, '--host', 'http://127.0.0.1:9'], $words));
         $check($usageStatus === 2 && $usageOut === '' && trim($usageErr) !== '' && !file_exists($unmade), implode(' ', $words) . ' is refused before the home, on stderr with 2', json_encode([$usageStatus, $usageOut, $usageErr]));
     }
+    // A command's own help, before the home: 0, the route of an answer, and no home made. board answer --help was
+    // refused with 2 (a review of 22 November 2026).
+    foreach ([['board', 'answer', '--help'], ['board', 'answer', '-h']] as $at => $words) {
+        $unmade = $cliDir . DIRECTORY_SEPARATOR . 'home-help-' . $at;
+        [$helpStatus, $helpOut, $helpErr] = $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $unmade, '--host', 'http://127.0.0.1:9'], $words));
+        $check($helpStatus === 0 && str_contains($helpOut, 'aamio board answer POST TEXT') && str_contains($helpOut, 'sends to their inbox') && str_contains($helpOut, 'your board inbox') && !file_exists($unmade), implode(' ', $words) . ' says where the answer goes and where a reply comes, with 0 and no home', json_encode([$helpStatus, $helpOut, $helpErr]));
+    }
     // A name is counted in characters, as in the other two.
     \Aamio\Runtime::checkPartner(str_repeat("\u{1F600}", 64), $KEY);
     try {
