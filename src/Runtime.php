@@ -475,7 +475,9 @@ final class Runtime
             // moment may pass with none, or an old one, there to name.
             $holder = $this->lockHolder();
             $named = is_int($holder['pid'] ?? null) ? ' (pid ' . $holder['pid'] . ')' : '';
-            throw new CodedRuntime('home_in_use', sprintf('another aamio%s is using %s. Stop it, or use a different AAMIO_HOME.', $named, $this->home));
+            // The other one may be someone else's, as a board agent on a shared machine: a home of your own comes first,
+            // and stopping it only when it is yours (a field report of 22 November 2026, where "Stop it" was the advice).
+            throw new CodedRuntime('home_in_use', sprintf('another aamio%s is using %s. Use a home of your own: --home DIR or AAMIO_HOME. Stop the other aamio only if it is yours.', $named, $this->home));
         }
         try {
             $this->checkOlderOwner($probe);
@@ -558,13 +560,13 @@ final class Runtime
         }
         $alive = ($probe ?? self::pidAlive(...))($held['pid']);
         if ($alive === null) {
-            throw new CodedRuntime('home_in_use', sprintf('could not determine whether aamio (pid %d) is still using %s; the lock is left untouched. Process inspection was unavailable or inconclusive. Stop the other runtime or restore process inspection, or use a different AAMIO_HOME. Do not remove the lock unless you have independently confirmed its owner has stopped.', $held['pid'], $this->home));
+            throw new CodedRuntime('home_in_use', sprintf('could not determine whether aamio (pid %d) is still using %s; the lock is left untouched. Process inspection was unavailable or inconclusive. Use a home of your own: --home DIR or AAMIO_HOME. If the other runtime is yours, stop it or restore process inspection. Do not remove the lock unless you have independently confirmed its owner has stopped.', $held['pid'], $this->home));
         }
         // The lock is written after its owner started. A process that
         // started later got the pid after the owner was gone.
         $started = $alive && (is_int($held['at'] ?? null) || is_float($held['at'] ?? null)) ? self::startedAt($held['pid']) : null;
         if ($alive && ($started === null || $started <= $held['at'] + 2)) {
-            throw new CodedRuntime('home_in_use', sprintf('another aamio (pid %d) is using %s. Stop it, or use a different AAMIO_HOME. If no aamio is running, the one that took the lock stopped without letting go of it: delete %s and start again.', $held['pid'], $this->home, $this->path('lock')));
+            throw new CodedRuntime('home_in_use', sprintf('another aamio (pid %d) is using %s. Use a home of your own: --home DIR or AAMIO_HOME. Stop the other aamio only if it is yours. If no aamio is running, the one that took the lock stopped without letting go of it: delete %s and start again.', $held['pid'], $this->home, $this->path('lock')));
         }
     }
 
@@ -2481,7 +2483,10 @@ final class Runtime
         if ($status !== 201) {
             throw new SendFailed($entry['status'], $entry['id'], $status, $result, null, $entry['trace_error'] ?? null, $archiveError);
         }
-        $answer = ['post' => $post['id'], 'w' => $post['w'], 'message_id' => $entry['id'], 'seq' => $result['seq'], 'at' => $result['at'], 'replies_arrive_on' => 'board', 'reply_to' => $channel->w];
+        // replies_arrive_on names this runtime's board inbox, and was read as the board itself: the note says where the
+        // answer went and where a reply comes (a field report of 22 November 2026).
+        $answer = ['post' => $post['id'], 'w' => $post['w'], 'message_id' => $entry['id'], 'seq' => $result['seq'], 'at' => $result['at'], 'replies_arrive_on' => 'board', 'reply_to' => $channel->w,
+            'note' => 'Sealed to the poster and sent to their inbox, the w of the post. Nothing was posted on the board. A reply comes to your board inbox at reply_to, and read shows it.'];
         if (isset($result['met'])) {
             $answer['met'] = $result['met'];
             $answer['proof_id'] = $result['proof_id'] ?? null;
