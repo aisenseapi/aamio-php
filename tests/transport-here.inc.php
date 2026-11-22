@@ -753,6 +753,37 @@ file_put_contents(__DIR__ . "/ended", $version . "\n", FILE_APPEND);
         $nested = null;
         $a->close();
         $b->close();
+
+        // A transport that cannot open its medium says why as status down, on the protocol and not on standard error, and
+        // transport here passes it on. It said that "the lines it wrote above" said why, with none written (a check of
+        // 22 November 2026).
+        $offline = $hRoot . DIRECTORY_SEPARATOR . 'offline';
+        @mkdir($offline, 0700, true);
+        file_put_contents($offline . DIRECTORY_SEPARATOR . 'aamio-addon.json', json_encode(['aamio_addon' => 3, 'name' => 'offline', 'version' => '0.1.0',
+            'transport' => ['medium' => 'offline', 'start' => ['php' => 'transport.php'], 'platforms' => ['linux', 'darwin', 'win32'], 'permissions' => []]]));
+        file_put_contents($offline . DIRECTORY_SEPARATOR . 'transport.php', '<?php
+while (($line = fgets(STDIN)) !== false) {
+    $message = json_decode($line, true);
+    $kind = is_array($message) ? ($message["t"] ?? null) : null;
+    if ($kind === "hello") {
+        fwrite(STDOUT, json_encode(["t" => "describe", "name" => "offline", "version" => "0.1.0", "aamio_addon" => 3, "medium" => "offline", "properties" => ["max_frame_up" => 100, "max_frame_down" => 100,
+            "rate_up" => 1000, "rate_down" => 1000, "direction" => "duplex", "addressing" => "none", "link_ack" => false, "airtime" => null, "metadata_visible_to" => "range", "medium_encrypts" => false]]) . "\n");
+        if (($message["probe"] ?? false) !== true) {
+            fwrite(STDOUT, json_encode(["t" => "status", "state" => "down", "reason" => "the medium could not be opened: no adapter here"]) . "\n");
+        }
+    } elseif ($kind === "stop") {
+        break;
+    }
+}
+');
+        putenv('AAMIO_ADDONS=' . $offline);
+        Addons::reset();
+        $c = $opened[] = new Runtime($hRoot . DIRECTORY_SEPARATOR . 'offline-home', $nowhere, null, true, $quietly);
+        $said = Transports::here($c, 'offline');
+        $check(array_key_exists('here', $said) && $said['here'] === null && str_contains($said['note'] ?? '', 'did not say it was ready within')
+            && str_contains($said['note'] ?? '', 'It said: the medium could not be opened: no adapter here') && !str_contains($said['note'] ?? '', 'lines it wrote above'),
+            'transport here says what a transport said of its medium when it did not come up', json_encode($said));
+        $c->close();
     } finally {
         foreach ($opened as $runtime) {
             $runtime->close();

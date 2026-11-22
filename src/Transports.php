@@ -26,6 +26,8 @@ final class Transports
     public const CRASHES_MOST = 3;
     /** How long a start of a moment waits for a transport's first ready, to learn where it is reached (B2). */
     public const LEARN_SECONDS = 10;
+    /** How much of what a transport said of its medium, as status down, transport here passes on: its own words, kept short. */
+    public const DOWN_SAID_MOST = 300;
     /** Where an address a partner is reached at came from: given to bind, or shown by a fresh envelope. */
     public const ADDRESS_FROM = ['you', 'heard'];
     /** What a carried message is filed under when the partner it came from is no longer bound to a transport. */
@@ -261,9 +263,11 @@ final class Transports
                 'note' => $name . ' is starting in this process and has not said it is ready yet: ask again in a moment.'];
         }
         if ($how === 'not_ready') {
+            $said = $service->downSaid[$name] ?? null;
+
             return ['transport' => $name, 'medium' => $medium, 'here' => null,
-                'note' => $name . ' did not say it was ready within ' . self::LEARN_SECONDS . ' seconds, as when its medium is off or another program holds it, so nothing was learned. '
-                    . 'The lines it wrote above say why.'];
+                'note' => $name . ' did not say it was ready within ' . self::LEARN_SECONDS . ' seconds, so nothing was learned. '
+                    . ($said !== null ? 'It said: ' . $said : 'It said nothing of why, as when its medium is off or another program holds it.')];
         }
         // Nothing said and an empty list say the same: a card names the medium alone, and there is no address to name.
         if ($found === null || $found === []) {

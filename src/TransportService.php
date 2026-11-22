@@ -34,6 +34,14 @@ final class TransportService
      */
     public array $learning = [];
     /**
+     * What a transport said of its medium the last time a start of a moment did not come up, by name: the reason
+     * transport here gives. A transport says it as status down on the protocol, not on standard error, and here said only
+     * that "the lines it wrote above" said why, with none written (a check of 22 November 2026).
+     *
+     * @var array<string, ?string>
+     */
+    public array $downSaid = [];
+    /**
      * @var array<string, TransportProcess> an ordinary start under way, by transport name: known before its process can
      * call back, so a stop from the log stops it too (a review of 21 November 2026)
      */
@@ -315,8 +323,14 @@ final class TransportService
         try {
             $process->start(Http::VERSION, 'php', $folder);
             $until = self::now() + $seconds;
+            $said = null;
             while (!$process->readied && !$this->stopped && self::now() < $until) {
-                $process->poll(0.1);
+                foreach ($process->poll(0.1) as $event) {
+                    if ($event[0] === 'status' && $event[1] === 'down' && is_string($event[2] ?? null) && trim($event[2]) !== '') {
+                        // Characters, not bytes, and without mbstring, which this client does not ask for.
+                        $said = preg_match('/^.{1,' . Transports::DOWN_SAID_MOST . '}/us', trim($event[2]), $cut) === 1 ? $cut[0] : $said;
+                    }
+                }
             }
         } catch (TransportFailed $error) {
             if ($this->stopped) {
@@ -333,8 +347,11 @@ final class TransportService
             return [null, 'stopping'];
         }
         if (!$process->readied) {
+            $this->downSaid[$name] = $said;
+
             return [null, 'not_ready'];
         }
+        unset($this->downSaid[$name]);
         // Said nothing is kept too, as an empty list, so a transport over a medium without addresses is not started again
         // for every card: the microphone of a transport over sound opened each time (the review of 19 November 2026).
         $this->keepHere($name, $manifest->medium, $process->here ?? [], $manifest->version);
