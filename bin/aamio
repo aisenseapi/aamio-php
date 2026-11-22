@@ -20,7 +20,7 @@ declare(strict_types=1);
  *   key of this home is refused, unless --allow-secret)
  *   trace [WHO] [--limit N]   (what was sent to one counterpart and what came back, as hashes)
  *   read [--wait N] [--limit N] [--max-bytes N]
- *   (read gives the messages of every inbox and transport in the order they arrived)
+ *   (read orders the messages it returns from every inbox and transport by when they arrived; what --limit or --max-bytes leaves waits for the next read, and may have arrived earlier)
  *   (--max-bytes is per channel, and a message larger than it stays at the service, named in attention;
  *   what came over a transport is in the home already, and one such message larger than it comes alone)
  *   receipt [--channel LABEL] [--anchor] | channel open LABEL [--ttl N] [--allow a,b]
