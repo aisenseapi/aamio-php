@@ -66,6 +66,14 @@ final class Runtime
     private const KEPT_FILES = ['partners.json' => 'list', 'scopes.json' => 'list', 'state.json' => 'object', 'outbox.json' => 'object', 'effects.json' => 'object'];
 
     private const SCOPE_NAME = '/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/D';
+    /**
+     * A name a command line takes as one word in every shell: a letter first, so that neither an option nor a number is
+     * read into it, then letters, digits, dots, dashes and underscores. Any other name is given in a command as the
+     * partner's key, which is 43 characters of base64url: a partner's name may hold spaces, quotes and what a shell reads
+     * as its own, and "Ada Lovelace" was two words (the review of 23 November 2026). A key that begins with a dash is a key
+     * on the command line here and in the other two runtimes.
+     */
+    private const BARE_NAME = '/^[A-Za-z][A-Za-z0-9._-]{0,63}$/D';
     // What a scope share says when scopes.json could not be written, and attention
     // says why. Shorter than the form a kept share takes, which a share is
     // weighed at when that is the longer.
@@ -2855,11 +2863,12 @@ final class Runtime
             return $said;
         }
         $said .= '. ' . $name . ' is bound to no transport, so it was only looked up over the internet';
+        [$word, $by] = preg_match(self::BARE_NAME, $name) === 1 ? [$name, ''] : [$partner['key'], ', naming the partner by its key'];
         if (count($enabled) === 1) {
-            return $said . '. To reach ' . $name . ' over ' . $enabled[0] . ', which is enabled here: aamio transport bind ' . $name . ' ' . $enabled[0];
+            return $said . '. To reach ' . $name . ' over ' . $enabled[0] . ', which is enabled here' . $by . ': aamio transport bind ' . $word . ' ' . $enabled[0];
         }
 
-        return $said . '. To reach ' . $name . ' over one of the transports enabled here, ' . implode(', ', $enabled) . ': aamio transport bind ' . $name . ' NAME';
+        return $said . '. To reach ' . $name . ' over one of the transports enabled here, ' . implode(', ', $enabled) . $by . ': aamio transport bind ' . $word . ' NAME';
     }
 
     // --------------------------------------------------------------- send --
@@ -5333,7 +5342,14 @@ final class Runtime
     public function noteTransport(string $transport, string $state, string $text, bool $adding = false): void
     {
         $earlier = $adding ? ($this->attention[$transport . '|' . $state] ?? null) : null;
-        $this->noteTrouble($transport, $state, $earlier === null || str_contains($earlier['what'], $text) ? $text : $earlier['what'] . ' ' . $text);
+        if ($earlier !== null && str_contains($earlier['what'], $text)) {
+            // Waiting unread already: what waits stays as it is, and the log has it. It was replaced by the text alone, and
+            // what another partner had said in it was gone unread (the review of 23 November 2026).
+            $this->logged('transport ' . $transport . ': ' . $text);
+
+            return;
+        }
+        $this->noteTrouble($transport, $state, $earlier === null ? $text : $earlier['what'] . ' ' . $text);
     }
 
     public function notSentAgain(string $transport, string $text): void

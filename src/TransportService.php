@@ -280,6 +280,16 @@ final class TransportService
     }
 
     /**
+     * What a carrier on this transport has to tell the user once, as attention under the transport's name and the state it
+     * gives, added to what waits there unread under the same state. The one a running carrier is given, and the one a test
+     * can give its own.
+     */
+    public function attentionFor(string $name): \Closure
+    {
+        return fn (string $state, string $text) => $this->runtime->noteTransport($name, $state, $text, true);
+    }
+
+    /**
      * Where an enabled transport is reached: [addresses or null, how it is known], how being running, starting, learned,
      * not_ready or stopping.
      *
@@ -479,7 +489,7 @@ final class TransportService
                     heard: fn (string $pk, string $address) => $this->heardFrom($name, $pk, $address), nameOf: fn (string $pk): string => $this->nameOf($pk),
                     onHere: fn (array $here) => $this->keepHere($name, $manifest->medium, $here, $manifest->version),
                     log: fn (string $line) => $this->runtime->logged($line),
-                    attention: fn (string $state, string $text) => $this->runtime->noteTransport($name, $state, $text, true));
+                    attention: $this->attentionFor($name));
                 if (!$this->owns($name)) {
                     $process->stop();
                     continue;

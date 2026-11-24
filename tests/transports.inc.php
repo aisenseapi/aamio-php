@@ -132,6 +132,39 @@ try {
     }
     $check($offline?->errorCode() === 'partner_offline' && !str_contains($offline->getMessage(), 'aamio transport bind'),
         'a partner bound to a transport already gets no advice to bind it');
+    // A partner's name may hold what a shell splits or reads as its own, and the command gave it as it was: "Ada Lovelace"
+    // was two words to bind (the review of 23 November 2026). Such a name is given by the partner's key.
+    $notOneWord = ['Ada Lovelace', "O'Hara", 'say "hi"', '$HOME;ls', 'Åse', '-ada', '1kb', 'ada,bob', 'a`b', 'ada&bob', 'ada-l_2.x'];
+    $byKey = [];
+    foreach ($notOneWord as $n => $name) {
+        $key = \Aamio\Keys::fromSeedHex(str_repeat(sprintf('%02x', 0x40 + $n), 32))->public;
+        $made['c']->partnerAdd($name, $key);
+        $said = '';
+        try {
+            $made['c']->addressFor($name);
+        } catch (\Aamio\CodedRuntime $refusal) {
+            $said = $refusal->getMessage();
+        }
+        $byKey[$name] = $name === 'ada-l_2.x'
+            ? str_ends_with($said, '. To reach ada-l_2.x over lan, which is enabled here: aamio transport bind ada-l_2.x lan')
+            : str_ends_with($said, '. To reach ' . $name . ' over lan, which is enabled here, naming the partner by its key: aamio transport bind ' . $key . ' lan');
+    }
+    $check(!in_array(false, $byKey, true), 'a name a shell would not take as one word is given by its key in the command, a name of one word as it is', json_encode($byKey));
+    // The command, run as it is given and split at its spaces, binds the partner it names: a name of two words, and a key
+    // that begins with two dashes, which this command line took for an option until then.
+    $adviceHome = $tRoot . DIRECTORY_SEPARATOR . 'advice';
+    $dashKey = rtrim(strtr(base64_encode("\xFB\xEF" . implode('', array_map('chr', range(0, 29)))), '+/', '-_'), '=');
+    $adviceCli = static fn (array $words): array => $cliRun(array_merge($childPhp, [dirname(__DIR__) . '/bin/aamio', '--home', $adviceHome, '--host', $nowhere], $words));
+    [$addCode, $addOut] = $adviceCli(['partner', 'add', 'Ada Lovelace', $dashKey]);
+    [$sendCode, $sendOut] = $adviceCli(['send', 'Ada Lovelace', 'hei']);
+    $told = json_decode($sendOut, true) ?? [];
+    $advice = explode(' ', substr((string) strrchr((string) ($told['error'] ?? ''), ':'), 2));
+    [$bindCode, $bindOut] = $adviceCli(array_slice($advice, 1));
+    $bindTold = json_decode($bindOut, true) ?? [];
+    $check($addCode === 0 && $sendCode === 1 && ($told['error_code'] ?? null) === 'partner_offline' && str_starts_with($dashKey, '--')
+        && $advice === ['aamio', 'transport', 'bind', $dashKey, 'lan'] && $bindCode === 0 && ($bindTold['partner'] ?? null) === 'Ada Lovelace'
+        && ($bindTold['key'] ?? null) === $dashKey && array_column($bindTold['routes'] ?? [], 'transport') === ['lan'],
+        'the command a refusal gives binds the partner it names when it is run as given, also with a key that begins with two dashes', $addOut . $sendOut . $bindOut);
     // Over MCP, decided 17 November 2026: a send whose wait ran out before a session could open on a slow medium says
     // that the ask goes on and when its answer is due. A carrier over sound stands in for the running transport.
     $service = $made['c']->transportService();

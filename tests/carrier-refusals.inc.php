@@ -16,6 +16,8 @@ declare(strict_types=1);
 use Aamio\Carrier;
 use Aamio\Carry;
 use Aamio\CarryState;
+use Aamio\Codec;
+use Aamio\Runtime;
 use Aamio\TransportProcess;
 
 echo "carry: refusals said\n";
@@ -119,3 +121,60 @@ $hear($carrier, ...array_fill(0, Carrier::REFUSALS_KEPT + 5, 'x'));
 $check($carrier->refused === array_fill(0, Carrier::REFUSALS_KEPT, 'frame_bad_length')
     && count(array_filter((array) $lines, static fn (string $line): bool => str_contains($line, 'before a sender was known'))) === 1,
     'the list of refusal codes keeps only the newest, as a long aamio serve kept every code for as long as it ran');
+
+// alice, then carol, then alice in her other session: alice's text waited there already, and it replaced what waited, so
+// carol's was gone before anyone read it (the review of 23 November 2026). Through the coupling the transport service
+// gives its carriers, into the runtime's attention, where a read takes it once.
+$abaHome = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-refusals-' . bin2hex(random_bytes(6));
+$abaLines = new \ArrayObject();
+$abaRuntime = new Runtime($abaHome, 'http://127.0.0.1:9', null, true, static function (string $line) use ($abaLines): void {
+    $abaLines[] = $line;
+});
+try {
+    $abaRuntime->partnerAdd('alice', $carryKeys('A')->public);
+    $abaRuntime->partnerAdd('carol', $carryKeys('C')->public);
+    $abaKnown = [$carryPk('A'), $carryPk('C')];
+    $abaB = new CarryState($carryKeys('B'));
+    $abaOpened = static function (CarryState $sender) use ($abaB, $abaKnown, $carryPk, $refusalProfile, $refusalNow): string {
+        [$session, $ask] = $sender->ask($carryPk('B'), $refusalProfile, 0.0);
+        [, $challenge] = $abaB->deliver($ask, $abaKnown, $refusalProfile, 0.0, $refusalNow);
+        [, $opening] = $sender->deliver($challenge, [$carryPk('B')], $refusalProfile, 0.0, $refusalNow);
+        if ($abaB->deliver($opening, $abaKnown, $refusalProfile, 0.0, $refusalNow)[0] !== 'accepted') {
+            throw new \RuntimeException('the open was not taken');
+        }
+
+        return $session;
+    };
+    $abaA = new CarryState($carryKeys('A'));
+    $abaC = new CarryState($carryKeys('C'));
+    [$abaFirst, $abaSecond, $abaCarols] = [$abaOpened($abaA), $abaOpened($abaA), $abaOpened($abaC)];
+    $abaB->restart();
+    $abaWire = new TransportProcess('stub', '0.1.0', ['stub'], null, []);
+    $abaWire->properties = ['max_frame_up' => 4096, 'max_frame_down' => 4096];
+    $abaCarrier = new Carrier($abaB, $abaWire, $refusalProfile, $abaKnown, clock: $refusalClock, wall: static fn (): int => $refusalNow,
+        nameOf: static fn (string $pk): string => $abaRuntime->partnerByKey(Codec::b64url($pk))['name'] ?? '?',
+        log: static function (string $line) use ($abaLines): void {
+            $abaLines[] = $line;
+        },
+        attention: $abaRuntime->transportService()->attentionFor('stub'));
+    $hear($abaCarrier, ...$whole($abaA->send($carryPk('B'), $abaFirst, '1', $refusalProfile)));
+    $hear($abaCarrier, ...$whole($abaC->send($carryPk('B'), $abaCarols, '2', $refusalProfile)));
+    $hear($abaCarrier, ...$whole($abaA->send($carryPk('B'), $abaSecond, '3', $refusalProfile)));
+    $abaTaken = $abaRuntime->attentionTaken();
+    $abaSaid = $abaTaken[0]['what'] ?? '';
+    $abaLast = (string) ($abaLines[count($abaLines) - 1] ?? '');
+    $abaThenEmpty = $abaRuntime->attentionTaken() === [];
+    $abaThird = $abaOpened($abaA);
+    $abaB->restart();
+    $hear($abaCarrier, ...$whole($abaA->send($carryPk('B'), $abaThird, '4', $refusalProfile)));
+    $abaAgain = $abaRuntime->attentionTaken();
+    $check($abaCarrier->refused === array_fill(0, 4, 'carry_session_expired') && count($abaTaken) === 1
+        && $abaTaken[0]['channel'] === 'stub' && $abaTaken[0]['state'] === 'session_expired'
+        && substr_count($abaSaid, 'a message from alice') === 1 && substr_count($abaSaid, 'a message from carol') === 1
+        && str_starts_with($abaLast, 'transport stub: a message from alice') && !str_contains($abaLast, 'carol') && $abaThenEmpty
+        && count($abaAgain) === 1 && str_contains($abaAgain[0]['what'], 'a message from alice') && !str_contains($abaAgain[0]['what'], 'carol'),
+        'a refusal said again keeps what another partner said unread, through the coupling a running carrier is given');
+} finally {
+    $abaRuntime->close();
+    $removeTree($abaHome);
+}

@@ -84,6 +84,17 @@ function fail(string $message, int $code = 1): never
     exit($code);
 }
 
+/**
+ * A key: 43 characters of base64url, of which one in 64 begins with a dash and one in 4096 with two. Such a word is a
+ * word, never an option, as aamio-python reads it: a key with two dashes first was taken for an option nobody has, and the
+ * advice a refusal gives names a partner by its key when its name is not one word to a shell (the review of 23 November
+ * 2026). No option is 43 characters of base64url.
+ */
+function keyWord(string $arg): bool
+{
+    return preg_match('/^-[A-Za-z0-9_-]{42}$/D', $arg) === 1;
+}
+
 /** Splits argv into positionals and --options; an option followed by a value takes it, a bare flag is true. */
 function parse(array $argv, array $flags = []): array
 {
@@ -91,12 +102,12 @@ function parse(array $argv, array $flags = []): array
     $options = [];
     for ($i = 0; $i < count($argv); $i++) {
         $arg = $argv[$i];
-        if (str_starts_with($arg, '--')) {
+        if (str_starts_with($arg, '--') && !keyWord($arg)) {
             $name = substr($arg, 2);
             if (str_contains($name, '=')) {
                 [$name, $value] = explode('=', $name, 2);
                 $options[$name] = $value;
-            } elseif (in_array($name, $flags, true) || !isset($argv[$i + 1]) || str_starts_with($argv[$i + 1], '--')) {
+            } elseif (in_array($name, $flags, true) || !isset($argv[$i + 1]) || (str_starts_with($argv[$i + 1], '--') && !keyWord($argv[$i + 1]))) {
                 $options[$name] = true;
             } else {
                 $options[$name] = $argv[++$i];
