@@ -801,6 +801,41 @@ $pumpAnswered($carrier, $wire);
 $check($challenging && array_column($carrier->inbox(), 3) === ['hei uten open'] && $controlOf->getValue($carrier) === [],
     'a bound message whose open was lost opens its session, and the challenge is not sent again');
 
+// The field report of 25 November 2026, finding 10: a device asked twice, the first answer being slow, and got two
+// challenges. It opened its session with the first, and the second went again about every 2 seconds through the whole
+// challenge window of 480 seconds. An open ends every challenge to the partner, and so does a bound message whose open
+// was lost.
+foreach (['open', 'bound message'] as $opening) {
+    $clock = clone $fakeClock;
+    $stateA = new CarryState($carryA);
+    $wire = $fastByHand($clock);
+    $carrier = new Carrier(new CarryState($carryB), $wire, $sealedProfile, [$carryA->publicRaw()], $clock, static fn (): int => $T);
+    [$first, $ask] = $stateA->ask($carryB->publicRaw(), $sealedProfile, 0.0);
+    $hearByHand($wire, $ask);
+    $pumpAnswered($carrier, $wire);
+    $firstChallenge = Carry::reassemble($givenFrames($wire));
+    $given = $wire->written;
+    $clock->now += 1.0;
+    [, $askedAgain] = $stateA->ask($carryB->publicRaw(), $sealedProfile, 1.0);
+    $hearByHand($wire, $askedAgain);
+    $pumpAnswered($carrier, $wire);
+    $two = array_column($controlOf->getValue($carrier), 'kind') === ['challenge', 'challenge'] && $wire->written > $given;
+    [, $opens] = $stateA->deliver($firstChallenge, [$carryB->publicRaw()], $sealedProfile, 1.5, $T);
+    if ($opening === 'bound message') {
+        $opens = $stateA->send($carryB->publicRaw(), $first, 'hei', $sealedProfile);
+    }
+    $hearByHand($wire, $opens);
+    $pumpAnswered($carrier, $wire);
+    $ended = $controlOf->getValue($carrier) === [];
+    $given = $wire->written;
+    for ($i = 0; $i < 10; $i++) {
+        $clock->now += 2.1;
+        $pumpAnswered($carrier, $wire);
+    }
+    $check($two && $ended && $wire->written === $given,
+        'an open ends every challenge to that partner and none goes again, as a challenge ends every ask (' . $opening . ')');
+}
+
 // Two homes over the simulated radio, in this one process.
 $simRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'aamio-carry-sim-' . bin2hex(random_bytes(4));
 $freePort = static function (): int {
