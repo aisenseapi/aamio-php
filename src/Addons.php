@@ -136,7 +136,16 @@ final class Addons
         $path = self::enabledFile($home);
         $tmp = $path . '.' . getmypid() . '.tmp';
         $json = json_encode(['enabled' => $names], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
-        if (@file_put_contents($tmp, $json) === false) {
+        // Private from its first byte, as every other file in the home: written with the default mode, it was readable
+        // by every user of the machine until the next command made it private (found on Linux on 26 November 2026).
+        $mask = umask(0077);
+        try {
+            $written = @file_put_contents($tmp, $json);
+        } finally {
+            umask($mask);
+        }
+        @chmod($tmp, 0600);
+        if ($written === false) {
             throw new \RuntimeException($path . ' could not be written, so nothing changed.');
         }
         for ($attempt = 0; !@rename($tmp, $path); $attempt++) {

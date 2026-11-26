@@ -386,6 +386,13 @@ if (!class_exists(InstalledVersions::class, false)) {
         $why = json_encode([$results, $now]);
     }
     $check($ok, 'two changes at once both stand: each took its turn', $why);
+    // Written with the default mode, addons.json could be read by every user of the machine until the next command made
+    // it private (found on Linux on 26 November 2026). A file's mode is POSIX's; Windows keeps the home by its own rules.
+    if (PHP_OS_FAMILY !== 'Windows') {
+        clearstatcache();
+        $mode = fileperms($home . '/addons.json') & 0777;
+        $check($mode === 0600, 'the list of enabled add-ons is private from its first byte', sprintf('%o', $mode));
+    }
 
     $held = fopen($home . '/addons.json.lock', 'c+b');
     flock($held, LOCK_EX);
