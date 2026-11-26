@@ -393,6 +393,20 @@ if (!class_exists(InstalledVersions::class, false)) {
         $mode = fileperms($home . '/addons.json') & 0777;
         $check($mode === 0600, 'the list of enabled add-ons is private from its first byte', sprintf('%o', $mode));
     }
+    // The list that cannot be written: the place of this process's own file is taken by a folder. Nothing changes, the
+    // folder is not this runtime's to remove, and the umask the write narrowed is the one the process had.
+    $before = (string) file_get_contents($home . '/addons.json');
+    $taken = $home . '/addons.json.' . getmypid() . '.tmp';
+    mkdir($taken);
+    $maskBefore = umask();
+    $threw = $refused(static fn () => Addons::disable('other'));
+    $maskAfter = umask();
+    clearstatcache();
+    $check($threw !== null && str_contains($threw, 'could not be written, so nothing changed') && file_get_contents($home . '/addons.json') === $before && is_dir($taken),
+        'a list that cannot be written says so and changes nothing', (string) $threw);
+    $check($maskAfter === $maskBefore, 'and the umask is the one the process had', sprintf('%o then %o', $maskBefore, $maskAfter));
+    rmdir($taken);
+    Addons::reset();
 
     $held = fopen($home . '/addons.json.lock', 'c+b');
     flock($held, LOCK_EX);

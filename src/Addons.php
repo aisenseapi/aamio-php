@@ -144,10 +144,15 @@ final class Addons
         } finally {
             umask($mask);
         }
-        @chmod($tmp, 0600);
         if ($written === false) {
+            // No part of the list is left in the home, as in aamio-python and Node: a full disk wrote some of it, and
+            // until 26 November 2026 that part stayed beside the list.
+            if (is_file($tmp)) {
+                @unlink($tmp);
+            }
             throw new \RuntimeException($path . ' could not be written, so nothing changed.');
         }
+        @chmod($tmp, 0600);
         for ($attempt = 0; !@rename($tmp, $path); $attempt++) {
             // Windows: a reader holds the file for a moment.
             if ($attempt >= 19) {

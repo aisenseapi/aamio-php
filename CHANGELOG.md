@@ -19,7 +19,7 @@ not what moved in the source.
 - Once a partner opens a session, no more challenges go to it (finding 10 of the field report of 25 November).
 - The list of enabled add-ons, `addons.json`, is private from its first byte, as every other file in the home. It was
   written with the default mode, and on Linux and macOS every user of the machine could read it until the next command
-  made it private.
+  made it private. When it cannot be written, no part of it is left in the home.
 - The examples name the documentation address `00:00:5E:00:53:01` for Bluetooth instead of a real adapter's.
 
 ## 0.4.1 - 2026-11-19
