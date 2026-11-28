@@ -4,6 +4,11 @@ aisenseapi/aamio-qrcast, the add-on. Dates are the day the version was committed
 it is tagged on release, and the two are the same day. Every entry says what
 changed for somebody using it.
 
+## 0.3.0 - 2026-11-28
+
+- Nothing changed in this runtime. The number is the same in all three: the add-on for aamio-python now needs Python
+  3.11 and Pillow 13, and opens a picture only with the decoder its first bytes name.
+
 ## 0.2.1 - 2026-11-27
 
 - The examples, the help and the manifest name the documentation address `00:00:5E:00:53:01` for Bluetooth

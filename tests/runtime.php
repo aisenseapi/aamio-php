@@ -784,6 +784,22 @@ try {
     $threw = $error->getMessage();
 }
 $check(str_contains($threw, 'not a 64 character hex seed') && file_get_contents($homeE . '/key') === "not a seed\n", 'a key file that is not a key is never replaced by a new identity');
+// An empty key file, or one of blanks, was taken for none and written over
+// with a new identity (the health and security check of 28 November 2026).
+foreach (['', "\n", "   \r\n\t ", "\n\n"] as $i => $blank) {
+    $homeBlank = $root . DIRECTORY_SEPARATOR . 'blank-' . $i;
+    mkdir($homeBlank, 0700, true);
+    file_put_contents($homeBlank . '/key', $blank);
+    $threw = '';
+    $code = '';
+    try {
+        new Runtime($homeBlank, 'https://fake.test', null, true, $quiet);
+    } catch (\RuntimeException $error) {
+        $threw = $error->getMessage();
+        $code = $error instanceof \Aamio\Coded ? $error->errorCode() : get_class($error);
+    }
+    $check(str_contains($threw, 'key could not be read (it is empty)') && $code === 'key_unreadable' && file_get_contents($homeBlank . '/key') === $blank, 'a key file that is empty or blank is refused as key_unreadable and kept as it was, never replaced by a new identity (' . json_encode($blank) . ')', $code . ' ' . $threw);
+}
 
 echo "mcp\n";
 $server = new McpServer($a);

@@ -4,6 +4,13 @@ Dates are the day the version was committed; this project tags on release and
 the two are the same day. Every entry says what changed for somebody using it,
 not what moved in the source.
 
+## 0.4.3 - 2026-11-28
+
+- A key file that is empty, or holds only blanks, is refused with `key_unreadable` and kept as it is. It was taken for
+  no key file, and a new identity was written over it without a word: partners no longer knew the runtime, and what was
+  sealed to the old key could not be opened. Only a home with no key file gets a key, and a key another process made in
+  the meantime is used, never written over (the health and security check of 28 November).
+
 ## 0.4.2 - 2026-11-27
 
 - `aamio board answer` has help of its own and says where the answer goes. Before stopping another aamio that holds

@@ -736,34 +736,68 @@ final class Runtime
     private function loadOrCreateKeys(): Keys
     {
         $path = $this->path('key');
-        if (file_exists($path)) {
-            $text = @file_get_contents($path);
-            if ($text === false) {
-                throw new CodedRuntime('key_unreadable', $this->unreadable('key', 'it would not open'));
-            }
-            // Not past a mark, as the home's other files are: the key holds
-            // the seed and nothing else, in all three runtimes.
-            if (trim($text) !== '') {
-                // A new key over it would be a new identity, and the old one
-                // gone for good. Partners know this runtime by that key.
-                if (preg_match('/^[0-9a-f]{64}$/D', trim($text)) !== 1) {
-                    throw new CodedRuntime('key_unreadable', $this->unreadable('key', 'not a 64 character hex seed'));
-                }
 
-                return Keys::fromSeedHex(trim($text));
-            }
+        return file_exists($path) ? $this->keysFrom($path) : $this->createKeys($path);
+    }
+
+    /**
+     * The keys of the key file, or key_unreadable.
+     *
+     * A new key over a file that is there would be a new identity, and the old
+     * one gone for good: partners know this runtime by that key, and what was
+     * sealed to it opens with it alone. An empty file, or one of blanks, was
+     * taken for no file and written over without a word (the health and
+     * security check of 28 November 2026). Only a file that is not there gets a
+     * key now, as in the Node runtime.
+     */
+    private function keysFrom(string $path): Keys
+    {
+        $text = @file_get_contents($path);
+        if ($text === false) {
+            throw new CodedRuntime('key_unreadable', $this->unreadable('key', 'it would not open'));
         }
+        // Not past a mark, as the home's other files are: the key holds the
+        // seed and nothing else, in all three runtimes.
+        $seed = trim($text);
+        if ($seed === '') {
+            throw new CodedRuntime('key_unreadable', $this->unreadable('key', 'it is empty'));
+        }
+        if (preg_match('/^[0-9a-f]{64}$/D', $seed) !== 1) {
+            throw new CodedRuntime('key_unreadable', $this->unreadable('key', 'not a 64 character hex seed'));
+        }
+
+        return Keys::fromSeedHex($seed);
+    }
+
+    /** A key for a home that has none, in a file no other process made in the meantime. */
+    private function createKeys(string $path): Keys
+    {
         $keys = Keys::generate();
         $mask = umask(0077);
         try {
-            $written = @file_put_contents($path, bin2hex($keys->seed()) . "\n");
+            $handle = @fopen($path, 'xb');
         } finally {
             umask($mask);
         }
-        @chmod($path, 0600);
-        if ($written === false) {
+        if ($handle === false) {
+            clearstatcache(true, $path);
+            if (file_exists($path)) {
+                // Another process made it between the look and now: that key
+                // is this home's, if it is one, and it is never written over.
+                return $this->keysFrom($path);
+            }
             throw new CodedRuntime('not_saved', 'could not write ' . $path);
         }
+        $line = bin2hex($keys->seed()) . "\n";
+        // The key is the identity: it is on the disk before anything is signed
+        // with it, and a file this runtime made and could not fill goes again.
+        $whole = @fwrite($handle, $line) === strlen($line) && @fflush($handle) && (!function_exists('fsync') || @fsync($handle));
+        fclose($handle);
+        if (!$whole) {
+            @unlink($path);
+            throw new CodedRuntime('not_saved', 'could not write ' . $path);
+        }
+        @chmod($path, 0600);
 
         return $keys;
     }
